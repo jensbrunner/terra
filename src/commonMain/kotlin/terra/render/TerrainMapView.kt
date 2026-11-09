@@ -150,31 +150,33 @@ class TerrainMapView(
             val width = riverPixelWidth(hydrology.dischargeMmTilesPerDay(x, y))
 
             if (downstream >= 0) {
-                val nextX = downstream % world.width
-                val nextY = downstream / world.width
-                val deltaX = nextX - x
-                val deltaY = nextY - y
-                if (abs(deltaX) <= 1 && abs(deltaY) <= 1) {
-                    val downstreamIsLake = hydrology.isLakeCandidateTile(nextX, nextY)
-                    val downstreamIsWetLake = downstreamIsLake && hydrology.isLakeTileWet(nextX, nextY)
-                    val downstreamIsVisible = !hydrology.isLandTile(nextX, nextY) ||
-                        hydrology.isStreamTile(nextX, nextY) || downstreamIsWetLake
-                    if (downstreamIsVisible) {
-                        val endX = if (downstreamIsLake && !downstreamIsWetLake) {
-                            nextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
-                        } else {
-                            nextX * scale + scale / 2
+                if (!hydrology.isVirtualSpillLink(x, y)) {
+                    val nextX = downstream % world.width
+                    val nextY = downstream / world.width
+                    val deltaX = nextX - x
+                    val deltaY = nextY - y
+                    if (abs(deltaX) <= 1 && abs(deltaY) <= 1) {
+                        val downstreamIsLake = hydrology.isLakeCandidateTile(nextX, nextY)
+                        val downstreamIsWetLake = downstreamIsLake && hydrology.isLakeTileWet(nextX, nextY)
+                        val downstreamIsVisible = !hydrology.isLandTile(nextX, nextY) ||
+                            hydrology.isStreamTile(nextX, nextY) || downstreamIsWetLake
+                        if (downstreamIsVisible) {
+                            val endX = if (downstreamIsLake && !downstreamIsWetLake) {
+                                nextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
+                            } else {
+                                nextX * scale + scale / 2
+                            }
+                            val endY = if (downstreamIsLake && !downstreamIsWetLake) {
+                                nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
+                            } else {
+                                nextY * scale + scale / 2
+                            }
+                            drawRiverSegment(centerX, centerY, endX, endY, width)
+                        } else if (downstreamIsLake) {
+                            val edgeX = nextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
+                            val edgeY = nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
+                            drawRiverSegment(centerX, centerY, edgeX, edgeY, width)
                         }
-                        val endY = if (downstreamIsLake && !downstreamIsWetLake) {
-                            nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
-                        } else {
-                            nextY * scale + scale / 2
-                        }
-                        drawRiverSegment(centerX, centerY, endX, endY, width)
-                    } else if (downstreamIsLake) {
-                        val edgeX = nextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
-                        val edgeY = nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
-                        drawRiverSegment(centerX, centerY, edgeX, edgeY, width)
                     }
                 }
             } else {

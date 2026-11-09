@@ -129,6 +129,10 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
 
     fun downstreamTileIndex(x: Int, y: Int): Int = topology.downstreamIndex[index(x, y)]
 
+    /** Whether the internal drainage edge climbs terrain and should be omitted from the river art. */
+    fun isVirtualSpillLink(x: Int, y: Int): Boolean =
+        topology.isVirtualSpillLink(index(x, y))
+
     private fun routePendingPeriod(weather: WeatherSimulation) {
         val elapsedDays = pendingElapsedSeconds / SECONDS_PER_DAY
         routedMmTiles.fill(0.0)
@@ -321,7 +325,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         const val MIN_STREAM_CONTRIBUTING_AREA_TILES = 64
         /** A relative mm·tiles/day display cutoff, not an Earth-calibrated flow. */
         const val MIN_STREAM_DISCHARGE_MM_TILES_PER_DAY = 1.0
-        /** Game-scale depth conversion; normalized terrain is not treated as real altitude. */
+        /** Shared game-scale depth conversion for basin capacity and storage-derived water level. */
         const val VERTICAL_MILLIMETERS_PER_ELEVATION_UNIT = 1000.0
         private const val SECONDS_PER_DAY = 24.0 * 60.0 * 60.0
     }

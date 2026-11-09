@@ -25,9 +25,9 @@ Based on source review of `jensbrunner/terra`, commit `b30a7352bf31f27a087fd2008
 
 - [x] Step 1 — Correct rendering layer order and bootstrap updates
 - [x] Step 2 — Improve river-width scaling
-- [ ] Step 3 — Correct compound lake basin behavior
-- [ ] Step 4 — Handle nonphysical uphill river connections
-- [ ] Step 5 — Review lake storage scaling
+- [x] Step 3 — Correct compound lake basin behavior
+- [x] Step 4 — Handle nonphysical uphill river connections
+- [x] Step 5 — Review lake storage scaling
 - [ ] Optional Step 6 — Optimize drainage topology construction
 
 ---
@@ -284,5 +284,8 @@ Do not proceed to another step automatically.
 
 - Step 1 — DONE (2026-11-10): Moved water between terrain and weather overlays, suppressed surface-water rendering until bootstrap completes while continuing hydrology, redrew at completion/revision changes, and used `Bitmap32.fill` to clear. Files: `TerrainMapView.kt`, `AtlasScene.kt`, `HYDRO_UPDATE.md`. Notes: `updateWorld` no longer clears separately; both callers immediately redraw. `gradle compileKotlinJvm` succeeded after elevated-access retry; no tests.
 - Step 2 — DONE (2026-11-10): Replaced square-root width scaling with monotonic 1/2/3-pixel bands at 10 and 200 mm·tiles/day. Files: `TerrainMapView.kt`, `HYDRO_UPDATE.md`. Notes: Kept the actual current 3-pixel-per-tile bitmap resolution despite the plan's 6-pixel assumption; existing stream thresholds unchanged. `gradle compileKotlinJvm` succeeded after elevated-access retry; no tests.
+- Step 3 — DONE (2026-11-10): Split compound depressed regions into deterministic downhill catchments joined by a minimum-saddle spanning tree; qualifying catchments now receive separate reservoirs and pass water to parent saddles only at their own spill levels. Files: `HydrologyTopology.kt`, `HYDRO_UPDATE.md`. Notes: Catchments smaller than 4 tiles or shallower than 0.015 normalized elevation remain pass-through; compilation succeeded after elevated-access retry; no tests.
+- Step 4 — DONE (2026-11-10): Marked drainage links that climb original terrain as virtual spill links and omitted only those channel segments from rendering. Files: `HydrologyTopology.kt`, `HydrologySimulation.kt`, `TerrainMapView.kt`, `HYDRO_UPDATE.md`. Notes: Internal runoff routing and its acyclic graph are unchanged; no terrain or water quantities are modified. `gradle compileKotlinJvm` succeeded after elevated-access retry; no tests.
+- Step 5 — DONE (2026-11-10): Reviewed lake storage against basin size, drainage inputs, spill capacity, and the storage-derived surface calculation. Files: `HydrologySimulation.kt`, `HYDRO_UPDATE.md`. Notes: Left the 1000 mm-per-elevation-unit game-scale factor unchanged because the source provides no observed behavior or calibration data to justify a different value; capacity and water level already use the same factor, with storage/spill conservation unchanged. Review-only; compilation not run; no tests.
 
 **End of plan.**
