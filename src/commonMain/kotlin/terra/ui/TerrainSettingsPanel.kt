@@ -26,11 +26,10 @@ private data class SettingSlider(
 
 private enum class SettingsMenuKind {
     ELEVATION,
-    CLIMATE,
-    BIOMES
+    CLIMATE
 }
 
-/** Builds the three draggable terrain settings panels and reports edits to its owner. */
+/** Builds the draggable terrain settings panels and reports edits to its owner. */
 class TerrainSettingsPanel(
     parent: Container,
     private val font: SystemFont,
@@ -56,11 +55,10 @@ class TerrainSettingsPanel(
         val y = 78.0
         val width = 110.0
         val gap = 8.0
-        var x = WINDOW_WIDTH - (width * 3.0 + gap * 2.0) - 18.0
+        var x = WINDOW_WIDTH - (width * 2.0 + gap) - 18.0
         listOf(
             SettingsMenuKind.ELEVATION to "Elevation",
-            SettingsMenuKind.CLIMATE to "Climate",
-            SettingsMenuKind.BIOMES to "Biomes"
+            SettingsMenuKind.CLIMATE to "Climate"
         ).forEach { (kind, label) ->
             val background = parent.solidRect(width, 38.0, Colors["#223538"]).xy(x, y)
             val caption = parent.text(label, font = font, textSize = 15.0, color = Colors["#e3e8d7"])
@@ -77,12 +75,8 @@ class TerrainSettingsPanel(
             "Elevation and landform FBM", elevationSliders(), showBiomeSummary = true
         )
         createSettingsMenu(
-            parent, SettingsMenuKind.CLIMATE, "Initial climate settings", 505.0, 74.0, 430.0, 310.0,
-            "Temporary biome initialization", climateSliders()
-        )
-        createSettingsMenu(
-            parent, SettingsMenuKind.BIOMES, "Temperature and biome settings", 986.0, 126.0, 430.0, 480.0,
-            "Temperature, moisture, and biome rules", biomeSliders()
+            parent, SettingsMenuKind.CLIMATE, "Climate settings", 986.0, 126.0, 430.0, 310.0,
+            "Geographic temperature baseline", climateSliders()
         )
     }
 
@@ -104,19 +98,9 @@ class TerrainSettingsPanel(
     )
 
     private fun climateSliders() = listOf(
-        slider("Baseline rain for initial biomes (mm/year)", { it.baselineAnnualPrecipitationMm }, 0.0, 5_000.0, 50.0, 0) { s, v -> s.copy(baselineAnnualPrecipitationMm = v) }
-    )
-
-    private fun biomeSliders() = listOf(
         slider("Equator temperature (°C)", { it.equatorTemperatureC }, -10.0, 45.0, 0.5, 1) { s, v -> s.copy(equatorTemperatureC = v) },
         slider("Pole temperature drop (°C)", { it.poleTemperatureDropC }, 0.0, 65.0, 0.5, 1) { s, v -> s.copy(poleTemperatureDropC = v) },
-        slider("Elevation cooling (°C/unit)", { it.elevationCoolingCOPerUnit }, 0.0, 80.0, 0.5, 1) { s, v -> s.copy(elevationCoolingCOPerUnit = v) },
-        slider("Base evaporation (mm/year)", { it.basePotentialEvaporationMm }, 50.0, 1_000.0, 10.0, 0) { s, v -> s.copy(basePotentialEvaporationMm = v) },
-        slider("Evaporation per degree", { it.potentialEvaporationPerDegreeMm }, 0.0, 100.0, 1.0, 0) { s, v -> s.copy(potentialEvaporationPerDegreeMm = v) },
-        slider("Desert moisture cutoff", { it.desertMoistureThreshold }, 0.0, 1.0, 0.01, 2) { s, v -> s.copy(desertMoistureThreshold = v) },
-        slider("Woods moisture cutoff", { it.woodsMoistureThreshold }, 0.0, 1.0, 0.01, 2) { s, v -> s.copy(woodsMoistureThreshold = v) },
-        slider("Woods minimum temperature (°C)", { it.woodsMinTemperatureC }, -20.0, 30.0, 0.5, 1) { s, v -> s.copy(woodsMinTemperatureC = v) },
-        slider("Woods maximum temperature (°C)", { it.woodsMaxTemperatureC }, -10.0, 50.0, 0.5, 1) { s, v -> s.copy(woodsMaxTemperatureC = v) }
+        slider("Elevation cooling (°C/unit)", { it.elevationCoolingCOPerUnit }, 0.0, 80.0, 0.5, 1) { s, v -> s.copy(elevationCoolingCOPerUnit = v) }
     )
 
     private fun slider(

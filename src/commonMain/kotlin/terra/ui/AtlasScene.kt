@@ -19,6 +19,8 @@ import terra.*
 import terra.render.TerrainMapView
 import terra.simulation.SimulationSpeed
 import terra.weather.WeatherLayer
+import terra.weather.ClimateBootstrap
+import terra.weather.ClimateSnapshot
 import terra.weather.WeatherSimulation
 import terra.world.Terrain
 import terra.world.TerrainGenerationSettings
@@ -29,6 +31,9 @@ class AtlasScene : Scene() {
     private var terrainSettings = TerrainGenerationSettings()
     private var world = World(31742, MAP_WIDTH_TILES, MAP_HEIGHT_TILES, terrainSettings)
     private var weather = WeatherSimulation(world)
+    private var climateBootstrap = ClimateBootstrap(weather)
+    val climateSnapshot: ClimateSnapshot?
+        get() = climateBootstrap.snapshot
     private lateinit var mapLayer: Container
     private lateinit var mapViewport: FixedSizeContainer
     private lateinit var mapView: TerrainMapView
@@ -37,14 +42,12 @@ class AtlasScene : Scene() {
     private val layerButtons = mutableMapOf<WeatherLayer, Pair<SolidRect, Text>>()
     private val speedButtons = mutableMapOf<SimulationSpeed, Pair<SolidRect, Text>>()
     private lateinit var pauseLabel: Text
-    private lateinit var vortexButton: Pair<SolidRect, Text>
     private lateinit var selectionLabel: Text
     private lateinit var frameTimeLabel: Text
     private val activeOverlays = mutableSetOf<WeatherLayer>(WeatherLayer.CLOUDS)
     private var selectedTileX: Int? = null
     private var selectedTileY: Int? = null
     private var paused = false
-    private var regionalVorticesEnabled = true
     private var simulationSpeed = SimulationSpeed.REALTIME
     private var smoothedFrameTimeSeconds = 1.0 / 60.0
     private var frameTimeDisplayElapsed = 0.0
@@ -78,13 +81,22 @@ class AtlasScene : Scene() {
             WeatherLayer.entries.forEach { layer ->
                 justDown(Key.valueOf("N${layer.key}")) { toggleLayer(layer) }
             }
-            justDown(Key.V) { toggleRegionalVortices() }
             justDown(Key.SPACE) { togglePause() }
         }
 
         mapViewport.addUpdater { dt ->
             updateFrameTimeCounter(dt.seconds)
-            if (!paused && dt.seconds > 0.0) {
+            if (!climateBootstrap.isComplete) {
+                climateBootstrap.advanceBatch()
+                selectionLabel.text = climateBootstrap.status
+                if (climateBootstrap.isComplete) {
+                    world.applyClimateBiomes(climateSnapshot!!)
+                    mapView.updateWorld(world)
+                    settingsPanel.updateBiomeSummary(world.landBiomeSummary())
+                    mapView.updateOverlays(weather, activeOverlays)
+                    updateSelectionInfo()
+                }
+            } else if (!paused && dt.seconds > 0.0) {
                 weatherTickElapsedRealSeconds += dt.seconds
                 overlayRefreshElapsedRealSeconds += dt.seconds
                 pendingWeatherSimulationSeconds += dt.seconds * simulationSpeed.simulatedSecondsPerRealSecond
@@ -153,13 +165,12 @@ class AtlasScene : Scene() {
         terrainSettings = settings
         world = World(world.seed, world.width, world.height, settings)
         weather = WeatherSimulation(world)
-        weather.setRegionalVorticesEnabled(regionalVorticesEnabled)
+        climateBootstrap = ClimateBootstrap(weather)
         weatherTickElapsedRealSeconds = 0.0
         overlayRefreshElapsedRealSeconds = 0.0
         pendingWeatherSimulationSeconds = 0.0
         mapView.updateWorld(world)
         mapView.updateOverlays(weather, activeOverlays)
-        refreshVorticesButton()
         updateSelectionInfo()
         settingsPanel.updateBiomeSummary(world.landBiomeSummary())
     }
@@ -177,6 +188,10 @@ class AtlasScene : Scene() {
     }
 
     private fun updateSelectionInfo() {
+        if (!climateBootstrap.isComplete) {
+            selectionLabel.text = climateBootstrap.status
+            return
+        }
         val x = selectedTileX ?: return
         val y = selectedTileY ?: return
         val cell = world[x, y]
@@ -207,7 +222,7 @@ class AtlasScene : Scene() {
     }
 
     private fun SContainer.drawControls() {
-        solidRect(WINDOW_WIDTH - 12.0, 56.0, Colors["#101b20"]).xy(12.0, 12.0)
+        solidRect(WINDOW_WIDTH - 24.0, 56.0, Colors["#101b20"]).xy(12.0, 12.0)
         val labels = mapOf(
             WeatherLayer.HUMIDITY to ("Humidity" to 78.0),
             WeatherLayer.CLOUDS to ("Clouds" to 70.0),
@@ -223,22 +238,19 @@ class AtlasScene : Scene() {
         labels.forEach { (layer, labelAndWidth) ->
             val (label, width) = labelAndWidth
             layerButtons[layer] = controlButton(label, x, width) { toggleLayer(layer) }
-            x += width + 3.0
+            x += width + 5.0
         }
-        x += 2.0
-        vortexButton = controlButton("Vortices", x, 78.0) { toggleRegionalVortices() }
-        x += 81.0
-        solidRect(1, 30, Colors["#52666a"]).xy(x, 25)
         x += 5.0
+        solidRect(1, 30, Colors["#52666a"]).xy(x, 25)
+        x += 12.0
         pauseLabel = controlButton("Pause", x, 72.0) { togglePause() }.second
-        x += 72.0
+        x += 82.0
         SimulationSpeed.entries.forEach { speed ->
             val width = speed.label.length * 8.0 + 20.0
             speedButtons[speed] = controlButton(speed.label, x, width) { selectSpeed(speed) }
-            x += width + 1.0
+            x += width + 5.0
         }
         refreshLayerButtons()
-        refreshVorticesButton()
         refreshSpeedButtons()
     }
 
@@ -260,18 +272,6 @@ class AtlasScene : Scene() {
     private fun selectSpeed(speed: SimulationSpeed) {
         simulationSpeed = speed
         refreshSpeedButtons()
-    }
-
-    private fun toggleRegionalVortices() {
-        regionalVorticesEnabled = !regionalVorticesEnabled
-        weather.setRegionalVorticesEnabled(regionalVorticesEnabled)
-        refreshVorticesButton()
-        mapView.updateOverlays(weather, activeOverlays)
-    }
-
-    private fun refreshVorticesButton() {
-        vortexButton.first.color = Colors[if (regionalVorticesEnabled) "#e5bd72" else "#223538"]
-        vortexButton.second.color = Colors[if (regionalVorticesEnabled) "#111a1d" else "#e3e8d7"]
     }
 
     private fun refreshSpeedButtons() {

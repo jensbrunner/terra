@@ -6,6 +6,7 @@ import kotlin.math.max
 import kotlin.random.Random
 import terra.MAP_HEIGHT_TILES
 import terra.MAP_WIDTH_TILES
+import terra.weather.ClimateSnapshot
 
 class World(
     val seed: Int,
@@ -15,8 +16,9 @@ class World(
 ) {
     private val noiseSalt = Random(seed).nextInt()
     private val cells = Array(width * height) {
-        Cell(0.0, 0.0, 0.0, Terrain.OCEAN)
+        Cell(0.0, 0.0, Terrain.OCEAN)
     }
+    private var climateBiomesApplied = false
     operator fun get(x: Int, y: Int): Cell = cells[y * width + x]
 
     init {
@@ -27,16 +29,37 @@ class World(
         val salt = noiseSalt
         val elevation = generateElevation(salt)
         val temperature = generateTemperature(elevation)
-        val moisture = DoubleArray(width * height) { i ->
-            moistureAvailability(settings.baselineAnnualPrecipitationMm, temperature[i])
-        }
 
         for (i in cells.indices) {
             val e = elevation[i]
             val temp = temperature[i]
-            val terrain = classifyTerrain(e, temp, moisture[i])
-            cells[i] = Cell(e, temp, moisture[i], terrain)
+            val terrain = classifyPhysicalTerrain(e)
+            cells[i] = Cell(e, temp, terrain)
         }
+    }
+
+    /** Apply climate-derived land cover once, preserving the generated ocean and mountain cells. */
+    fun applyClimateBiomes(climate: ClimateSnapshot) {
+        check(!climateBiomesApplied) { "Climate biomes have already been applied" }
+        require(climate.width == width && climate.height == height) {
+            "Climate snapshot dimensions must match the world"
+        }
+
+        for (i in cells.indices) {
+            val cell = cells[i]
+            if (cell.terrain == Terrain.OCEAN || cell.terrain == Terrain.MOUNTAINS) continue
+            val x = i % width
+            val y = i / width
+            val terrain = ClimateBiomeClassifier.classifyBiome(
+                physicalTerrain = cell.terrain,
+                elevation = cell.elevation,
+                settings = settings,
+                annualPrecipitationMm = climate.annualPrecipitationMmPerYear(x, y),
+                meanAirTemperatureC = climate.meanAirTemperatureC(x, y)
+            )
+            cells[i] = cell.copy(terrain = terrain)
+        }
+        climateBiomesApplied = true
     }
 
     private fun generateElevation(salt: Int): DoubleArray {
@@ -77,21 +100,9 @@ class World(
         return temperature
     }
 
-    private fun moistureAvailability(annualPrecipitationMm: Double, meanTemperatureC: Double): Double {
-        // A compact potential-evaporation proxy: warmer climates lose more water to evaporation.
-        val potentialEvaporationMm = settings.basePotentialEvaporationMm +
-            max(0.0, meanTemperatureC) * settings.potentialEvaporationPerDegreeMm
-        // A bounded aridity index preserves useful differences in wet climates instead of
-        // clipping every region above a precipitation-to-evaporation ratio of 1.5.
-        return annualPrecipitationMm / (annualPrecipitationMm + potentialEvaporationMm)
-    }
-
-    private fun classifyTerrain(elevation: Double, temperatureC: Double, moisture: Double): Terrain = when {
+    private fun classifyPhysicalTerrain(elevation: Double): Terrain = when {
         elevation < settings.seaLevel -> Terrain.OCEAN
         elevation > settings.mountainThreshold -> Terrain.MOUNTAINS
-        moisture < settings.desertMoistureThreshold -> Terrain.DESERT
-        moisture > settings.woodsMoistureThreshold &&
-            temperatureC in settings.woodsMinTemperatureC..settings.woodsMaxTemperatureC -> Terrain.WOODS
         else -> Terrain.PLAINS
     }
 
@@ -103,7 +114,8 @@ class World(
             (cells.count { it.terrain == terrain } * 100 / landCount)
 
         return "Plains ${percent(Terrain.PLAINS)}% · Woods ${percent(Terrain.WOODS)}%\n" +
-            "Desert ${percent(Terrain.DESERT)}% · Mountains ${percent(Terrain.MOUNTAINS)}%"
+            "Desert ${percent(Terrain.DESERT)}% · Tundra ${percent(Terrain.TUNDRA)}% · " +
+            "Mountains ${percent(Terrain.MOUNTAINS)}%"
     }
 
     private fun index(x: Int, y: Int) = y * width + x

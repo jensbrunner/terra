@@ -1,243 +1,228 @@
-# Terra — Climate-Driven Terrain & Biomes (`PLAN.md`)
+# Terra — Emergent Hydrology (Rivers, Lakes & Runoff)
 
-**Status:** Ready for implementation. All required steps start unchecked.  
-**Goal:** Replace the legacy, uniform-precipitation moisture heuristic with terrain/biome choices driven by Terra's *actual simulated long-term climate*. Make the resulting world visibly reflect rainfall, rain shadows, prevailing winds, and temperature without turning the game into a full ecology simulator.  
-**Primary areas:** `src/commonMain/kotlin/terra/world/World.kt`, `src/commonMain/kotlin/terra/weather/WeatherSimulation.kt`, and the world-generation / scene initialization coordinator.  
-**Other areas only when necessary:** terrain/biome type definitions, tile renderer/cache, existing 64×64 tile assets and asset registration.  
-**Source of truth:** The implementation agent has local code access and MUST inspect it. The author of this plan does not; type names, initialization order, asset paths, and existing parameter values are intentionally not invented.
+**Status:** Ready for sequential implementation; all steps initially unchecked.  
+**Purpose:** Make streams, rivers and lakes emerge from Terra's *actual terrain and simulated water cycle*, with naturally varying discharge. Do this cheaply and deterministically, without fluid dynamics.  
+**Basis:** `HYDROLOGY_REPORT.md` (local-code inspection, 2026-11-09) and the existing Kotlin/KorGE architecture. **Inspect the actual current code before each step.**  
+**Primary files:** `src/commonMain/kotlin/terra/weather/WeatherSimulation.kt`, `src/commonMain/kotlin/terra/world/World.kt`, `src/commonMain/kotlin/terra/world/Terrain.kt`, `src/commonMain/kotlin/terra/render/TerrainMapView.kt`, `src/commonMain/kotlin/terra/ui/AtlasScene.kt`. New, narrowly scoped `terra/hydrology/` files are appropriate.  
+**World:** Typically 283 × 212 tiles, row-major `y * width + x`, normalized elevation `[0,1]`; world geometry/rendering are **bounded**, although atmospheric transport wraps east–west.  
+**Authoring constraint:** No source code was available to the plan author. Exact method names, APIs and capabilities beyond the inspected report are not guaranteed.
 
-## 0. Non-negotiable agent execution contract
+## 0. Mandatory execution contract for the coding agent
 
-1. **Implement exactly ONE unchecked required step per invocation, in numerical order. Then STOP.** On the next invocation, continue with the first unchecked required step. Do not bundle steps. Optional steps need explicit user approval.
-2. First inspect the current Kotlin source relevant to that step. Previous weather and wind upgrades have reportedly been implemented; **adapt to the current code, not the original handoff**. If an essential assumption conflicts with the implementation, report it and STOP rather than silently redesigning the system.
-3. **NO TESTS:** Do not write, modify, run, or propose unit/integration/property/snapshot tests, test scripts, or custom validation harnesses. **NO PROFILING:** Do not add timers, benchmarks, timing probes, or profiling instrumentation. A normal non-test compilation is permitted if convenient; it must not invoke tests. Source review and normal user observation are sufficient.
-4. Do not alter existing wind patterns, advection, saturation, evaporation, condensation, rainout, soil drainage, time stepping, weather visualizations, or climate-rate reporting unless the selected step cannot work without a *minimal* compatibility change. Preserve the currently working weather simulation.
-5. Separate **immutable geography** (land versus ocean, elevation, coastline, physical rock/mountain constraints) from **climate-derived ecological cover** (desert, grass, forest, tundra, etc.). Climate must not turn an ocean into land, move elevation, or delete rivers, roads, placed objects, or gameplay structures.
-6. A biome describes **long-term climate**, not the current rain, clouds, humidity, instantaneous temperature, or capped soil water. **Do not** use `relativeHumidity`, `cloudCover`, `soilWaterMm/250`, or the 30-day smoothed rain-rate value as the sole biome determinant.
-7. All climate measurements use **simulated time**, are independent of render frequency and game-speed settings, and use rainfall **depth** (mm), not a single displayed mm/h sample. No wall-clock randomness. Reuse tile arrays and existing utilities; do not allocate per-tile objects in weather hot loops.
-8. Any new constants are named, centralized, and documented as **game-tuning defaults**, not physically calibrated Earth values. Avoid introducing dependencies, complex Koppen classification, seasons, a groundwater model, or vegetation-growth simulation.
-9. After the one step: mark only its checkbox `[x]`, append a concise Implementation Log entry, summarize changed files and source-review caveats, and STOP. If blocked, leave unchecked. Do not claim runtime behavior has been observed or validated.
-10. **Asset permission:** The user allows generating original **64×64 pixel terrain tiles** consistent with existing art. Create new art only in the designated asset step and only when a visually distinct climate zone cannot be represented convincingly with current assets. Do not bulk-generate biome variants or replace established artwork.
+1. **Implement exactly ONE unchecked required step per invocation, in order, then STOP.** On future invocations, resume at the first unchecked required step. Do not silently implement optional steps. A step includes only the files and functionality needed for that step.
+2. Before editing, inspect the real Kotlin source and any existing hydrology code. **The checked-in code takes precedence over this report.** If the design materially conflicts with actual state, report the conflict and STOP, leaving the step unchecked; do not invent a replacement architecture.
+3. **NO TESTS, NO PROFILING:** Do not write, modify, run or propose unit/integration/property/snapshot tests, test scripts, test fixtures, benchmarks, telemetry probes, profilers, performance measurements or validation harnesses. Do not add a temporary debug runner. Ordinary source review and, if appropriate, a normal *non-test* compilation are allowed. Do not claim anything was tested.
+4. Keep implementation minimal and efficient: primitive arrays, reusable scratch storage, deterministic iteration/order, no per-tile/per-tick object churn, no new dependencies, no unrelated refactors, no backups or redundant documents.
+5. Preserve existing weather physics, wind, precipitation, climate, terrain generation, 64×64 artwork, overlays and UI unless the selected step explicitly needs a small compatibility change. Do not change soil drainage constants, rain thresholds, or wind to make rivers more visually dramatic.
+6. All physics and accumulation use **simulated time**, not real wall-clock time or frame count. The hydrology state must not depend on overlay refresh cadence. Never make an unbounded loop just to catch up with accelerated time.
+7. Do not synthesize river water from cloud cover, humidity, biome color, or rainfall twice. **Track only water actually transferred out of weather's represented stores**, plus correctly transferred direct precipitation onto actual lake water where implemented.
+8. Rivers/lakes are **surface-water state**, not new `Terrain` enum biomes. Avoid mutating immutable `Cell`, elevation, ocean placement, or static vegetation just to show water.
+9. If generating original artwork later, use **64×64 pixels at Terra's existing native pixel density** and match its existing terrain style. Larger imagery spans native tiles; never upscale a standalone 64×64 tile to masquerade as a larger geographical feature. Do not generate art unless needed for the rendering step.
+10. At step completion: check off **only** that step, append **one concise Implementation Log** entry (changed files, key decisions, known limitations), report completion, and STOP. Leave the step unchecked if blocked. Do not claim visual verification or runtime behavior you have not observed.
 
-## 1. Why this change is needed
+### Progress
 
-Current/previous architecture described:
+- [x] **Step 1 — Expose true soil-to-surface water fluxes** (water accounting)
+- [x] **Step 2 — Precompute a deterministic, acyclic drainage graph** (geography)
+- [ ] **Step 3 — Route runoff and compute time-varying river discharge** (dynamics)
+- [ ] **Step 4 — Add real lake-basin storage and spillover** (dynamic lakes)
+- [ ] **Step 5 — Render connected rivers and lakes** (graphics)
+- [ ] **Step 6 — Wire lifecycle, controls and inspection** (integration)
+- [ ] **Optional Step 7 — Add derived floodplain inundation visuals** (**approval required**)
 
-- World size: `283 × 212` tiles (~60,000 cells). Elevation is generated with fractal noise; baseline temperature is affected by latitude and altitude.
-- `World.kt` originally classified terrain **once**, using a legacy static moisture index based on `baselineAnnualPrecipitationMm` (default `1000`) and a temperature-driven evaporation proxy. That is **not actual precipitation** from the simulated weather model.
-- `WeatherSimulation` tracks vapor, clouds, soil moisture, air/surface temperatures, and precipitation. Previous changes reportedly improved rainfall/drainage, and the wind now includes latitude bands plus evolving 2D transport.
-- Consequently, the weather can make a mountain windward side wetter than its leeward side while the *biome tiles still ignore that climate*. A one-size annual precipitation estimate cannot reveal emergent rain shadows or ocean-to-land moisture gradients.
+## 1. Ground truth and important corrections
 
-**Important distinction:** The new system should infer biome from long-term *measured simulated* precipitation and temperature. Its first goal is climate-informed **world generation**; slow biome evolution during play is explicitly optional (Step 6). Weather continues to vary rapidly even if the underlying biome remains stable.
+The latest supplied code investigation reports:
 
-## 2. Target architecture
+- `WeatherSimulation` **already produces rain in mm** and uses a **3-hour maximum internal weather substep**. `rainMmThisUpdate` is a depth aggregated over the outer `weather.step(...)`; `precipitationMmPerHour` is the rate averaged over that outer interval; `peakSubstepPrecipitationMmPerHour` is a separate peak indicator.
+- Land soil starts at 125 mm, is capped at 250 mm, and removes excess above 120 mm by a five-day exponential drainage response. **`drainedMm` currently disappears**, and soil-capacity overflow also disappears. Both are valid inputs to hydrology *when intercepted at their point of calculation*.
+- Weather stores mm **depth per tile**, not m³. **A tile has no defined physical area**; elevation is normalized, not meters. Do not invent SI volumetric discharges or physical channel widths.
+- World `Cell` elevation and terrain are immutable. Ocean is `Terrain.OCEAN` when elevation is strictly below sea level, *not* necessarily a sea-connected component. Terrain geometry does not wrap; atmospheric winds wrapping X must **not** be copied for rivers.
+- There are no preexisting river/lake assets or graph structures. Terrain uses 64×64 art scaled to one world coordinate per map tile. Existing diagnostic overlays are 1 pixel per map tile.
+- **Source discrepancy to respect:** despite an earlier climate-driven-biomes plan reportedly being implemented, the 2026-11-09 code investigation still found exactly `PLAINS`, `MOUNTAINS`, `WOODS`, `DESERT`, `OCEAN`, with terrain classified once from the legacy moisture proxy. Do not presume the biome upgrade exists. Hydrology must work regardless, and should not become coupled to biome classification.
 
-```text
-Elevation / latitude / land mask (geographic inputs)
-                    |
-                    v
-     Temporary climate-neutral land cover
-                    |
-                    v
-          Existing WeatherSimulation
-       (same real dynamics + 2D wind)
-                    |
-          equilibrate, then observe
-                    |
-                    v
-    Climate snapshot for each land tile
-       - mean air temperature (°C)
-       - annualized precipitation (mm/year)
-       - optional simple dryness ratio
-                    |
-                    v
-      Deterministic biome classifier
-                    |
-                    v
-      Existing terrain tile types + art
-       (add ≤3 types only if needed)
+### Non-negotiable hydrological separation
+
+```
+Immutable elevation and ocean / map edge outlets
+               |
+               v
+    One-time drainage / basin topology
+               |                         WeatherSimulation
+               |                     (rain -> soil -> drainage)
+               |                                 |
+               |                  explicit drainage + overflow mm
+               |                                 |
+               +-------------> HydrologySimulation <---+
+                                      |
+                           rivers, basin storage,
+                            outlet losses, water levels
+                                      |
+                             water visual layer
 ```
 
-**No initialization cycle:** Weather needs physical land/ocean/elevation and perhaps a provisional surface classification; final biome needs climate from weather. Keep a **two-phase initialization** instead of making `World` construction recursively require an already-classified biome or constructing multiple worlds.
+- The **network** is static unless the world is regenerated.
+- The **water quantity** is dynamic and derives from weather.
+- A **lake** stores inflow and only overflows its spillway after storage reaches capacity; its geometry is constrained by elevation.
+- Flooding, if eventually added, should be derived from a real excess-flow condition, not a random terrain-color event.
 
-### Climate data and units
+## 2. Shared units and accounting contract
 
-For each tile during a climate sampling interval:
+Use these definitions consistently across steps:
 
-```text
-rainDepthMm       += rainDepthProducedThisInternalStepMm
-meanTempIntegral  += airTemperatureC * dtSimulatedDays
-observedDays      += dtSimulatedDays   // one global elapsed-days value is enough
+| Quantity | Meaning |
+|---|---|
+| `drainageMmThisUpdate[i]` | mm of soil water *removed* by the existing 120 mm field-capacity drainage during the latest outer `WeatherSimulation.step(...)`. |
+| `overflowMmThisUpdate[i]` | mm of rainfall/soil water above the existing 250 mm storage cap that previously vanished at the clamp. |
+| `runoffMmThisUpdate[i]` | `drainage + overflow` if exposed as a convenience getter; **never** add gross rain again. |
+| `inputMmTiles[i]` | Per-routing-period water quantity proportional to volume, assuming equal-area tiles: runoff depth (mm) × one tile. |
+| `routedMmTiles[i]` | Total runoff amount that passes this tile during the routing interval, including upstream contributions. |
+| `dischargeMmTilesPerDay[i]` | `routedMmTiles / elapsedSimulatedDays`; a **relative discharge proxy**, not m³/s. |
+| `lakeStorageMmTiles` | Persistent water quantity in a basin, in the same tile-mm-equivalent volume units. |
+| `outletMmTiles` | Routed water that leaves the model at an ocean or approved outer-map outlet. |
 
-meanAirTempC            = meanTempIntegral / observedDays
-annualPrecipitationMm   = rainDepthMm * 365.0 / observedDays
+**Conservation rule for soil:** For each land tile and substep, write the balance *before* applying any clamp:
+
+```
+rawSoil = max(0, oldSoil - actualSoilEvapMm + rainToSoilMm)
+overflowMm = max(0, rawSoil - 250)
+soilAfterCapacity = min(rawSoil, 250)
+drainageMm = min(soilAfterCapacity, max(0, soilAfterCapacity - 120) * drainageFraction)
+newSoil = soilAfterCapacity - drainageMm
 ```
 
-- Prefer the simulation's **already computed rain depth for each internal substep**. If only rate is available, convert correctly: `rainDepthMm = precipitationMmPerHour * dtHours` *for the matching substep*. Never sum the externally displayed average mm/h values as if they were depths.
-- `annualPrecipitationMm` is an annualized *rate from a sample*, not a claim that Terra simulates four distinct seasons. Terra currently has no seasons. Do not require calendar-year boundaries.
-- Sample air temperature (not just the immutable static baseline), so transported air and cloud shading can influence climate. If code only exposes a different consistent temperature field, document that choice.
-- Only **land** needs persistent biome classification, but ocean is required in the weather run to supply moisture. Ocean stays ocean regardless of recorded climate.
-- Use per-tile primitive arrays and one global count of `observedDays`; expose a lightweight immutable/read-only snapshot or accessor only when the next step requires it. Do not introduce a large object graph.
+The existing actual code may perform equivalent operations in a different order; preserve its physically intended ordering and amounts. **Never create extra runoff by retaining overflow and also storing it in soil.** Do not count rain in the hydrology pipeline and count its later drainage again. Ignore ocean soil routing entirely; ocean receives routed water as an outlet.
 
-### Biome policy: keep the ecological model small
+**Water budgets:** Weather's full world budget already has implicit unlimited ocean water and omitted ocean storage. Hydrology nevertheless needs explicit bookkeeping for its *own* inputs, stored lake water, lake evaporation where implemented, and outlet exports. No negative inventories. Numerical tiny residuals may be clamped consistently and accounted for.
 
-The classifier should combine **mean temperature** with **long-term precipitation relative to temperature-dependent drying potential**. Rainfall alone makes cold and hot land with equal rain look too similar. Use a cheap *potential* evaporation estimate, NOT actual soil-limited evaporation (which would create circular dry-soil feedback).
+## 3. Required steps (one per agent invocation)
 
-Suggested initial proxy; these are **tuning defaults**, not validated terrestrial climatology:
+### Step 1 — Expose true soil-to-surface water fluxes
 
-```text
-potentialEvaporationMmYear = clamp(350 + 45 * max(meanAirTempC, 0), 250, 1800)
-aridityRatio = annualPrecipitationMm / max(potentialEvaporationMmYear, 1)
+**Goal:** Export the **exact water amounts already leaving soil**, without altering weather or land evaporation/precipitation dynamics.
 
-very dry   : ratio < 0.20
-semi-arid  : 0.20 .. < 0.55
-moderate   : 0.55 .. < 1.10
-humid      : >= 1.10
+1. Inspect the current soil update around `WeatherSimulation.advanceSubstep()` and the outer `step(seconds)` reset/aggregation logic.
+2. Add reusable per-tile `DoubleArray` accumulators for drainage and overflow **across all internal substeps** of the current outer call. Reset at the beginning of `weather.step`, not at each substep. Keep ocean entries zero.
+3. At the precise soil-capacity operation, capture the over-capacity amount *before* it is clamped. Capture the existing `drainedMm` immediately before it is removed from soil. These amounts must exactly match existing water removal; do not change `250`, `120`, or the five-day response.
+4. Expose simple read-only scalar accessors or equivalent allocation-free indexed access for the hydrology subsystem, using the existing accessor conventions. Optional combined `runoffMmThisUpdate` may be computed from drainage + overflow but must not double-add them.
+5. Document in code whether each quantity is **mm per outer call**, not mm/h. Ensure last outer call's values do not survive into the next.
 
-thermal zones (approximate):
-very cold  : T < -6°C
-cool       : -6°C .. < 6°C
-temperate  : 6°C .. < 18°C
-warm       : T >= 18°C
-```
+**Completion criteria (source inspection only):** Any land water lost at the two previously discarded paths appears in exactly one recorded quantity, and weather still performs the same updates with no extra water injected into atmosphere/soil. No hydrology routing or display work in this step.
 
-Use a **small, explicit classification table** rather than continuous probability/noise determining the biome. An illustrative conceptual mapping (choose existing enum values by inspecting the project):
+### Step 2 — Build a bounded drainage graph and identify depressions
 
-| Thermal zone | Very dry | Semi-arid | Moderate | Humid |
-|---|---|---|---|---|
-| Very cold | bare rock / cold desert | tundra | tundra | snowy/tundra (ice only if persistently cold) |
-| Cool | cold barren | sparse grass/tundra | boreal woodland | boreal forest |
-| Temperate | desert/scrub | steppe | grassland/woodland | forest |
-| Warm | desert | savanna/steppe | grassland/woodland | warm forest / rainforest |
+**Goal:** Precompute where water *could* flow, before considering how much water exists.
 
-Use this as a **design guide**, not a mandate to invent 16 terrain classes. Reuse the closest available art/classes first. Prioritize distinct visible **desert ↔ steppe/grassland ↔ forest**, and **cold tundra/snow** where those regions exist. Treat physical mountain/rock constraints as an overriding layer rather than classifying high cliff faces as trees merely because wet. Avoid making snow depend on a single rainy/cold frame; it is separate from actual transient snow cover (not modeled here).
+1. Add a compact geography object, e.g. `HydrologyTopology(world)`, built once per generated world. Store `downstreamIndex: IntArray` (`-1` = terminal outlet), a **verified acyclic processing order**, a filled/spill elevation view or equivalent, and minimal lake-candidate metadata. Use row-major indexing and **8-neighbor** connectivity initially.
+2. Use a deterministic **Priority-Flood-style** traversal from existing `Terrain.OCEAN` tiles and the **bounded map perimeter** as valid terminal sinks. This handles arbitrary procedural sinks and flats. No X wrap, no Y wrap, and no diagonal reference beyond array bounds.
+3. Record the first valid downstream predecessor during flood traversal (or an equivalent deterministic drainage-parent graph). Make actual downhill routes preferred where possible; if a pit requires a virtual spill route, preserve that fact as *depression/lake metadata*. Do **not** modify `World` elevation to fake a trench or claim an uphill dry channel is physically flowing.
+4. Stable ties must be resolved by a documented rule, e.g. priority/effective elevation followed by linear tile index. Derive processing order from the actual directed graph, not arbitrary row order; every nonterminal link must point to a node processed later in downstream routing.
+5. Distinguish **small noise pits** from **meaningful lake-capable depressions**. For candidate depressions retain at minimum a set of basin tile indices/ID, spill elevation, a unique exit connection, and a deterministic set of contributing land cells or entry links. Use a small, named minimum-size/depth policy rather than calling every noise pixel a lake.
+6. A candidate lake outlet should follow the true lowest escape/spill route; interior depression cells need not be permanently underwater. At this stage only record *potential* basin geometry; **do not fabricate filled lakes or change existing terrain tiles**.
+7. When no ocean exists, perimeter outlets still guarantee termination. When an ocean tile is disconnected from the ocean elsewhere, treat it as ocean as long as `World` does; do not silently reclassify it.
 
-Avoid forcibly normalizing precipitation by the whole world's min/max to manufacture every biome. That would make an entirely wet world look as if it contains deserts, hiding weather-model issues. If the weather generates little spatial climate contrast, report it honestly and do not compensate with visual randomness.
+**Implementation caution:** A filled elevation DEM with ties does **not** by itself guarantee an acyclic D8 route. Guarantee the directed graph's acyclicity by construction (e.g. flood visitation order / parent links and topological order). Never create equal-height loops. When contracting a lake later, its spill outlet must be outside its own basin and the contracted graph must remain acyclic.
 
-## 3. Ordered implementation checklist
+**Completion criteria:** Geography can identify every land tile's eventual terminal sink and potential depression/spill without loops or map wrapping. The graph is deterministic for an unchanged seed/elevation. No weather flux consumption, per-tick routing or drawing in this step.
 
-| Step | Status | Deliverable |
-|---|---|---|
-| **1 — Climate observations** | [ ] | Collect long-term temperature and rainfall per tile from existing weather updates, with correct simulated-time accounting. No biome changes yet. |
-| **2 — Pure climate-to-biome classifier** | [ ] | Introduce a small deterministic mapper from climate snapshot + physical geography to **existing** terrain classes; no generation behavior change yet. |
-| **3 — Climate initialization / bootstrap** | [ ] | Drive the existing weather model through a bounded, deterministic climate equilibration-and-sampling phase without advancing gameplay or freezing the UI for one massive loop. |
-| **4 — Make terrain climate-driven** | [ ] | Use sampled climate to assign biomes during world initialization; stop using the uniform legacy precipitation heuristic as final biome input. |
-| **5 — Fill genuine biome/art gaps** | [ ] | Add only indispensable missing biome type(s) with coherent original 64×64 tiles and full asset wiring; otherwise mark this step `not needed` with reasons. |
-| **6 — Optional: slow ecological change** | [ ] | Reevaluate land biomes slowly from multi-year weather climate, with hysteresis; **requires explicit user approval**. |
+### Step 3 — Add live runoff accumulation and river discharge
 
----
+**Goal:** Produce a weather-driven discharge field on the fixed network, without moving droplets or solving fluid equations.
 
-## Step 1 — Capture real long-term climate (REQUIRED)
+1. Add `HydrologySimulation` to own all mutable water state. Do not put it in immutable `World.Cell`. Accept incremental input from Step 1 and elapsed **simulated** time.
+2. Choose a coarse hydrology cadence (initial target: **one simulated day**); accumulate each weather outer update's two runoff arrays until processing. One external weather call can represent ~1.5 simulated days at month speed: if a pending batch spans multiple days, **process its whole amount over its actual elapsed time**. Do not pretend it was a sequence of known hourly rainfall events, and do not do an unbounded catch-up iteration.
+3. On each hydrology update, initialize a reusable `DoubleArray` with **actual positive runoff depths** converted to tile-mm amounts. Walk the static topological order and add each tile's accumulated amount to its downstream successor. Sum, never overwrite. Ocean/perimeter outlets receive the exported quantity, not another land-cell storage. Use an outlet counter for reporting/accounting only.
+4. Publish (a) latest routed amount for the processing period and (b) `dischargeMmTilesPerDay` using its *actual duration*. Optionally maintain an exponential **display** smoothing response in simulated days so river widths do not flicker. If smoothing is visual only, it must not create/destroy routed water.
+5. Require a meaningful **upstream contributing area** as well as a nonzero flow threshold for visually classifying a cell as a stream. Otherwise every soil-draining field would appear as a tiny river. Record area at topology build time (upstream cell count) and use named, easily adjustable thresholds; do not normalize per map in a way that forces every dry map to contain large rivers.
+6. For this step only, lake candidates may behave as explicitly provisional *pass-through* routing nodes. No water may be stored or displayed as a real lake until Step 4. Avoid designing the pass-through in a way that makes lake interception impossible to add next.
 
-**Purpose:** Make weather-produced climate data available without changing how the world looks.
+**Expected behavior:** Tributaries combine into larger downstream flows. Dry areas can lack rivers, rainy catchments can support larger rivers, and changing weather changes their discharge. Soil's five-day drainage is already a delayed source; **do not add an unrelated groundwater model or extra rain-to-river injection here**.
 
-- Inspect actual precipitation accounting first: rainfall may be accumulated in each weather substep and then converted to an **outer-update average**. Identify exactly where *depth in mm* is available and avoid counting the same precipitation twice.
-- Add a small climate sampler (e.g., primitive arrays for `precipitationSumMm` and `temperatureTimeIntegral`) attached to `WeatherSimulation` or an already-existing world-owned climate subsystem. Prefer the existing data flow over a new architecture.
-- Accumulate **only while sampling is enabled**. Expose a clear `beginClimateSampling()` / `endClimateSampling()` or equivalent lifecycle so Step 3 can discard equilibration history and start a fresh observation interval.
-- Integrate using the **internal simulated timestep**. A global `sampledDays` counter must increase once per substep, not once per tile. If air temperature is sampled after heating/relaxation, be consistent across steps.
-- Support resetting the accumulator for the initialization phase. Do not repurpose or alter the smoothed 30-day precipitation statistic.
-- Preserve all existing precipitation outputs, soil water transfers, and wind integration. No new map overlay, logging, test code, or profiling.
+**Completion criteria:** One tile's drainage is represented once upstream and again as throughput at downstream nodes, but never counted twice as a new source. Aggregate source water exits or remains accounted for; hydrology is independent of rendering, per-frame updates and static biome labels. No visualization in this step.
 
-**Done by source review:** Actual substep rain depth and time-weighted temperature feed a separate climate accumulator. Unit conversions are explicit and the accumulator can be reset without mutating weather physics.
+### Step 4 — Add meaningful lake basins, storage, evaporation and spillover
 
-## Step 2 — One compact climate-to-biome classifier (REQUIRED)
+**Goal:** Real, geographically constrained lakes that fill from upstream water and can release water when full. Do not make all priority-filled pits permanently blue.
 
-**Purpose:** Centralize biome selection based on climate without yet changing world generation.
+1. From Step 2's meaningful depression candidates, construct **lake reservoir nodes** within the routing graph. All flow entering a candidate basin goes to its lake reservoir **once**. A lake's single spill outlet returns water to the proper downstream network after the basin fills. Treat a lake as one node for routing order; do not send its inflow repeatedly through every member tile and count it several times.
+2. Define a single documented **game-scale conversion** `verticalMillimetersPerElevationUnit` to map normalized terrain-elevation differences into approximate water depths. Terra has no real-world altitude or tile area. Compute lake volume capacity from basin geometry using `sum((spillLevel - tileElevation).coerceAtLeast(0) * scale)` over candidate lake tiles (mm·tiles). Choose one conservative tuning default and keep it isolated; do not label resulting volumes as real m³.
+3. Maintain `lakeStorageMmTiles >= 0`. During each hydrology interval, update each reservoir with routed inflow, direct precipitation on genuinely wet lake tiles (if implemented via weather integration below), minus actual evaporated water. Water below the spill-capacity threshold remains stored. **Only the excess above spill capacity leaves through the predetermined spill outlet**; this water is removed from storage as it is routed onward.
+4. Determine the current lake water-surface elevation from storage and the basin's elevation/area relation (sort basin elevations once; avoid per-update full sorts). Mark tiles wet only where the water surface reaches their physical elevation. A partially filled basin therefore draws a *smaller* lake than its maximum footprint. Do not modify immutable terrain.
+5. **Minimal but consistent lake evaporation / direct-rain coupling:** Once a tile is covered by lake water, its rainfall belongs to the lake, not simultaneously to land soil. Likewise, do not evaporate the same surface as both ordinary soil and open lake water. Prefer a small, explicit weather↔hydrology flux contract: weather records wet-lake direct rain and *potential* lake evaporation; hydrology caps actual lake evaporation by available basin water and returns the confirmed amount to atmospheric vapor once, if the current architecture safely permits it. Update the wet-lake mask at the hydrology cadence. Keep all quantities per simulated interval. **Do not blindly add lake evaporation as an unaccounted loss or credit vapor before checking water availability.** If this exchange cannot be integrated cleanly, report the block and STOP rather than silently building nonconserving or double-counted evaporation.
+6. Handle the edge cases: no suitable lakes; isolated pits; nested or neighboring candidate basins; empty basins; fully spilling basins; runoff through very small pits (no persistent storage); and ocean/perimeter spill exits. Filter tiny noise pits rather than creating thousands of reservoirs.
+7. Use no lakes that are merely `Terrain.OCEAN` under another name. An inland lake is a persistent hydrology entity and its basin is determined by topography. **Do not make an arbitrary deep lake merely because cloud cover is high.**
 
-- Inspect the existing terrain enum/sealed types, water and mountain rules, rendering constraints, and any semantics tied to terrain (passability, movement cost, resources, generated objects). **Do not rename or reorder existing terrain IDs** just for this task.
-- Make one deterministic classifier callable from world generation: conceptually `classifyBiome(physicalTerrain, elevation, annualPrecipitationMm, meanAirTempC): ExistingTerrainType` (adapt signature to the actual code).
-- Reuse and respect immutable geographic overrides: water/coastline, impassable rock/cliffs/mountain features, and placed structures. If terrain type conflates rock/elevation and vegetation, use the smallest local precedence rule rather than a sweeping refactor.
-- Use the temperature and aridity categories in Section 2 as **initial defaults**. Centralize thresholds. Prefer reusing the current small set of biome classes; map absent conceptual biomes to the closest existing type until Step 5.
-- Keep decisions **spatially deterministic**, without per-tile random classification. Existing seeded art variation is fine **after** the biome is selected.
-- Keep final biome independent of current humidity, cloud amount, recent rain, and soil saturation. No live climate-driven biome changes yet.
-- Leave the old generated terrain path working for now. This step adds a usable classifier, not the initialization rewiring.
+**Completion criteria:** Inflow raises lake storage and level, drought/evaporation can reduce it, overflow exports precisely the water exceeding capacity, and the lake inflow is not counted more than once. Actual water-covered tiles are distinguishable from dry potential lake footprint tiles. Rendering still deferred to Step 5.
 
-**Done by source review:** One clear climate+geography mapping exists, uses existing terrain types, has no weather dependency or assets, and does not change the current startup sequence.
+### Step 5 — Draw connected rivers and water-filled lakes
 
-## Step 3 — Obtain a representative climate before finalizing biomes (REQUIRED)
+**Goal:** Make the actual hydrological state easy to see in Terra's existing map without replacing biome tiles.
 
-**Purpose:** Avoid classifying the world from the arbitrary first day of a newly initialized atmosphere.
+1. Inspect current `TerrainMapView`, overlay bitmap scaling, palette, and `AtlasScene` layer ordering. Add a dedicated **surface-water layer** above the biome tile map but below selection/UI. Rivers/lakes should normally be visible as geography, not only when a precipitation diagnostic is selected.
+2. Draw river segments as **connected center-to-center links** following actual downstream topology, merging tributaries naturally. No disconnected single-pixel specks, random water strips or channel links across the X seam. Keep river geometry stable; adapt width/color gently to actual or smoothed discharge. Headwaters are thin; major confluences/rivers are wider; channels can be intermittent where flow becomes too small.
+3. Draw lake water only for the currently wet lake footprint from Step 4, with clean banks following tile-edge/pixel geometry. River entry, exit, and spillway should connect naturally to the lake at a meaningful location. Ocean remains the existing ocean terrain/visual; a river mouth terminates into it.
+4. **Avoid a full 64×64×(world width × world height) dynamic RGBA image.** Prefer existing map-overlay infrastructure at a modest resolution (e.g. a few pixels per tile), sparse procedural lines, or reusable cached segment sprites/tile combinations. Refresh water imagery only when hydrology changes enough, not unconditionally at 20 Hz; no per-frame art regeneration.
+5. Match existing pixel-art style. **Original 64×64 transparent water assets are allowed but optional** for river surface/banks/lake edge decoration when the procedural result looks too schematic. Reuse small numbers of textures, do not author 256+ handcrafted adjacency tiles, and do not alter 64×64 native pixel density. Do not add a new `Terrain.RIVER` / `Terrain.LAKE` just to draw them.
+6. Keep the surface-water layer independent of humidity, rain, clouds, annualized precipitation, wind, temperature and biome map overlays. Existing overlays and selection must continue working.
 
-**Preferred initialization plan:**
+**Completion criteria:** River networks are visually connected, narrow upstream, larger downstream, and aligned with drainage. Lakes occupy actual wet basins and connect to their inputs/outlets. No visible fake sea-wrap or dry uphill river paths. Existing terrains remain recognizable.
 
-1. Generate **physical geography first**: elevation, land/ocean mask, geographic temperature baseline, and the minimal *provisional* land classification needed for the existing weather initialization. Do not finalize climate-derived ecological cover yet.
-2. Create / use the existing weather simulation on that physical world. **Do not instantiate `World` recursively from `WeatherSimulation`**.
-3. Advance weather through approximately **30 simulated days of equilibration** (no climate recording). This allows initial vapor/cloud/soil states to evolve. It is a game-model starting constant, not proof of atmospheric equilibrium.
-4. Reset/start climate accumulation and advance weather through approximately **180 simulated days of observation**. Rationale: no seasonal cycle, but the new drifting wind waves operate over multiple-week timescales; a few days or one 30-day EMA is insufficient to characterize them. Keep `EQUILIBRATION_DAYS` and `CLIMATE_SAMPLE_DAYS` named/tunable.
-5. Expose the resulting **time-averaged** climate snapshot to the caller for Step 4. Retain a valid evolved weather state; avoid resetting all atmospheric state and accidentally discontinuing the modeled climate.
+### Step 6 — Integrate hydrology into world lifecycle, UI and tile inspection
 
-**Responsiveness:** Do **not** execute thousands of full-grid substeps in one blocking constructor/UI frame. Work out the actual KorGE initialization lifecycle and advance the finite weather warm-up in **bounded batches across frames/coroutines** (or reuse an existing non-blocking generation job). It is acceptable to display a simple existing loading/provisional state until climate is ready. The batch limit should be a small named constant; do not add an adaptive profiler or performance measurement system. Maintain the existing weather integration substep cap, not a special inaccurate coarse climate shortcut.
+**Goal:** Ensure everything updates coherently with world generation, speed controls and selection, without bundling extra features.
 
-**Simulation clock:** Warm-up is **weather-only**. It must not age characters, advance the main world/game calendar, trigger game events, or charge players for elapsed time. Keep solar time coherent (prefer whole-day warm-up/sample intervals) and keep the wind's accumulated simulated phase continuous. Document any necessary initial weather-age offset in source.
+1. Construct topology once after a `World` is available; construct/reset hydrology with the matching `WeatherSimulation`. On terrain-settings regeneration, rebuild graph, reservoirs, scratch arrays, and visuals. Never retain old-world data or stale tile dimensions.
+2. After every `weather.step(...)`, hand off exactly that outer call's runoff and (after Step 4) any lake-specific water flux to hydrology. Hydrology must aggregate under its own simulated-time cadence; the overlay consumes hydrology state, never controls physics. Ensure input is delivered **exactly once** for each weather call.
+3. If Terra actually has a weather/climate bootstrap/warmup phase, decide deliberately whether hydrology advances during it. Prefer using the *same emitted water fluxes* during bootstrap rather than creating an independent fictitious initial lake fill. If no such bootstrap exists, new lakes start empty and fill through subsequent simulated weather. No expensive synchronous new warmup loop in this step.
+4. Expose a compact, user-readable selected-tile section when practical: upstream drainage area (tile count), current discharge (mm·tiles/day **proxy**), local soil drainage and overflow (mm/latest weather update), optional lake ID, lake storage/level, and whether the tile is actually under lake water. Do not label discharge m³/s or claim lake altitude in meters. Keep existing inspector styling intact.
+5. Make dynamic rivers/lakes visible by default and, only if consistent with existing UI, add one unobtrusive toggle for the water layer. Avoid a new settings panel or numerous unexplained hydrological sliders.
+6. Preserve pause, regeneration, speed switching, and weather diagnostic overlays. The plan ends when *simple meaningful water movement is visible*; do not add a separate climate model, groundwater simulation, erosion, seasons, or flood solver.
 
-**Cyclic dependencies:** If weather currently uses biome-dependent coefficients, use its existing neutral/provisional land coefficients for bootstrap, then finalize biomes once. Do not repeatedly iterate world generation and weather until convergence or add climate feedback loops in this step.
+**Completion criteria:** Water state is wired once through initialization and update ownership; source fluxes are not lost or replayed, and selecting a river/lake tile describes values in correct units. No extra generation phase or unrelated climate/biome changes.
 
-**Scope stop condition:** If the project cannot accept non-blocking weather-only advancement without a substantial engine rewrite, STOP, document the concrete initialization coupling, and ask for a design decision rather than silently blocking startup for a long period.
+## 4. Optional work — explicitly outside the required plan
 
-**Done by source review:** There is a deterministic, bounded, weather-only initialization lifecycle that produces a climate snapshot; gameplay time is not advanced; startup work is incremental/non-blocking; previous wind/weather physics remain untouched.
+### Optional Step 7 — Simple river flooding / wet floodplain tint **(requires user approval)**
 
-## Step 4 — Replace the legacy static moisture choice (REQUIRED)
+Only if the real river and lake behavior is already satisfactory:
 
-**Purpose:** Turn emergent climate into visible, authoritative terrain.
+- Use excess actual river discharge over a named `bankfullDischarge` proxy as a **trigger** for a temporary floodplain wet/inundated overlay on nearby *low-elevation, topologically connected* tiles. Consider localized distance-to-channel and small elevation-above-channel thresholds; do not flood high ridges or entire biome regions.
+- **Important honesty:** If this is only a derived flood *visual*, say so in the source and UI. It is **not** a fully volume-conserving flood-water storage model. Do not create new stored floodwater or claim it returns to rivers. A real volumetric flood solver would be a separate design.
+- Flood tints fade over simulated time after river discharge drops. Do not introduce erosion, vegetation deaths, dynamic reclassification, or extra water transport.
+- If volume-conserving floods are required instead, STOP and request a new plan rather than silently adding an ad hoc second water store.
 
-- Locate the current `World.kt` logic that turns `baselineAnnualPrecipitationMm` and a temperature-based evaporation proxy into the final biome/moisture terrain. **Stop using that synthetic uniform precipitation for final land biome classification.** Leave the setting only if it has an unrelated legitimate purpose; otherwise remove obsolete callers/configuration rather than silently maintaining two competing sources of truth.
-- Connect Step 3's climate snapshot to Step 2's classifier. For each **land** tile, choose climate-derived ecological terrain **once** after climate observations become available. Keep geographic terrain constraints untouched.
-- Update **the authoritative tile state actually used by the renderer and gameplay**, not a debug-only overlay. Invalidate or rebuild only the necessary terrain tile caches / chunk meshes / sprites if the existing renderer caches classification. Do not inadvertently reset soil water, cloud/wind state, or climate statistics when rebuilding visuals.
-- Preserve deterministic terrain seed behavior: the same seed, parameters, and deterministic weather bootstrap should produce the same biomes. If the world has a serialization/save format, maintain it or carefully extend it to retain both finalized terrain and any needed initialization state; do not silently break old saves.
-- Ensure areas can legitimately be **cloudy but dry**, **rainy but sparsely vegetated**, or **wet with trees**, depending on the **long-term average**. Do not make tile type react to a single current weather condition.
-- Keep the weather running normally after bootstrap, independent of the current game-speed setting. Terrain remains stable after the initial choice unless the optional Step 6 is later approved.
-- Avoid large climate-dependent noise overlays, arbitrary forest patches, or a forced global histogram. Preserve the existing terrain's visual style and any seeded within-biome appearance variation.
+## 5. Architectural guardrails and decisions to preserve
 
-**Done by source review:** The final biome is determined by actual simulated long-term temperature/precipitation; the uniform precipitation heuristic is no longer authoritative; land/ocean/topography and weather state survive the transition; renderer uses the new result.
+1. **The topology and discharge are not the same thing.** A dry channel can exist geographically while current water is zero; climate determines how often and how strongly it flows.
+2. **Do not use weather's periodic X boundary for rivers.** Ocean and outer edges are legal hydrology outlets; map edges are not adjacent to opposite edges. Ensure all OCEAN-classified tiles are treated consistently even when inland.
+3. **Do not turn every depression into a lake.** A Priority-Flood fill is a *routing tool* and potential storage geometry, not proof that the basin is currently filled with water.
+4. **No physically calibrated flow speed yet.** Normalized elevation and unknown tile area do not justify m³/s, meters, or physically realistic travel times. Soil drainage already produces a multi-day response. Route accumulated water in topological order and optionally smooth *display* discharge only; document that channel travel time is approximated as immediate at the hydrology cadence.
+5. **Water balance before appearance.** Never boost rivers using generic precipitation estimates in addition to already-accounted drainage/overflow. If rivers prove too small or too constant, identify whether soil actually generates runoff; any future infiltrated-rain / quick-runoff partition must remove water from soil first and requires its own approved change.
+6. **One water source, one sink.** Explicitly distinguish soil-to-channel flux, lake precipitation, lake evaporation, in-transit water and outlet export; a channel's downstream flow is throughput, not a new source.
+7. **Use primitive storage.** Typical grid ~60k cells; reuse arrays and topo orders. Build priority queues/sorted basin geometry once at generation. No extra external libs, real-time fluid simulation, per-particle water, or per-frame full-map geometry reconstruction.
+8. **Avoid imaginary seasons.** There is no verified axial tilt / snowpack system. No seasonally melting rivers, frozen lakes, or glacier source until those are actually implemented.
+9. **No biome dependency.** This hydrology plan can be implemented whether the climate-driven biome plan is present or not. The rivers/lakes are geographical overlays, not terrain-type replacements.
+10. **Be conservative with code churn.** Prefer a small `HydrologyTopology` + `HydrologySimulation` pair and a narrow renderer integration over scattered water logic in `World`, renderer, scene and weather.
 
-## Step 5 — Only add terrain types and 64×64 sprites that the map needs (REQUIRED, CAN BE NO-OP)
+## 6. Handoff/completion protocol
 
-**Purpose:** Distinguish ecologically meaningful climate regions without bloating the terrain palette.
+At the end of one invocation:
 
-1. Inspect **existing** terrain type names, rendering assets, sprite dimensions, color palette, patterns, and tile registration conventions. First decide whether existing classes sufficiently distinguish dry, grassy, forested, and very cold land.
-2. If important distinctions are genuinely absent, prefer **at most three** of these conceptual additions, in this order: **steppe / dry grassland**, **tundra / cold sparse ground**, **savanna / warm scattered vegetation**. Add only types actually needed by the climate ranges Terra produces; do not add all three automatically. A new hot rainforest class is justified only if the existing forest artwork visibly fails for warm humid climates.
-3. For each added type, generate an **original 64×64 pixel tile**, visually matching existing tile style (camera angle, pixel density, contrast, palette, vegetation scale, outlines/shading). Reuse the local asset-generation approach if already available. Avoid incompatible stock imagery, blurred upscaling, noisy textures, or flat placeholder colors. Use existing conventions for transparent backgrounds and edge tiling.
-4. Register assets using the existing packaging system; update the enum/classifier/renderer and relevant terrain-dependent rules coherently. A tile type must not resolve to a missing sprite or an incorrect fallback after packaging. Preserve seeded visual variations if already supported; do not add an art pipeline.
-5. If no new type is needed, do **not** generate art. Mark Step 5 `[x]` and log **"No new biome types/assets needed"** with one-sentence rationale.
-
-**Done by source review:** Each new type, if any, has a correctly wired 64×64 sprite and classifier mapping; established art remains intact. No need to create tests, previews, or benchmarking utilities.
-
-## Step 6 — OPTIONAL: Slow biome adaptation during simulation (USER APPROVAL REQUIRED)
-
-**Why optional:** A biome is a climate/ecology outcome, not a rain overlay. With no seasons and rapidly accelerated in-game time, immediate reclassification would flicker and could invalidate existing gameplay assumptions. The core feature is complete after Step 5.
-
-If expressly approved later:
-
-- Maintain a **multi-year climate estimate** (e.g., exponential response time of ~2 simulated years) based on actual incoming rain depths and temperature, rather than cumulative all-time means or 30-day rainfall smoothing.
-- Reassess classification **infrequently** (e.g., every 1 simulated year). Require a new candidate to remain favored across multiple evaluations or to exceed category thresholds by a material margin (hysteresis); never toggle terrain on individual weather ticks.
-- Change only ecological ground cover/vegetation and update dependent render caches. Preserve ocean, elevation, infrastructure, placed objects, and invalidated gameplay rules. Avoid turning mature forests into deserts overnight.
-- Support saved worlds and keep changes deterministic under time acceleration.
-- Treat this as a separate feature; do not implement it while completing Steps 1–5.
-
-## 4. Design cautions (read before improvising)
-
-- **An observed climate is not instantaneous weather.** `30-dayRainMmPerHour` (if present) is a weather/climate display smoothing value, not a robust biome classifier over drifting atmospheric patterns.
-- **The world may have no seasons.** Do not invent seasonal desert/monsoon or snowpack semantics. Annualized rainfall is simply a common-scale reporting unit derived from the observed period.
-- **Rainfall geography might still be weak.** If the new map shows little climatic variation, the correct follow-up is to understand weather moisture/transport, not to fake rain shadows by adding noise or normalize every map to include deserts.
-- **Cold terrain needs care.** Mean annual temperature alone is insufficient for real-world permafrost or year-round snow, but it can provide a simple game approximation. Prefer cold/tundra visuals over widespread ice unless conditions are persistently freezing.
-- **Potential evaporation is an approximation.** Use it only as a broad moisture/temperature comparator. Do not derive dryness from *actual* soil-limited evaporation, which would over-reward dry regions with artificially low evapotranspiration.
-- **Climate cannot change coastlines.** Water, elevation, rocks, cliffs, and any procedural rivers remain geographic; climate chooses biological/land-cover appearance on suitable land.
-- **Conserve water and separate responsibilities.** Recording climate must not consume precipitation, move atmospheric water, or change weather physics. Weather bootstrap should use the implemented simulation, not a second bespoke precipitation model.
-- **Generation cost is real.** A 210-simulated-day weather spin-up is many internal updates on 60k tiles. Prefer bounded incremental work to a synchronous blocking constructor; no profiling or benchmarking is requested or authorized.
-- **Backward compatibility:** If existing saves cannot be safely migrated in the selected step, preserve their prior terrain and only use climate-first generation for new worlds; state the limitation clearly in the Implementation Log.
-- **Keep it a game.** Do not add realistic soil chemistry, plant life cycles, climate layers, pressure solvers, moisture diffusion, or seasonal climate calculations here.
-
-## 5. Completion protocol
-
-At the end of **exactly one required step**:
-
-1. Update only the step's `[ ]` to `[x]` in the checklist (Step 5 may be completed as a documented no-op).
-2. Append one entry to the Implementation Log below specifying the files touched and any deviations from the default constants or architecture.
-3. Report what changed and what remains unimplemented.
-4. **STOP.** Do not start the next step in the same invocation. Optional Step 6 requires separate explicit user approval.
+1. Inspect the selected step's source dependencies.
+2. Implement **only** that step.
+3. Mark only its checkbox `[x]`, or leave `[ ]` if blocked.
+4. Append exactly one short entry to the log below, including the files changed, constants chosen, known limitations, and whether compilation was attempted (if it was, no tests).
+5. Explain which next step is now available. **STOP and await a new invocation.** Do not begin the next step.
 
 ### Implementation Log
 
-<!-- Append entries in this format, without removing prior entries:
-- Step 1 — DONE (YYYY-MM-DD): ... Files: ... Notes: ...
+<!-- Append entries; do not remove old entries. Example:
+- Step 1 — DONE (YYYY-MM-DD): Exposed drained and overflow water in mm per outer weather call. Files: ... Notes: ...
 -->
+- Step 1 — DONE (2026-11-09): Exposed soil drainage and pre-capacity overflow as mm per outer weather call. Files: `WeatherSimulation.kt`, `PLAN.md`. Notes: Fluxes aggregate across internal substeps, ocean stays zero, and the existing 250 mm capacity / 120 mm field capacity remain unchanged; compilation attempted with no tests.
+- Step 2 — DONE (2026-11-09): Added bounded deterministic D8 Priority-Flood topology and acyclic upstream-first order. Files: `HydrologyTopology.kt`, `PLAN.md`. Notes: Ocean and perimeter are outlets; candidate basins use minimum 4 tiles and 0.015 normalized depth, with one selected spill connection; compile attempted, no tests. No routing or water storage yet.
+
+## Reference
+
+- Internal source: `HYDROLOGY_REPORT.md` (Terra Hydrology Architecture Investigation, inspected 2026-11-09).
+- Algorithm reference (optional background, no dependency required): Barnes, Lehman & Mulla, *Priority-Flood: An optimal depression-filling and watershed-labeling algorithm for digital elevation models*, Computers & Geosciences 62 (2014), https://doi.org/10.1016/j.cageo.2013.04.024. Priority-Flood is a preprocessing technique; it does **not** imply that all filled depressions are physically wet lakes.

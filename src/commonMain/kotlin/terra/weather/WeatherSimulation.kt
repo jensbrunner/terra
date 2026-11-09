@@ -8,7 +8,6 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.PI
 import kotlin.math.sin
-import kotlin.random.Random
 import terra.world.Terrain
 import terra.world.World
 
@@ -28,8 +27,13 @@ class WeatherSimulation(private val world: World) {
     private val rainActive = BooleanArray(count)
     private val precipitationMmPerHour = DoubleArray(count)
     private val outerRainMm = DoubleArray(count)
+    // Water removed from land soil during the latest outer step(), in mm per tile.
+    private val drainageMmThisUpdate = DoubleArray(count)
+    private val overflowMmThisUpdate = DoubleArray(count)
     private val peakSubstepPrecipitationMmPerHour = DoubleArray(count)
     private val climateRainMmPerHour = DoubleArray(count)
+    private val climatePrecipitationSumMm = DoubleArray(count)
+    private val climateTemperatureTimeIntegral = DoubleArray(count)
     private val soilWaterMm = DoubleArray(count)
     private val solarInputFactor = DoubleArray(count)
     private val surfaceTemperatureC = DoubleArray(count)
@@ -37,30 +41,14 @@ class WeatherSimulation(private val world: World) {
     private val zonalWindTilesPerDay = DoubleArray(height)
     private val windUTilesPerDay = DoubleArray(count)
     private val windVTilesPerDay = DoubleArray(count)
-    private val vortexBaseX = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexBaseY = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexRadiusX = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexRadiusY = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexInvRadiusXSquared = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexInvRadiusYSquared = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexPhaseOffset = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexMotionPeriodDays = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexLifetimeDays = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexXDriftTiles = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexYDriftTiles = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexCirculationSign = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexCenterX = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexCenterY = DoubleArray(REGIONAL_VORTEX_COUNT)
-    private val vortexStrength = DoubleArray(REGIONAL_VORTEX_COUNT)
-    var regionalVorticesEnabled = true
-        private set
     private var elapsedSeconds = 0.0
+    private var climateSamplingEnabled = false
+    private var climateSampledDays = 0.0
 
     init {
         for (y in 0 until height) {
             zonalWindTilesPerDay[y] = zonalWindAtLatitude(normalizedLatitude(y) * 90.0)
         }
-        initializeRegionalVortices()
         updateWindField(0.0)
 
         for (y in 0 until height) for (x in 0 until width) {
@@ -87,19 +75,39 @@ class WeatherSimulation(private val world: World) {
     fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) =
         peakSubstepPrecipitationMmPerHour[index(x, y)]
     fun rainMmThisUpdate(x: Int, y: Int) = outerRainMm[index(x, y)]
+    /** Soil drainage removed during the latest outer step(), in mm per tile (not mm/h). */
+    fun drainageMmThisUpdate(x: Int, y: Int) = drainageMmThisUpdate[index(x, y)]
+    /** Soil-capacity overflow removed during the latest outer step(), in mm per tile (not mm/h). */
+    fun overflowMmThisUpdate(x: Int, y: Int) = overflowMmThisUpdate[index(x, y)]
     fun thirtyDayRainMmPerHour(x: Int, y: Int) = climateRainMmPerHour[index(x, y)]
     fun annualizedRainMmPerYear(x: Int, y: Int) =
         climateRainMmPerHour[index(x, y)] * HOURS_PER_YEAR
+    /** Clear previous observations and start collecting climate from subsequent weather substeps. */
+    fun beginClimateSampling() {
+        climatePrecipitationSumMm.fill(0.0)
+        climateTemperatureTimeIntegral.fill(0.0)
+        climateSampledDays = 0.0
+        climateSamplingEnabled = true
+    }
+
+    /** Stop collecting and return a compact, immutable snapshot of the observed climate. */
+    fun endClimateSampling(): ClimateSnapshot {
+        check(climateSamplingEnabled) { "Climate sampling is not active" }
+        check(climateSampledDays > 0.0) { "Climate sampling must include at least one weather substep" }
+        climateSamplingEnabled = false
+        return ClimateSnapshot(
+            width = width,
+            height = height,
+            sampledDays = climateSampledDays,
+            precipitationSumMm = climatePrecipitationSumMm.copyOf(),
+            temperatureTimeIntegral = climateTemperatureTimeIntegral.copyOf()
+        )
+    }
     fun solarInputFactor(x: Int, y: Int) = solarInputFactor[index(x, y)]
     fun surfaceTemperatureC(x: Int, y: Int) = surfaceTemperatureC[index(x, y)]
     fun airTemperatureC(x: Int, y: Int) = airTemperatureC[index(x, y)]
     fun windUTilesPerDay(x: Int, y: Int) = windUTilesPerDay[index(x, y)]
     fun windVTilesPerDay(x: Int, y: Int) = windVTilesPerDay[index(x, y)]
-    fun setRegionalVorticesEnabled(enabled: Boolean) {
-        if (regionalVorticesEnabled == enabled) return
-        regionalVorticesEnabled = enabled
-        updateWindField(elapsedSeconds)
-    }
     fun nightOpacity(x: Int): Double {
         val sunHeight = cos(hourAngleAt(x, elapsedSeconds))
         return (1.0 - smoothstep(-TERMINATOR_TRANSITION, TERMINATOR_TRANSITION, sunHeight)) *
@@ -114,10 +122,12 @@ class WeatherSimulation(private val world: World) {
     /** Process all elapsed simulated time in bounded internal steps. */
     fun step(seconds: Double) {
         require(seconds >= 0.0) { "Simulation time cannot move backwards" }
+        outerRainMm.fill(0.0)
+        drainageMmThisUpdate.fill(0.0)
+        overflowMmThisUpdate.fill(0.0)
+        peakSubstepPrecipitationMmPerHour.fill(0.0)
         if (seconds == 0.0) return
 
-        outerRainMm.fill(0.0)
-        peakSubstepPrecipitationMmPerHour.fill(0.0)
         val substepCount = ceil(seconds / MAX_WEATHER_STEP_SECONDS).toLong().coerceAtLeast(1L)
         val substepSeconds = seconds / substepCount
         var substepIndex = 0L
@@ -130,6 +140,12 @@ class WeatherSimulation(private val world: World) {
         for (i in 0 until count) {
             precipitationMmPerHour[i] = outerRainMm[i] / elapsedHours
         }
+    }
+
+    /** Advance exactly one existing maximum-size weather substep and return its simulated duration. */
+    fun advanceOneInternalSubstep(): Double {
+        step(MAX_WEATHER_STEP_SECONDS)
+        return MAX_WEATHER_STEP_SECONDS
     }
 
     private fun advanceSubstep(seconds: Double) {
@@ -193,13 +209,21 @@ class WeatherSimulation(private val world: World) {
             val rainMm = cloudBeforeRainMm * rainoutResponse
             val cloudAfterRainMm = cloudBeforeRainMm - rainMm
 
+            if (climateSamplingEnabled) {
+                climatePrecipitationSumMm[i] += rainMm
+                climateTemperatureTimeIntegral[i] += airTemperature * elapsedDays
+            }
+
             if (cell.terrain != Terrain.OCEAN) {
-                val soilAfterRainMm = (soilWaterMm[i] - evaporatedMm + rainMm)
-                    .coerceIn(0.0, SOIL_WATER_CAPACITY_MM)
+                val rawSoilMm = soilWaterMm[i] - evaporatedMm + rainMm
+                val soilCapacityOverflowMm = max(0.0, rawSoilMm - SOIL_WATER_CAPACITY_MM)
+                val soilAfterRainMm = rawSoilMm.coerceIn(0.0, SOIL_WATER_CAPACITY_MM)
                 val excessAboveFieldCapacityMm =
                     max(0.0, soilAfterRainMm - SOIL_FIELD_CAPACITY_MM)
                 val drainedMm = excessAboveFieldCapacityMm * soilDrainageResponse
                 soilWaterMm[i] = soilAfterRainMm - drainedMm
+                overflowMmThisUpdate[i] += soilCapacityOverflowMm
+                drainageMmThisUpdate[i] += drainedMm
             }
 
             atmosphericWaterMm[i] = vaporAfterCloudEvaporationMm
@@ -213,6 +237,7 @@ class WeatherSimulation(private val world: World) {
             climateRainMmPerHour[i] +=
                 (substepRainMmPerHour - climateRainMmPerHour[i]) * climateResponse
         }
+        if (climateSamplingEnabled) climateSampledDays += elapsedDays
     }
 
     private fun relativeHumidityAt(index: Int) = relativeHumidity(
@@ -355,8 +380,6 @@ class WeatherSimulation(private val world: World) {
         val wave2Amplitude = WAVE_2_MERIDIONAL_SPEED_TILES_PER_DAY / wave2Number
         val wave1TimePhase = TWO_PI * simulatedDays / WAVE_1_PERIOD_DAYS * WAVE_1_DIRECTION
         val wave2TimePhase = TWO_PI * simulatedDays / WAVE_2_PERIOD_DAYS * WAVE_2_DIRECTION
-        updateRegionalVortexState(simulatedDays)
-
         for (y in 0 until height) {
             val latitudePhase = if (height <= 1) 0.0 else PI * y / (height - 1)
             val latitudeSine = sin(latitudePhase)
@@ -371,87 +394,16 @@ class WeatherSimulation(private val world: World) {
                 val wave1Phase = wave1Number * x + wave1TimePhase + WAVE_1_PHASE_OFFSET
                 val wave2Phase = wave2Number * x + wave2TimePhase + WAVE_2_PHASE_OFFSET
                 val i = index(x, y)
-                var u = zonalWindTilesPerDay[y] +
+                val u = zonalWindTilesPerDay[y] +
                     wave1Amplitude * latitudeDerivative * sin(wave1Phase) +
                     wave2Amplitude * latitudeDerivative * sin(wave2Phase)
-                var v = -WAVE_1_MERIDIONAL_SPEED_TILES_PER_DAY *
+                val v = -WAVE_1_MERIDIONAL_SPEED_TILES_PER_DAY *
                     latitudeEnvelope * cos(wave1Phase) -
                     WAVE_2_MERIDIONAL_SPEED_TILES_PER_DAY *
                     latitudeEnvelope * cos(wave2Phase)
-
-                if (regionalVorticesEnabled) {
-                    for (vortex in 0 until REGIONAL_VORTEX_COUNT) {
-                        val strength = vortexStrength[vortex]
-                        if (strength == 0.0) continue
-                        var dx = x - vortexCenterX[vortex]
-                        if (dx > width / 2.0) dx -= width
-                        if (dx < -width / 2.0) dx += width
-                        val dy = y - vortexCenterY[vortex]
-                        val radiusSquared = dx * dx * vortexInvRadiusXSquared[vortex] +
-                            dy * dy * vortexInvRadiusYSquared[vortex]
-                        if (radiusSquared >= 1.0) continue
-
-                        val derivative = -6.0 * strength * (1.0 - radiusSquared) *
-                            (1.0 - radiusSquared)
-                        u += derivative * dy * vortexInvRadiusYSquared[vortex]
-                        v -= derivative * dx * vortexInvRadiusXSquared[vortex]
-                    }
-                }
-
                 windUTilesPerDay[i] = u
                 windVTilesPerDay[i] = v
             }
-        }
-    }
-
-    private fun initializeRegionalVortices() {
-        val random = Random(world.seed xor REGIONAL_VORTEX_SEED_SALT)
-        val baseLatitudeRange = height * 0.36
-        val minBaseY = (height - baseLatitudeRange) * 0.5
-        val maxBaseY = minBaseY + baseLatitudeRange
-        val minRadiusY = minOf(VORTEX_MIN_RADIUS_Y, height * 0.11)
-        val maxRadiusY = minOf(VORTEX_MAX_RADIUS_Y, height * 0.16)
-
-        for (vortex in 0 until REGIONAL_VORTEX_COUNT) {
-            vortexBaseX[vortex] = random.nextDouble(0.0, width.toDouble())
-            vortexBaseY[vortex] = random.nextDouble(minBaseY, maxBaseY)
-            vortexRadiusX[vortex] = random.nextDouble(VORTEX_MIN_RADIUS_X, VORTEX_MAX_RADIUS_X)
-            vortexRadiusY[vortex] = random.nextDouble(minRadiusY, maxRadiusY)
-            vortexInvRadiusXSquared[vortex] = 1.0 /
-                (vortexRadiusX[vortex] * vortexRadiusX[vortex])
-            vortexInvRadiusYSquared[vortex] = 1.0 /
-                (vortexRadiusY[vortex] * vortexRadiusY[vortex])
-            vortexPhaseOffset[vortex] = random.nextDouble(0.0, TWO_PI)
-            vortexMotionPeriodDays[vortex] = random.nextDouble(VORTEX_MIN_MOTION_PERIOD_DAYS, VORTEX_MAX_MOTION_PERIOD_DAYS)
-            vortexLifetimeDays[vortex] = random.nextDouble(VORTEX_MIN_LIFETIME_DAYS, VORTEX_MAX_LIFETIME_DAYS)
-            vortexXDriftTiles[vortex] = random.nextDouble(VORTEX_MIN_X_DRIFT_TILES, VORTEX_MAX_X_DRIFT_TILES)
-            vortexYDriftTiles[vortex] = random.nextDouble(
-                height * VORTEX_MIN_Y_DRIFT_FRACTION,
-                height * VORTEX_MAX_Y_DRIFT_FRACTION
-            )
-            vortexCirculationSign[vortex] = if (random.nextDouble() < 0.5) -1.0 else 1.0
-        }
-    }
-
-    private fun updateRegionalVortexState(simulatedDays: Double) {
-        for (vortex in 0 until REGIONAL_VORTEX_COUNT) {
-            val phaseOffset = vortexPhaseOffset[vortex]
-            val lifePhase = ((simulatedDays / vortexLifetimeDays[vortex] +
-                phaseOffset / TWO_PI) % 1.0).let { if (it < 0.0) it + 1.0 else it }
-            val fadeIn = smoothstep(0.0, VORTEX_FADE_FRACTION, lifePhase)
-            val fadeOut = 1.0 - smoothstep(VORTEX_FADE_OUT_START_FRACTION, 1.0, lifePhase)
-            vortexStrength[vortex] = if (regionalVorticesEnabled) {
-                vortexCirculationSign[vortex] * VORTEX_STREAMFUNCTION_STRENGTH * fadeIn * fadeOut
-            } else {
-                0.0
-            }
-
-            val motionPhase = TWO_PI * simulatedDays / vortexMotionPeriodDays[vortex] + phaseOffset
-            vortexCenterX[vortex] = wrapX(
-                vortexBaseX[vortex] + vortexXDriftTiles[vortex] * sin(motionPhase)
-            )
-            vortexCenterY[vortex] = vortexBaseY[vortex] +
-                vortexYDriftTiles[vortex] * cos(motionPhase * VORTEX_Y_MOTION_FREQUENCY)
         }
     }
 
@@ -486,7 +438,6 @@ class WeatherSimulation(private val world: World) {
     }
 
     private fun wrapX(x: Int): Int = ((x % width) + width) % width
-    private fun wrapX(x: Double): Double = ((x % width) + width) % width
 
     private fun index(x: Int, y: Int) = y * width + x
 
@@ -530,24 +481,6 @@ class WeatherSimulation(private val world: World) {
         const val WAVE_2_DIRECTION = -1.0
         const val WAVE_1_PHASE_OFFSET = 0.0
         const val WAVE_2_PHASE_OFFSET = PI / 3.0
-        const val REGIONAL_VORTEX_COUNT = 3
-        const val REGIONAL_VORTEX_SEED_SALT = 0x3EEDBEEF
-        const val VORTEX_MIN_RADIUS_X = 32.0
-        const val VORTEX_MAX_RADIUS_X = 48.0
-        const val VORTEX_MIN_RADIUS_Y = 24.0
-        const val VORTEX_MAX_RADIUS_Y = 34.0
-        const val VORTEX_MIN_MOTION_PERIOD_DAYS = 38.0
-        const val VORTEX_MAX_MOTION_PERIOD_DAYS = 72.0
-        const val VORTEX_MIN_LIFETIME_DAYS = 55.0
-        const val VORTEX_MAX_LIFETIME_DAYS = 95.0
-        const val VORTEX_MIN_X_DRIFT_TILES = 18.0
-        const val VORTEX_MAX_X_DRIFT_TILES = 32.0
-        const val VORTEX_MIN_Y_DRIFT_FRACTION = 0.03
-        const val VORTEX_MAX_Y_DRIFT_FRACTION = 0.07
-        const val VORTEX_STREAMFUNCTION_STRENGTH = 40.0
-        const val VORTEX_FADE_FRACTION = 0.14
-        const val VORTEX_FADE_OUT_START_FRACTION = 0.82
-        const val VORTEX_Y_MOTION_FREQUENCY = 0.73
         const val CONDENSATION_RESPONSE_SECONDS = 15.0 * 60.0
         const val CLOUD_EVAPORATION_RESPONSE_SECONDS = 3.0 * 60.0 * 60.0
         const val TERMINATOR_TRANSITION = 0.12
@@ -563,5 +496,31 @@ class WeatherSimulation(private val world: World) {
         const val REFERENCE_CLOUD_COVER = 0.35
         const val SOLAR_TEMPERATURE_SWING_C = 24.0
         const val AIR_TEMPERATURE_RESPONSE_SECONDS = SECONDS_PER_DAY
+    }
+}
+
+/** Time-averaged climate captured during an explicit sampling interval. */
+class ClimateSnapshot internal constructor(
+    val width: Int,
+    val height: Int,
+    val sampledDays: Double,
+    private val precipitationSumMm: DoubleArray,
+    private val temperatureTimeIntegral: DoubleArray
+) {
+    /** Annualized precipitation depth rate, in mm/year. */
+    fun annualPrecipitationMmPerYear(x: Int, y: Int): Double =
+        precipitationSumMm[index(x, y)] * DAYS_PER_YEAR / sampledDays
+
+    /** Mean simulated air temperature over the sampling interval, in °C. */
+    fun meanAirTemperatureC(x: Int, y: Int): Double =
+        temperatureTimeIntegral[index(x, y)] / sampledDays
+
+    private fun index(x: Int, y: Int): Int {
+        require(x in 0 until width && y in 0 until height) { "Tile coordinates are outside the snapshot" }
+        return y * width + x
+    }
+
+    private companion object {
+        const val DAYS_PER_YEAR = 365.0
     }
 }

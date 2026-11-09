@@ -5,13 +5,13 @@ enum class Terrain(val label: String) {
     MOUNTAINS("Mountains"),
     WOODS("Woods"),
     DESERT("Desert"),
-    OCEAN("Ocean")
+    OCEAN("Ocean"),
+    TUNDRA("Tundra")
 }
 
 data class Cell(
     val elevation: Double,
     val meanTemperatureC: Double,
-    val moistureAvailability: Double,
     val terrain: Terrain
 )
 
@@ -31,14 +31,6 @@ data class TerrainGenerationSettings(
     val seaLevel: Double = 0.305,
     val mountainThreshold: Double = 0.6,
 
-    val baselineAnnualPrecipitationMm: Double = 1000.0,
-
-    val basePotentialEvaporationMm: Double = 250.0,
-    val potentialEvaporationPerDegreeMm: Double = 35.0,
-    val desertMoistureThreshold: Double = 0.46,
-    val woodsMoistureThreshold: Double = 0.60,
-    val woodsMinTemperatureC: Double = -5.0,
-    val woodsMaxTemperatureC: Double = 31.0,
     val equatorTemperatureC: Double = 30.0,
     val poleTemperatureDropC: Double = 45.0,
     val elevationCoolingCOPerUnit: Double = 30.0
