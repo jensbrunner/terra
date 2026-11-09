@@ -27,6 +27,9 @@ class WeatherSimulation(private val world: World) {
     private val rainActive = BooleanArray(count)
     private val precipitationMmPerHour = DoubleArray(count)
     private val outerRainMm = DoubleArray(count)
+    private val lakeDirectRainMm = DoubleArray(count)
+    private val lakePotentialEvaporationMm = DoubleArray(count)
+    private val lakeWaterMask = BooleanArray(count)
     // Water removed from land soil during the latest outer step(), in mm per tile.
     private val drainageMmThisUpdate = DoubleArray(count)
     private val overflowMmThisUpdate = DoubleArray(count)
@@ -79,6 +82,10 @@ class WeatherSimulation(private val world: World) {
     fun drainageMmThisUpdate(x: Int, y: Int) = drainageMmThisUpdate[index(x, y)]
     /** Soil-capacity overflow removed during the latest outer step(), in mm per tile (not mm/h). */
     fun overflowMmThisUpdate(x: Int, y: Int) = overflowMmThisUpdate[index(x, y)]
+    /** Rain transferred directly to a wet lake during the latest outer step(), in mm per tile. */
+    fun lakeDirectRainMmThisUpdate(x: Int, y: Int) = lakeDirectRainMm[index(x, y)]
+    /** Potential open-water evaporation during the latest outer step(), in mm per tile. */
+    fun lakePotentialEvaporationMmThisUpdate(x: Int, y: Int) = lakePotentialEvaporationMm[index(x, y)]
     fun thirtyDayRainMmPerHour(x: Int, y: Int) = climateRainMmPerHour[index(x, y)]
     fun annualizedRainMmPerYear(x: Int, y: Int) =
         climateRainMmPerHour[index(x, y)] * HOURS_PER_YEAR
@@ -125,6 +132,8 @@ class WeatherSimulation(private val world: World) {
         outerRainMm.fill(0.0)
         drainageMmThisUpdate.fill(0.0)
         overflowMmThisUpdate.fill(0.0)
+        lakeDirectRainMm.fill(0.0)
+        lakePotentialEvaporationMm.fill(0.0)
         peakSubstepPrecipitationMmPerHour.fill(0.0)
         if (seconds == 0.0) return
 
@@ -140,6 +149,18 @@ class WeatherSimulation(private val world: World) {
         for (i in 0 until count) {
             precipitationMmPerHour[i] = outerRainMm[i] / elapsedHours
         }
+    }
+
+    /** Replace the wet-lake surface mask consumed by subsequent weather substeps. */
+    fun updateLakeWaterMask(mask: BooleanArray) {
+        require(mask.size == count) { "Lake-water mask dimensions must match the weather grid" }
+        for (i in 0 until count) lakeWaterMask[i] = mask[i]
+    }
+
+    /** Return confirmed lake evaporation to atmospheric vapor exactly once. */
+    fun returnLakeEvaporationMm(x: Int, y: Int, amountMm: Double) {
+        require(amountMm >= 0.0 && amountMm.isFinite()) { "Lake evaporation must be finite and non-negative" }
+        atmosphericWaterMm[index(x, y)] += amountMm
     }
 
     /** Advance exactly one existing maximum-size weather substep and return its simulated duration. */
@@ -168,15 +189,19 @@ class WeatherSimulation(private val world: World) {
             val warmth = ((temperature + 5.0) / 35.0).coerceIn(0.0, 1.0)
             val landWaterFraction =
                 (soilWaterMm[i] / SOIL_WATER_CAPACITY_MM).coerceIn(0.0, 1.0)
-            val availableWater = if (cell.terrain == Terrain.OCEAN) 1.0 else landWaterFraction
+            val isLakeWater = cell.terrain != Terrain.OCEAN && lakeWaterMask[i]
+            val availableWater = if (cell.terrain == Terrain.OCEAN || isLakeWater) 1.0 else landWaterFraction
 
             val potentialEvaporationMm = MAX_EVAPORATION_MM_PER_DAY *
                 solarInputFactor[i] * warmth * availableWater * seconds / SECONDS_PER_DAY
             val evaporatedMm = if (cell.terrain == Terrain.OCEAN) {
                 potentialEvaporationMm
+            } else if (isLakeWater) {
+                0.0
             } else {
                 potentialEvaporationMm.coerceAtMost(soilWaterMm[i])
             }
+            if (isLakeWater) lakePotentialEvaporationMm[i] += potentialEvaporationMm
             val atmosphericWaterAfterEvaporation = atmosphericWaterMm[i] + evaporatedMm
             val saturationCapacityMm = saturationColumnWaterMm(airTemperature)
             val supersaturatedWaterMm = max(
@@ -215,15 +240,19 @@ class WeatherSimulation(private val world: World) {
             }
 
             if (cell.terrain != Terrain.OCEAN) {
-                val rawSoilMm = soilWaterMm[i] - evaporatedMm + rainMm
-                val soilCapacityOverflowMm = max(0.0, rawSoilMm - SOIL_WATER_CAPACITY_MM)
-                val soilAfterRainMm = rawSoilMm.coerceIn(0.0, SOIL_WATER_CAPACITY_MM)
-                val excessAboveFieldCapacityMm =
-                    max(0.0, soilAfterRainMm - SOIL_FIELD_CAPACITY_MM)
-                val drainedMm = excessAboveFieldCapacityMm * soilDrainageResponse
-                soilWaterMm[i] = soilAfterRainMm - drainedMm
-                overflowMmThisUpdate[i] += soilCapacityOverflowMm
-                drainageMmThisUpdate[i] += drainedMm
+                if (isLakeWater) {
+                    lakeDirectRainMm[i] += rainMm
+                } else {
+                    val rawSoilMm = soilWaterMm[i] - evaporatedMm + rainMm
+                    val soilCapacityOverflowMm = max(0.0, rawSoilMm - SOIL_WATER_CAPACITY_MM)
+                    val soilAfterRainMm = rawSoilMm.coerceIn(0.0, SOIL_WATER_CAPACITY_MM)
+                    val excessAboveFieldCapacityMm =
+                        max(0.0, soilAfterRainMm - SOIL_FIELD_CAPACITY_MM)
+                    val drainedMm = excessAboveFieldCapacityMm * soilDrainageResponse
+                    soilWaterMm[i] = soilAfterRainMm - drainedMm
+                    overflowMmThisUpdate[i] += soilCapacityOverflowMm
+                    drainageMmThisUpdate[i] += drainedMm
+                }
             }
 
             atmosphericWaterMm[i] = vaporAfterCloudEvaporationMm

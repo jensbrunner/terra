@@ -16,6 +16,8 @@ import korlibs.math.geom.Size
 import korlibs.time.seconds
 import kotlin.math.pow
 import terra.*
+import terra.hydrology.HydrologySimulation
+import terra.hydrology.HydrologyTopology
 import terra.render.TerrainMapView
 import terra.simulation.SimulationSpeed
 import terra.weather.WeatherLayer
@@ -31,7 +33,9 @@ class AtlasScene : Scene() {
     private var terrainSettings = TerrainGenerationSettings()
     private var world = World(31742, MAP_WIDTH_TILES, MAP_HEIGHT_TILES, terrainSettings)
     private var weather = WeatherSimulation(world)
-    private var climateBootstrap = ClimateBootstrap(weather)
+    private var hydrologyTopology = HydrologyTopology(world)
+    private var hydrology = HydrologySimulation(hydrologyTopology)
+    private var climateBootstrap = ClimateBootstrap(weather, ::handoffWeatherStep)
     val climateSnapshot: ClimateSnapshot?
         get() = climateBootstrap.snapshot
     private lateinit var mapLayer: Container
@@ -94,6 +98,7 @@ class AtlasScene : Scene() {
                     mapView.updateWorld(world)
                     settingsPanel.updateBiomeSummary(world.landBiomeSummary())
                     mapView.updateOverlays(weather, activeOverlays)
+                    mapView.updateSurfaceWater(hydrology)
                     updateSelectionInfo()
                 }
             } else if (!paused && dt.seconds > 0.0) {
@@ -101,7 +106,9 @@ class AtlasScene : Scene() {
                 overlayRefreshElapsedRealSeconds += dt.seconds
                 pendingWeatherSimulationSeconds += dt.seconds * simulationSpeed.simulatedSecondsPerRealSecond
                 if (weatherTickElapsedRealSeconds >= WEATHER_TICK_SECONDS) {
-                    weather.step(pendingWeatherSimulationSeconds)
+                    val elapsedSimulatedSeconds = pendingWeatherSimulationSeconds
+                    weather.step(elapsedSimulatedSeconds)
+                    handoffWeatherStep(elapsedSimulatedSeconds)
                     pendingWeatherSimulationSeconds = 0.0
                     weatherTickElapsedRealSeconds %= WEATHER_TICK_SECONDS
                     updateSelectionInfo()
@@ -138,10 +145,10 @@ class AtlasScene : Scene() {
     }
 
     private fun SContainer.drawSelectionPanel() {
-        val panelHeight = 120.0
-        solidRect(760.0, panelHeight, Colors["#101b20"]).xy(12.0, WINDOW_HEIGHT - panelHeight - 12.0)
+        val panelHeight = 164.0
+        solidRect(1140.0, panelHeight, Colors["#101b20"]).xy(12.0, WINDOW_HEIGHT - panelHeight - 12.0)
         selectionLabel = text(
-            "Click a tile to inspect it", font = uiFont, textSize = 16.0, color = Colors["#e3e8d7"]
+            "Click a tile to inspect it", font = uiFont, textSize = 15.0, color = Colors["#e3e8d7"]
         ).xy(22.0, WINDOW_HEIGHT - panelHeight + 3.0)
     }
 
@@ -165,12 +172,15 @@ class AtlasScene : Scene() {
         terrainSettings = settings
         world = World(world.seed, world.width, world.height, settings)
         weather = WeatherSimulation(world)
-        climateBootstrap = ClimateBootstrap(weather)
+        hydrologyTopology = HydrologyTopology(world)
+        hydrology = HydrologySimulation(hydrologyTopology)
+        climateBootstrap = ClimateBootstrap(weather, ::handoffWeatherStep)
         weatherTickElapsedRealSeconds = 0.0
         overlayRefreshElapsedRealSeconds = 0.0
         pendingWeatherSimulationSeconds = 0.0
         mapView.updateWorld(world)
         mapView.updateOverlays(weather, activeOverlays)
+        mapView.updateSurfaceWater(hydrology)
         updateSelectionInfo()
         settingsPanel.updateBiomeSummary(world.landBiomeSummary())
     }
@@ -200,6 +210,18 @@ class AtlasScene : Scene() {
         val rainThisUpdate = formatNumber(weather.rainMmThisUpdate(x, y), 1)
         val averageRain = formatNumber(weather.thirtyDayRainMmPerHour(x, y), 1)
         val annualizedRain = weather.annualizedRainMmPerYear(x, y).toInt()
+        val upstreamArea = hydrology.upstreamLandTileCount(x, y)
+        val discharge = formatNumber(hydrology.dischargeMmTilesPerDay(x, y), 2)
+        val soilDrainage = formatNumber(weather.drainageMmThisUpdate(x, y), 2)
+        val soilOverflow = formatNumber(weather.overflowMmThisUpdate(x, y), 2)
+        val lakeId = hydrology.lakeIdAt(x, y)
+        val lakeInfo = if (lakeId >= 0) {
+            "candidate $lakeId · storage ${formatNumber(hydrology.lakeStorageMmTiles(lakeId), 1)} mm·tiles · " +
+                "surface ${formatNumber(hydrology.lakeWaterSurfaceElevation(lakeId), 3)} normalized"
+        } else {
+            "no candidate basin"
+        }
+        val lakeWetStatus = if (hydrology.isLakeTileWet(x, y)) "under lake water" else "dry"
         selectionLabel.text = "Tile ($x, $y) · ${cell.terrain.label} · Elevation ${(cell.elevation * 100).toInt()}%\n" +
             "Air ${formatNumber(weather.airTemperatureC(x, y), 1)}°C · " +
             "Surface ${formatNumber(weather.surfaceTemperatureC(x, y), 1)}°C · " +
@@ -212,7 +234,18 @@ class AtlasScene : Scene() {
             "30-day avg $averageRain mm/h · " +
             "Air water ${formatNumber(weather.atmosphericWaterMm(x, y), 1)} mm · " +
             "Soil ${formatNumber(weather.soilWaterMm(x, y), 0)} mm " +
-            "(${(weather.soilMoisture(x, y) * 100).toInt()}%)"
+            "(${(weather.soilMoisture(x, y) * 100).toInt()}%)\n" +
+            "Upstream area $upstreamArea land tiles · flow $discharge mm·tiles/day proxy\n" +
+            "Last weather update: soil drainage $soilDrainage mm · overflow $soilOverflow mm\n" +
+            "Lake $lakeInfo · $lakeWetStatus"
+    }
+
+    private fun handoffWeatherStep(elapsedSimulatedSeconds: Double) {
+        val previousRevision = hydrology.routedPeriodRevision
+        hydrology.acceptWeatherStep(weather, elapsedSimulatedSeconds)
+        if (hydrology.routedPeriodRevision != previousRevision && this::mapView.isInitialized) {
+            mapView.updateSurfaceWater(hydrology)
+        }
     }
 
     private fun toggleLayer(layer: WeatherLayer) {

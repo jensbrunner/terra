@@ -2,8 +2,11 @@ package terra.weather
 
 import kotlin.math.floor
 
-/** Advances weather-only climate initialization in small batches across scene frames. */
-class ClimateBootstrap(private val weather: WeatherSimulation) {
+/** Advances climate-initialization weather in bounded batches and reports each emitted step. */
+class ClimateBootstrap(
+    private val weather: WeatherSimulation,
+    private val afterWeatherStep: (Double) -> Unit = {}
+) {
     private var phase = Phase.EQUILIBRATION
     private var phaseElapsedSeconds = 0.0
     var snapshot: ClimateSnapshot? = null
@@ -24,6 +27,7 @@ class ClimateBootstrap(private val weather: WeatherSimulation) {
         if (isComplete) return
         repeat(MAX_SUBSTEPS_PER_BATCH) {
             val elapsed = weather.advanceOneInternalSubstep()
+            afterWeatherStep(elapsed)
             phaseElapsedSeconds += elapsed
             when (phase) {
                 Phase.EQUILIBRATION -> if (phaseElapsedSeconds >= EQUILIBRATION_SECONDS) {

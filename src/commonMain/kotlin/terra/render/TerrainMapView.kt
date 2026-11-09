@@ -14,6 +14,7 @@ import korlibs.korge.view.tiles.tileMap
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import terra.hydrology.HydrologySimulation
 import terra.weather.WeatherLayer
 import terra.weather.WeatherSimulation
 import terra.world.Terrain
@@ -31,10 +32,19 @@ class TerrainMapView(
     private val overlayBitmaps = WeatherLayer.entries.associateWith { layer ->
         Bitmap32(world.width, world.height)
     }
+    private val surfaceWaterBitmap = Bitmap32(
+        world.width * SURFACE_WATER_PIXELS_PER_TILE,
+        world.height * SURFACE_WATER_PIXELS_PER_TILE
+    )
     private val transparentPixel = Colors["#000000"].withA(0)
     private val windArrowOutline = Colors["#101820"].withA(230)
     private val windArrowStroke = Colors["#f3f1d4"].withA(245)
+    private val riverBankColor = Colors["#143b50"].withA(238)
+    private val riverColor = Colors["#3b9cbd"].withA(232)
+    private val lakeBankColor = Colors["#22546a"].withA(225)
+    private val lakeColor = Colors["#347f9d"].withA(190)
     private var overlayContainers: Map<WeatherLayer, Container>
+    private val surfaceWaterContainer: Container
     private val selectionBorder: Container
 
     init {
@@ -57,6 +67,14 @@ class TerrainMapView(
             }
         }
 
+        surfaceWaterContainer = parent.container {
+            image(surfaceWaterBitmap) {
+                scaleX = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
+                scaleY = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
+                smoothing = false
+            }
+        }
+
         selectionBorder = parent.container {
             visible = false
             val border = 0.08
@@ -74,6 +92,166 @@ class TerrainMapView(
         }
         world = newWorld
         updateTerrainTileMapData()
+        clearSurfaceWater()
+    }
+
+    /** Redraw the water layer after hydrology publishes a new routed period. */
+    fun updateSurfaceWater(hydrology: HydrologySimulation) {
+        require(hydrology.width == world.width && hydrology.height == world.height) {
+            "Surface-water dimensions must match the terrain map"
+        }
+        surfaceWaterBitmap.lock {
+            clearSurfaceWaterPixels()
+            drawLakeTiles(hydrology)
+            drawRiverLinks(hydrology)
+        }
+    }
+
+    private fun clearSurfaceWater() {
+        surfaceWaterBitmap.lock { clearSurfaceWaterPixels() }
+    }
+
+    private fun clearSurfaceWaterPixels() {
+        for (y in 0 until surfaceWaterBitmap.height) {
+            for (x in 0 until surfaceWaterBitmap.width) surfaceWaterBitmap[x, y] = transparentPixel
+        }
+    }
+
+    private fun drawLakeTiles(hydrology: HydrologySimulation) {
+        val scale = SURFACE_WATER_PIXELS_PER_TILE
+        for (y in 0 until world.height) for (x in 0 until world.width) {
+            if (!hydrology.isLakeTileWet(x, y)) continue
+            val left = x * scale
+            val top = y * scale
+            for (py in 0 until scale) for (px in 0 until scale) {
+                surfaceWaterBitmap[left + px, top + py] = lakeColor
+            }
+        }
+
+        for (y in 0 until world.height) for (x in 0 until world.width) {
+            if (!hydrology.isLakeTileWet(x, y)) continue
+            val left = x * scale
+            val top = y * scale
+            if (y == 0 || !hydrology.isLakeTileWet(x, y - 1)) {
+                for (px in 0 until scale) surfaceWaterBitmap[left + px, top] = lakeBankColor
+            }
+            if (x == world.width - 1 || !hydrology.isLakeTileWet(x + 1, y)) {
+                for (py in 0 until scale) surfaceWaterBitmap[left + scale - 1, top + py] = lakeBankColor
+            }
+            if (y == world.height - 1 || !hydrology.isLakeTileWet(x, y + 1)) {
+                for (px in 0 until scale) surfaceWaterBitmap[left + px, top + scale - 1] = lakeBankColor
+            }
+            if (x == 0 || !hydrology.isLakeTileWet(x - 1, y)) {
+                for (py in 0 until scale) surfaceWaterBitmap[left, top + py] = lakeBankColor
+            }
+        }
+    }
+
+    private fun drawRiverLinks(hydrology: HydrologySimulation) {
+        val scale = SURFACE_WATER_PIXELS_PER_TILE
+        for (y in 0 until world.height) for (x in 0 until world.width) {
+            if (!hydrology.isLandTile(x, y) || !hydrology.isStreamTile(x, y)) continue
+            val downstream = hydrology.downstreamTileIndex(x, y)
+            val centerX = x * scale + scale / 2
+            val centerY = y * scale + scale / 2
+            val width = riverPixelWidth(hydrology.dischargeMmTilesPerDay(x, y))
+
+            if (downstream >= 0) {
+                val nextX = downstream % world.width
+                val nextY = downstream / world.width
+                val deltaX = nextX - x
+                val deltaY = nextY - y
+                if (abs(deltaX) <= 1 && abs(deltaY) <= 1) {
+                    val downstreamIsLake = hydrology.isLakeCandidateTile(nextX, nextY)
+                    val downstreamIsWetLake = downstreamIsLake && hydrology.isLakeTileWet(nextX, nextY)
+                    val downstreamIsVisible = !hydrology.isLandTile(nextX, nextY) ||
+                        hydrology.isStreamTile(nextX, nextY) || downstreamIsWetLake
+                    if (downstreamIsVisible) {
+                        val endX = if (downstreamIsLake && !downstreamIsWetLake) {
+                            nextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
+                        } else {
+                            nextX * scale + scale / 2
+                        }
+                        val endY = if (downstreamIsLake && !downstreamIsWetLake) {
+                            nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
+                        } else {
+                            nextY * scale + scale / 2
+                        }
+                        drawRiverSegment(centerX, centerY, endX, endY, width)
+                    } else if (downstreamIsLake) {
+                        val edgeX = nextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
+                        val edgeY = nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
+                        drawRiverSegment(centerX, centerY, edgeX, edgeY, width)
+                    }
+                }
+            } else {
+                val edgeX = when (x) {
+                    0 -> 0
+                    world.width - 1 -> x * scale + scale - 1
+                    else -> centerX
+                }
+                val edgeY = when (y) {
+                    0 -> 0
+                    world.height - 1 -> y * scale + scale - 1
+                    else -> centerY
+                }
+                if (edgeX != centerX || edgeY != centerY) {
+                    drawRiverSegment(centerX, centerY, edgeX, edgeY, width)
+                }
+            }
+            drawRiverBrush(centerX, centerY, width + RIVER_BANK_EXTRA_PIXELS, riverBankColor)
+            drawRiverBrush(centerX, centerY, width, riverColor)
+        }
+    }
+
+    private fun riverPixelWidth(dischargeMmTilesPerDay: Double): Int =
+        (sqrt(dischargeMmTilesPerDay / HydrologySimulation.MIN_STREAM_DISCHARGE_MM_TILES_PER_DAY)
+            .toInt() + 1).coerceIn(1, SURFACE_WATER_PIXELS_PER_TILE)
+
+    private fun drawRiverSegment(startX: Int, startY: Int, endX: Int, endY: Int, width: Int) {
+        drawSegmentBrush(startX, startY, endX, endY, width + RIVER_BANK_EXTRA_PIXELS, riverBankColor)
+        drawSegmentBrush(startX, startY, endX, endY, width, riverColor)
+    }
+
+    private fun drawSegmentBrush(
+        startX: Int,
+        startY: Int,
+        endX: Int,
+        endY: Int,
+        width: Int,
+        color: korlibs.image.color.RGBA
+    ) {
+        var x = startX
+        var y = startY
+        val deltaX = abs(endX - startX)
+        val stepX = if (startX < endX) 1 else -1
+        val deltaY = -abs(endY - startY)
+        val stepY = if (startY < endY) 1 else -1
+        var error = deltaX + deltaY
+        while (true) {
+            drawRiverBrush(x, y, width, color)
+            if (x == endX && y == endY) break
+            val doubledError = 2 * error
+            if (doubledError >= deltaY) {
+                error += deltaY
+                x += stepX
+            }
+            if (doubledError <= deltaX) {
+                error += deltaX
+                y += stepY
+            }
+        }
+    }
+
+    private fun drawRiverBrush(centerX: Int, centerY: Int, width: Int, color: korlibs.image.color.RGBA) {
+        val offset = width / 2
+        for (dy in 0 until width) for (dx in 0 until width) {
+            val x = centerX + dx - offset
+            val y = centerY + dy - offset
+            if (x in 0 until surfaceWaterBitmap.width && y in 0 until surfaceWaterBitmap.height) {
+                surfaceWaterBitmap[x, y] = color
+            }
+        }
     }
 
     fun updateOverlays(weather: WeatherSimulation, activeLayers: Set<WeatherLayer>) {
@@ -232,6 +410,8 @@ class TerrainMapView(
     }
 
     private companion object {
+        const val SURFACE_WATER_PIXELS_PER_TILE = 3
+        const val RIVER_BANK_EXTRA_PIXELS = 2
         const val WIND_ARROW_SPACING_X = 16
         const val WIND_ARROW_SPACING_Y = 12
         const val MIN_VISIBLE_WIND_SPEED = 0.05

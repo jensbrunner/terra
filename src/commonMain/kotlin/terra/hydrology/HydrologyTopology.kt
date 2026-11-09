@@ -9,6 +9,8 @@ class HydrologyTopology(world: World) {
     val width: Int = world.width
     val height: Int = world.height
     private val count = width * height
+    /** Original immutable terrain elevation in row-major order. */
+    val terrainElevation = DoubleArray(count)
 
     /** Downstream row-major tile index, or -1 for an ocean/perimeter terminal outlet. */
     val downstreamIndex = IntArray(count) { -1 }
@@ -27,11 +29,10 @@ class HydrologyTopology(world: World) {
     private val oceanByTile = BooleanArray(count)
 
     init {
-        val elevation = DoubleArray(count)
         for (y in 0 until height) for (x in 0 until width) {
             val i = y * width + x
             val cell = world[x, y]
-            elevation[i] = cell.elevation
+            terrainElevation[i] = cell.elevation
             oceanByTile[i] = cell.terrain == Terrain.OCEAN
         }
 
@@ -48,7 +49,7 @@ class HydrologyTopology(world: World) {
             val y = i / width
             if (oceanByTile[i] || x == 0 || x == width - 1 || y == 0 || y == height - 1) {
                 visited[i] = true
-                filledElevation[i] = elevation[i]
+                filledElevation[i] = terrainElevation[i]
                 floodHeap.add(i)
             }
         }
@@ -66,14 +67,14 @@ class HydrologyTopology(world: World) {
                 val next = ny * width + nx
                 if (visited[next]) continue
                 visited[next] = true
-                filledElevation[next] = max(elevation[next], filledElevation[current])
+                filledElevation[next] = max(terrainElevation[next], filledElevation[current])
                 downstreamIndex[next] = current
                 floodHeap.add(next)
             }
         }
         check(floodOrderSize == count) { "Bounded map perimeter must reach every tile" }
 
-        lakeCandidates = findLakeCandidates(elevation)
+        lakeCandidates = findLakeCandidates(terrainElevation)
         processingOrder = buildProcessingOrder()
         buildUpstreamLandArea()
         verifyProcessingOrder()
