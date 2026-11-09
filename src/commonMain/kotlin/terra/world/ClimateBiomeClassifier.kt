@@ -53,7 +53,8 @@ object ClimateBiomeClassifier {
             }
             ThermalZone.TEMPERATE, ThermalZone.WARM -> when (aridity) {
                 Aridity.VERY_DRY -> Terrain.DESERT
-                Aridity.SEMI_ARID, Aridity.MODERATE -> Terrain.PLAINS
+                Aridity.SEMI_ARID -> Terrain.STEPPE
+                Aridity.MODERATE -> Terrain.PLAINS
                 Aridity.HUMID -> Terrain.WOODS
             }
         }

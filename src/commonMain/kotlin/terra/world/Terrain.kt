@@ -5,6 +5,7 @@ enum class Terrain(val label: String) {
     MOUNTAINS("Mountains"),
     WOODS("Woods"),
     DESERT("Desert"),
+    STEPPE("Steppe"),
     OCEAN("Ocean"),
     TUNDRA("Tundra")
 }

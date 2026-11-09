@@ -8,6 +8,7 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.PI
 import kotlin.math.sin
+import kotlin.math.sqrt
 import terra.world.Terrain
 import terra.world.World
 
@@ -22,7 +23,9 @@ class WeatherSimulation(private val world: World) {
     private val cloudWaterMm = DoubleArray(count)
     private val transportedCloudWaterMm = DoubleArray(count)
     private val transportedAirTemperatureC = DoubleArray(count)
-    private val transportedAirTemperatureWeight = DoubleArray(count)
+    private val eastFaceWind = DoubleArray(count)
+    private val northFaceWind = DoubleArray(width * (height + 1))
+    private val transportOutgoingRate = DoubleArray(count)
     // Rain state is local to the tile; cloud water itself continues to advect with the air.
     private val rainActive = BooleanArray(count)
     private val precipitationMmPerHour = DoubleArray(count)
@@ -86,7 +89,9 @@ class WeatherSimulation(private val world: World) {
     fun lakeDirectRainMmThisUpdate(x: Int, y: Int) = lakeDirectRainMm[index(x, y)]
     /** Potential open-water evaporation during the latest outer step(), in mm per tile. */
     fun lakePotentialEvaporationMmThisUpdate(x: Int, y: Int) = lakePotentialEvaporationMm[index(x, y)]
+    /** Exponentially smoothed rain rate with a 30-day response time, in mm/h. */
     fun thirtyDayRainMmPerHour(x: Int, y: Int) = climateRainMmPerHour[index(x, y)]
+    /** Annualized estimate derived from the 30-day rain-rate EMA, not an observed annual total. */
     fun annualizedRainMmPerYear(x: Int, y: Int) =
         climateRainMmPerHour[index(x, y)] * HOURS_PER_YEAR
     /** Clear previous observations and start collecting climate from subsequent weather substeps. */
@@ -176,6 +181,8 @@ class WeatherSimulation(private val world: World) {
         updateAirTemperature(seconds)
 
         val condensationResponse = 1.0 - exp(-seconds / CONDENSATION_RESPONSE_SECONDS)
+        val convectiveCondensationResponse =
+            1.0 - exp(-seconds / CONVECTIVE_CONDENSATION_RESPONSE_SECONDS)
         val cloudEvaporationResponse = 1.0 - exp(-seconds / CLOUD_EVAPORATION_RESPONSE_SECONDS)
         val climateResponse = 1.0 - exp(-seconds / CLIMATE_RESPONSE_SECONDS)
         val elapsedDays = seconds / SECONDS_PER_DAY
@@ -208,8 +215,47 @@ class WeatherSimulation(private val world: World) {
                 0.0,
                 atmosphericWaterAfterEvaporation - saturationCapacityMm
             )
-            val condensedMm = supersaturatedWaterMm * condensationResponse
-            val vaporAfterCondensationMm = atmosphericWaterAfterEvaporation - condensedMm
+            val ordinaryCondensedMm = supersaturatedWaterMm * condensationResponse
+            val vaporAfterOrdinaryCondensationMm =
+                atmosphericWaterAfterEvaporation - ordinaryCondensedMm
+            val surfaceAirContrastC = temperature - airTemperature
+            val liftFraction = smoothstep(
+                CONVECTIVE_LIFT_START_CONTRAST_C,
+                CONVECTIVE_LIFT_FULL_CONTRAST_C,
+                surfaceAirContrastC
+            )
+            val relativeHumidityAfterEvaporation = relativeHumidity(
+                atmosphericWaterAfterEvaporation,
+                airTemperature
+            )
+            val humidLiftFraction = smoothstep(
+                CONVECTIVE_HUMIDITY_START,
+                CONVECTIVE_HUMIDITY_FULL,
+                relativeHumidityAfterEvaporation
+            )
+            val windwardRise = upwindTerrainRise(x, y, i)
+            val orographicLiftFraction = smoothstep(
+                OROGRAPHIC_RISE_START,
+                OROGRAPHIC_RISE_FULL,
+                windwardRise
+            )
+            val convectiveCoolingC = CONVECTIVE_MAX_LIFT_COOLING_C * liftFraction
+            val orographicCoolingC = OROGRAPHIC_MAX_LIFT_COOLING_C * orographicLiftFraction
+            val combinedLiftCoolingC = minOf(
+                MAX_COMBINED_LIFT_COOLING_C,
+                convectiveCoolingC + orographicCoolingC
+            )
+            val effectiveLiftedTemperatureC = airTemperature - combinedLiftCoolingC
+            val liftedSaturationCapacityMm = saturationColumnWaterMm(effectiveLiftedTemperatureC)
+            val convectivelyCondensableMm = max(
+                0.0,
+                vaporAfterOrdinaryCondensationMm - liftedSaturationCapacityMm
+            )
+            val convectivelyCondensedMm = convectivelyCondensableMm *
+                humidLiftFraction * convectiveCondensationResponse
+            val vaporAfterCondensationMm =
+                vaporAfterOrdinaryCondensationMm - convectivelyCondensedMm
+            val condensedMm = ordinaryCondensedMm + convectivelyCondensedMm
             val cloudAfterCondensationMm = cloudWaterMm[i] + condensedMm
 
             val saturationDeficitMm = max(0.0, saturationCapacityMm - vaporAfterCondensationMm)
@@ -288,6 +334,38 @@ class WeatherSimulation(private val world: World) {
             exp(SATURATION_CAPACITY_GROWTH_PER_C * (temperatureC - 20.0)))
             .coerceIn(MIN_SATURATION_COLUMN_WATER_MM, MAX_SATURATION_COLUMN_WATER_MM)
 
+    /** Positive elevation gain into the current wind, sampling one tile upstream. */
+    private fun upwindTerrainRise(x: Int, y: Int, i: Int): Double {
+        val u = windUTilesPerDay[i]
+        val v = windVTilesPerDay[i]
+        val speed = sqrt(u * u + v * v)
+        if (speed <= MIN_OROGRAPHIC_WIND_SPEED_TILES_PER_DAY) return 0.0
+        val upwindElevation = elevationAt(
+            x - u / speed,
+            y - v / speed
+        )
+        return max(0.0, world[x, y].elevation - upwindElevation)
+    }
+
+    /** Bilinear terrain sample with periodic X and clamped Y boundaries. */
+    private fun elevationAt(x: Double, y: Double): Double {
+        val wrappedX = ((x % width) + width) % width
+        val clampedY = y.coerceIn(0.0, (height - 1).toDouble())
+        val x0 = floor(wrappedX).toInt()
+        val y0 = floor(clampedY).toInt()
+        val x1 = (x0 + 1) % width
+        val y1 = (y0 + 1).coerceAtMost(height - 1)
+        val fractionX = wrappedX - x0
+        val fractionY = clampedY - y0
+        val northWest = world[x0, y0].elevation
+        val northEast = world[x1, y0].elevation
+        val southWest = world[x0, y1].elevation
+        val southEast = world[x1, y1].elevation
+        val north = northWest + (northEast - northWest) * fractionX
+        val south = southWest + (southEast - southWest) * fractionX
+        return north + (south - north) * fractionY
+    }
+
     private fun updateThermalState(seconds: Double) {
         for (y in 0 until height) for (x in 0 until width) {
             val i = index(x, y)
@@ -335,70 +413,102 @@ class WeatherSimulation(private val world: World) {
         return (0.15 + 0.85 * cos(latitude * PI / 2.0)).coerceIn(0.0, 1.0)
     }
 
-    /** Advect vapor, cloud water, and air temperature together in the atmospheric wind. */
+    /** Advect vapor, cloud water, and air temperature with conservative face fluxes. */
     private fun transportAirMass(seconds: Double) {
-        // Scratch buffers collect destination values before replacing the source fields.
-        // Deposited values therefore cannot be transported a second time in this pass.
-        transportedAtmosphericWaterMm.fill(0.0)
-        transportedCloudWaterMm.fill(0.0)
-        transportedAirTemperatureC.fill(0.0)
-        transportedAirTemperatureWeight.fill(0.0)
-        val elapsedDays = seconds / SECONDS_PER_DAY
         updateWindField(elapsedSeconds)
-
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                val sourceIndex = index(x, y)
-                val u = windUTilesPerDay[sourceIndex]
-                val v = windVTilesPerDay[sourceIndex]
-                val targetX = x + u * elapsedDays
-                val targetY = (y + v * elapsedDays).coerceIn(0.0, (height - 1).toDouble())
-                val x0 = floor(targetX).toInt()
-                val y0 = floor(targetY).toInt().coerceIn(0, height - 1)
-                val fractionX = targetX - x0
-                val fractionY = targetY - y0
-                val x1 = x0 + 1
-                val y1 = (y0 + 1).coerceAtMost(height - 1)
-
-                val destination0 = index(wrapX(x0), y0)
-                val destination1 = index(wrapX(x1), y0)
-                val destination2 = index(wrapX(x0), y1)
-                val destination3 = index(wrapX(x1), y1)
-                val weight0 = (1.0 - fractionX) * (1.0 - fractionY)
-                val weight1 = fractionX * (1.0 - fractionY)
-                val weight2 = (1.0 - fractionX) * fractionY
-                val weight3 = fractionX * fractionY
-                val vapor = atmosphericWaterMm[sourceIndex]
-                val cloud = cloudWaterMm[sourceIndex]
-                val temperature = airTemperatureC[sourceIndex]
-
-                transportedAtmosphericWaterMm[destination0] += vapor * weight0
-                transportedAtmosphericWaterMm[destination1] += vapor * weight1
-                transportedAtmosphericWaterMm[destination2] += vapor * weight2
-                transportedAtmosphericWaterMm[destination3] += vapor * weight3
-                transportedCloudWaterMm[destination0] += cloud * weight0
-                transportedCloudWaterMm[destination1] += cloud * weight1
-                transportedCloudWaterMm[destination2] += cloud * weight2
-                transportedCloudWaterMm[destination3] += cloud * weight3
-                transportedAirTemperatureC[destination0] += temperature * weight0
-                transportedAirTemperatureC[destination1] += temperature * weight1
-                transportedAirTemperatureC[destination2] += temperature * weight2
-                transportedAirTemperatureC[destination3] += temperature * weight3
-                transportedAirTemperatureWeight[destination0] += weight0
-                transportedAirTemperatureWeight[destination1] += weight1
-                transportedAirTemperatureWeight[destination2] += weight2
-                transportedAirTemperatureWeight[destination3] += weight3
-            }
+        buildFaceWindField()
+        transportOutgoingRate.fill(0.0)
+        for (y in 0 until height) for (x in 0 until width) {
+            val i = index(x, y)
+            val speed = eastFaceWind[i]
+            val donor = if (speed >= 0.0) i else index(wrapX(x + 1), y)
+            transportOutgoingRate[donor] += abs(speed)
         }
+        for (faceY in 1 until height) for (x in 0 until width) {
+            val speed = northFaceWind[faceY * width + x]
+            val donor = if (speed >= 0.0) index(x, faceY - 1) else index(x, faceY)
+            transportOutgoingRate[donor] += abs(speed)
+        }
+        var maxOutgoingRate = 0.0
+        for (rate in transportOutgoingRate) maxOutgoingRate = max(maxOutgoingRate, rate)
+        val elapsedDays = seconds / SECONDS_PER_DAY
+        val substeps = ceil(elapsedDays * maxOutgoingRate / TRANSPORT_CFL_LIMIT)
+            .toInt().coerceAtLeast(1)
+        val transportDays = elapsedDays / substeps
+        repeat(substeps) {
+            transportTracer(atmosphericWaterMm, transportedAtmosphericWaterMm, transportDays)
+            transportTracer(cloudWaterMm, transportedCloudWaterMm, transportDays)
+            transportTracer(airTemperatureC, transportedAirTemperatureC, transportDays, nonNegative = false)
+        }
+    }
 
-        transportedAtmosphericWaterMm.copyInto(atmosphericWaterMm)
-        transportedCloudWaterMm.copyInto(cloudWaterMm)
+    /** Build a staggered field whose discrete cell divergence cancels exactly. */
+    private fun buildFaceWindField() {
+        for (y in 0 until height) for (x in 0 until width) {
+            val eastX = wrapX(x + 1)
+            eastFaceWind[index(x, y)] = zonalWindTilesPerDay[y] +
+                streamfunction(eastX, y + 1) - streamfunction(eastX, y)
+        }
+        northFaceWind.fill(0.0)
+        for (faceY in 1 until height) for (x in 0 until width) {
+            northFaceWind[faceY * width + x] =
+                -(streamfunction(wrapX(x + 1), faceY) - streamfunction(x, faceY))
+        }
+    }
+
+    /** Wave streamfunction at periodic X and bounded Y grid vertices. */
+    private fun streamfunction(x: Int, vertexY: Int): Double {
+        val latitudePhase = PI * vertexY / height
+        val sine = sin(latitudePhase)
+        val envelope = sine * sine
+        val wave1Number = TWO_PI * WAVE_1_CYCLES / width
+        val wave2Number = TWO_PI * WAVE_2_CYCLES / width
+        val wave1Amplitude = WAVE_1_MERIDIONAL_SPEED_TILES_PER_DAY / wave1Number
+        val wave2Amplitude = WAVE_2_MERIDIONAL_SPEED_TILES_PER_DAY / wave2Number
+        val simulatedDays = elapsedSeconds / SECONDS_PER_DAY
+        val wave1Phase = wave1Number * x + TWO_PI * simulatedDays / WAVE_1_PERIOD_DAYS *
+            WAVE_1_DIRECTION + WAVE_1_PHASE_OFFSET
+        val wave2Phase = wave2Number * x + TWO_PI * simulatedDays / WAVE_2_PERIOD_DAYS *
+            WAVE_2_DIRECTION + WAVE_2_PHASE_OFFSET
+        return envelope * (wave1Amplitude * sin(wave1Phase) + wave2Amplitude * sin(wave2Phase))
+    }
+
+    /** Apply each face flux once as an equal and opposite donor/receiver update. */
+    private fun transportTracer(
+        source: DoubleArray,
+        destination: DoubleArray,
+        elapsedDays: Double,
+        nonNegative: Boolean = true
+    ) {
+        source.copyInto(destination)
+        for (y in 0 until height) for (x in 0 until width) {
+            val i = index(x, y)
+            val east = index(wrapX(x + 1), y)
+            val speed = eastFaceWind[i]
+            val donor = if (speed >= 0.0) i else east
+            val donorValue = if (nonNegative) max(0.0, source[donor]) else source[donor]
+            val amount = donorValue * abs(speed) * elapsedDays
+            val receiver = if (speed >= 0.0) east else i
+            destination[donor] -= amount
+            destination[receiver] += amount
+        }
+        for (faceY in 1 until height) for (x in 0 until width) {
+            val south = index(x, faceY)
+            val north = index(x, faceY - 1)
+            val speed = northFaceWind[faceY * width + x]
+            val donor = if (speed >= 0.0) north else south
+            val donorValue = if (nonNegative) max(0.0, source[donor]) else source[donor]
+            val amount = donorValue * abs(speed) * elapsedDays
+            destination[donor] -= amount
+            destination[if (speed >= 0.0) south else north] += amount
+        }
         for (i in 0 until count) {
-            val incomingWeight = transportedAirTemperatureWeight[i]
-            if (incomingWeight > 0.0) {
-                airTemperatureC[i] = transportedAirTemperatureC[i] / incomingWeight
-            }
+            val value = if (!nonNegative) destination[i] else if (
+                destination[i] < 0.0 && destination[i] > -1e-12
+            ) 0.0 else max(0.0, destination[i])
+            destination[i] = value
         }
+        destination.copyInto(source)
     }
 
     private fun updateWindField(simulationSeconds: Double) {
@@ -481,6 +591,7 @@ class WeatherSimulation(private val world: World) {
         const val SECONDS_PER_HOUR = 60.0 * 60.0
         const val SECONDS_PER_DAY = 24.0 * SECONDS_PER_HOUR
         const val MAX_WEATHER_STEP_SECONDS = 3.0 * SECONDS_PER_HOUR
+        const val TRANSPORT_CFL_LIMIT = 0.8
 
         const val INITIAL_RELATIVE_HUMIDITY = 0.45
         const val INITIAL_SOIL_WATER_FRACTION = 0.5
@@ -511,6 +622,17 @@ class WeatherSimulation(private val world: World) {
         const val WAVE_1_PHASE_OFFSET = 0.0
         const val WAVE_2_PHASE_OFFSET = PI / 3.0
         const val CONDENSATION_RESPONSE_SECONDS = 15.0 * 60.0
+        const val CONVECTIVE_CONDENSATION_RESPONSE_SECONDS = 6.0 * 60.0 * 60.0
+        const val CONVECTIVE_MAX_LIFT_COOLING_C = 5.0
+        const val CONVECTIVE_LIFT_START_CONTRAST_C = 2.0
+        const val CONVECTIVE_LIFT_FULL_CONTRAST_C = 12.0
+        const val CONVECTIVE_HUMIDITY_START = 0.65
+        const val CONVECTIVE_HUMIDITY_FULL = 0.95
+        const val OROGRAPHIC_RISE_START = 0.001
+        const val OROGRAPHIC_RISE_FULL = 0.02
+        const val OROGRAPHIC_MAX_LIFT_COOLING_C = 3.0
+        const val MAX_COMBINED_LIFT_COOLING_C = 7.0
+        const val MIN_OROGRAPHIC_WIND_SPEED_TILES_PER_DAY = 0.1
         const val CLOUD_EVAPORATION_RESPONSE_SECONDS = 3.0 * 60.0 * 60.0
         const val TERMINATOR_TRANSITION = 0.12
         const val MAX_NIGHT_OPACITY = 0.55
@@ -536,6 +658,9 @@ class ClimateSnapshot internal constructor(
     private val precipitationSumMm: DoubleArray,
     private val temperatureTimeIntegral: DoubleArray
 ) {
+    /** Actual precipitation depth observed during this snapshot's sampling interval, in mm. */
+    fun precipitationTotalMm(x: Int, y: Int): Double = precipitationSumMm[index(x, y)]
+
     /** Annualized precipitation depth rate, in mm/year. */
     fun annualPrecipitationMmPerYear(x: Int, y: Int): Double =
         precipitationSumMm[index(x, y)] * DAYS_PER_YEAR / sampledDays

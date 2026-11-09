@@ -205,11 +205,14 @@ class AtlasScene : Scene() {
         val x = selectedTileX ?: return
         val y = selectedTileY ?: return
         val cell = world[x, y]
-        val meanRain = formatNumber(weather.precipitationMmPerHour(x, y), 1)
-        val peakRain = formatNumber(weather.peakSubstepPrecipitationMmPerHour(x, y), 1)
-        val rainThisUpdate = formatNumber(weather.rainMmThisUpdate(x, y), 1)
-        val averageRain = formatNumber(weather.thirtyDayRainMmPerHour(x, y), 1)
-        val annualizedRain = weather.annualizedRainMmPerYear(x, y).toInt()
+        val meanRain = formatNumber(weather.precipitationMmPerHour(x, y), 3)
+        val peakRain = formatNumber(weather.peakSubstepPrecipitationMmPerHour(x, y), 3)
+        val rainThisUpdate = formatNumber(weather.rainMmThisUpdate(x, y), 3)
+        val averageRain = formatNumber(weather.thirtyDayRainMmPerHour(x, y), 3)
+        val annualizedRain = formatNumber(weather.annualizedRainMmPerYear(x, y), 1)
+        val climate = climateSnapshot!!
+        val observedRain = formatNumber(climate.precipitationTotalMm(x, y), 1)
+        val observedDays = formatNumber(climate.sampledDays, 0)
         val upstreamArea = hydrology.upstreamLandTileCount(x, y)
         val discharge = formatNumber(hydrology.dischargeMmTilesPerDay(x, y), 2)
         val soilDrainage = formatNumber(weather.drainageMmThisUpdate(x, y), 2)
@@ -225,13 +228,14 @@ class AtlasScene : Scene() {
         selectionLabel.text = "Tile ($x, $y) · ${cell.terrain.label} · Elevation ${(cell.elevation * 100).toInt()}%\n" +
             "Air ${formatNumber(weather.airTemperatureC(x, y), 1)}°C · " +
             "Surface ${formatNumber(weather.surfaceTemperatureC(x, y), 1)}°C · " +
-            "Annualized rain $annualizedRain mm/year\n" +
+            "Rain estimate $annualizedRain mm/year (30-day EMA) · " +
+            "Observed $observedDays-day total $observedRain mm\n" +
             "Humidity ${(weather.relativeHumidity(x, y) * 100).toInt()}% · " +
             "Clouds ${(weather.cloudCover(x, y) * 100).toInt()}% · " +
             "Cloud water ${formatNumber(weather.cloudWaterMm(x, y), 2)} mm\n" +
             "Rain update mean $meanRain mm/h · peak substep (≤3h) $peakRain mm/h · " +
             "total $rainThisUpdate mm\n" +
-            "30-day avg $averageRain mm/h · " +
+            "30-day EMA $averageRain mm/h · " +
             "Air water ${formatNumber(weather.atmosphericWaterMm(x, y), 1)} mm · " +
             "Soil ${formatNumber(weather.soilWaterMm(x, y), 0)} mm " +
             "(${(weather.soilMoisture(x, y) * 100).toInt()}%)\n" +
@@ -243,7 +247,9 @@ class AtlasScene : Scene() {
     private fun handoffWeatherStep(elapsedSimulatedSeconds: Double) {
         val previousRevision = hydrology.routedPeriodRevision
         hydrology.acceptWeatherStep(weather, elapsedSimulatedSeconds)
-        if (hydrology.routedPeriodRevision != previousRevision && this::mapView.isInitialized) {
+        if (hydrology.routedPeriodRevision != previousRevision &&
+            climateBootstrap.isComplete && this::mapView.isInitialized
+        ) {
             mapView.updateSurfaceWater(hydrology)
         }
     }
@@ -260,9 +266,9 @@ class AtlasScene : Scene() {
             WeatherLayer.HUMIDITY to ("Humidity" to 78.0),
             WeatherLayer.CLOUDS to ("Clouds" to 70.0),
             WeatherLayer.PRECIPITATION to ("Rain" to 62.0),
-            WeatherLayer.CLIMATE_RAIN to ("Rain 30d" to 82.0),
+            WeatherLayer.CLIMATE_RAIN to ("30d EMA mm/h" to 108.0),
             WeatherLayer.AIR_TEMPERATURE to ("Air temp" to 80.0),
-            WeatherLayer.ANNUAL_PRECIPITATION to ("Annual rain" to 98.0),
+            WeatherLayer.ANNUAL_PRECIPITATION to ("EMA rain/year" to 110.0),
             WeatherLayer.SURFACE_TEMPERATURE to ("Surface temp" to 112.0),
             WeatherLayer.DAY_NIGHT to ("Day/night" to 88.0),
             WeatherLayer.WIND to ("Wind" to 54.0)

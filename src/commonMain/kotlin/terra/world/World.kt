@@ -113,7 +113,8 @@ class World(
         fun percent(terrain: Terrain) =
             (cells.count { it.terrain == terrain } * 100 / landCount)
 
-        return "Plains ${percent(Terrain.PLAINS)}% · Woods ${percent(Terrain.WOODS)}%\n" +
+        return "Plains ${percent(Terrain.PLAINS)}% · Steppe ${percent(Terrain.STEPPE)}% · " +
+            "Woods ${percent(Terrain.WOODS)}%\n" +
             "Desert ${percent(Terrain.DESERT)}% · Tundra ${percent(Terrain.TUNDRA)}% · " +
             "Mountains ${percent(Terrain.MOUNTAINS)}%"
     }

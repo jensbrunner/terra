@@ -56,6 +56,14 @@ class TerrainMapView(
         terrainContainer.scaleX = 1.0 / terrainTileSet.width.toDouble()
         terrainContainer.scaleY = 1.0 / terrainTileSet.height.toDouble()
 
+        surfaceWaterContainer = parent.container {
+            image(surfaceWaterBitmap) {
+                scaleX = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
+                scaleY = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
+                smoothing = false
+            }
+        }
+
         overlayContainers = WeatherLayer.entries.associateWith { layer ->
             parent.container {
                 visible = false
@@ -64,14 +72,6 @@ class TerrainMapView(
                     scaleY = 1.0
                     smoothing = layer == WeatherLayer.DAY_NIGHT
                 }
-            }
-        }
-
-        surfaceWaterContainer = parent.container {
-            image(surfaceWaterBitmap) {
-                scaleX = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
-                scaleY = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
-                smoothing = false
             }
         }
 
@@ -92,7 +92,6 @@ class TerrainMapView(
         }
         world = newWorld
         updateTerrainTileMapData()
-        clearSurfaceWater()
     }
 
     /** Redraw the water layer after hydrology publishes a new routed period. */
@@ -107,14 +106,8 @@ class TerrainMapView(
         }
     }
 
-    private fun clearSurfaceWater() {
-        surfaceWaterBitmap.lock { clearSurfaceWaterPixels() }
-    }
-
     private fun clearSurfaceWaterPixels() {
-        for (y in 0 until surfaceWaterBitmap.height) {
-            for (x in 0 until surfaceWaterBitmap.width) surfaceWaterBitmap[x, y] = transparentPixel
-        }
+        surfaceWaterBitmap.fill(transparentPixel)
     }
 
     private fun drawLakeTiles(hydrology: HydrologySimulation) {
@@ -204,9 +197,11 @@ class TerrainMapView(
         }
     }
 
-    private fun riverPixelWidth(dischargeMmTilesPerDay: Double): Int =
-        (sqrt(dischargeMmTilesPerDay / HydrologySimulation.MIN_STREAM_DISCHARGE_MM_TILES_PER_DAY)
-            .toInt() + 1).coerceIn(1, SURFACE_WATER_PIXELS_PER_TILE)
+    private fun riverPixelWidth(dischargeMmTilesPerDay: Double): Int = when {
+        dischargeMmTilesPerDay <= RIVER_WIDTH_1_MAX_DISCHARGE_MM_TILES_PER_DAY -> 1
+        dischargeMmTilesPerDay <= RIVER_WIDTH_2_MAX_DISCHARGE_MM_TILES_PER_DAY -> 2
+        else -> SURFACE_WATER_PIXELS_PER_TILE
+    }
 
     private fun drawRiverSegment(startX: Int, startY: Int, endX: Int, endY: Int, width: Int) {
         drawSegmentBrush(startX, startY, endX, endY, width + RIVER_BANK_EXTRA_PIXELS, riverBankColor)
@@ -412,6 +407,8 @@ class TerrainMapView(
     private companion object {
         const val SURFACE_WATER_PIXELS_PER_TILE = 3
         const val RIVER_BANK_EXTRA_PIXELS = 2
+        const val RIVER_WIDTH_1_MAX_DISCHARGE_MM_TILES_PER_DAY = 10.0
+        const val RIVER_WIDTH_2_MAX_DISCHARGE_MM_TILES_PER_DAY = 200.0
         const val WIND_ARROW_SPACING_X = 16
         const val WIND_ARROW_SPACING_Y = 12
         const val MIN_VISIBLE_WIND_SPEED = 0.05

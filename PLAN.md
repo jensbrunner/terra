@@ -35,7 +35,7 @@
 
 ## Required implementation steps
 
-### [ ] Step 1 — Conservative, uniform-preserving 2D atmospheric advection (P0)
+### [x] Step 1 — Conservative, uniform-preserving 2D atmospheric advection (P0)
 
 **Problem:** Current forward scatter conserves the global sum but does not preserve a uniform concentration in a spatially varying wind field. It may create false wet/dry zones that feed directly into condensation and rainfall.
 
@@ -54,7 +54,7 @@
 
 **Avoid:** Normalizing transported water by inbound bilinear weights alone: it can destroy global water conservation. Avoid a general-purpose fluid solver.
 
-### [ ] Step 2 — Make climate rainfall diagnostics truthful (P1)
+### [x] Step 2 — Make climate rainfall diagnostics truthful (P1)
 
 **Problem:** The "Annual rain" overlay is based on a short EMA, which cannot tell whether a location received no rain across a year.
 
@@ -68,7 +68,7 @@
 
 **Completion criteria:** The user can distinguish a genuinely rainless tile from one that rained earlier but now has a low 30-day EMA. No precipitation physics changed.
 
-### [ ] Step 3 — Add minimal moist-convective condensation (P2)
+### [x] Step 3 — Add minimal moist-convective condensation (P2)
 
 **Problem:** Warm, moist regions have little mechanism to condense vapor unless horizontal transport brings them into colder air.
 
@@ -82,7 +82,7 @@
 
 **Completion criteria:** Warm humid regions have a physically motivated path to cloud development while dry air remains moisture-limited; vapor-to-cloud transfer is water-conserving. No separate storm or pressure system.
 
-### [ ] Step 4 — Add simple windward mountain uplift (P3)
+### [x] Step 4 — Add simple windward mountain uplift (P3)
 
 **Problem:** Local air temperature relaxes on a one-day timescale, so fast winds can cross high terrain without enough condensation. Cold mountain surface temperature is not a substitute for forced ascent.
 
@@ -165,4 +165,7 @@ _Append one concise entry per completed invocation, then stop._
 
 | Step | Status / date | Files changed | Key decisions / caveats |
 |---|---|---|---|
-| — | Pending | — | — |
+| 1 | Complete / 2026-11-09 | `WeatherSimulation.kt`, `PLAN.md` | Replaced scatter with shared upwind face fluxes, discrete streamfunction face winds with periodic X and zero-flow Y edges, and transport-only CFL substeps (0.8 outgoing Courant limit). Temperature uses the same conservative mixing flux; no physics tuning. Compile is the only planned check; no tests run. |
+| 2 | Complete / 2026-11-09 | `WeatherSimulation.kt`, `AtlasScene.kt`, `PLAN.md` | Relabeled the 30-day EMA annualization, exposed actual sampled-period rainfall total and duration in the inspector, clarified rain-rate overlay labels, and raised rain readouts to three decimals. No precipitation physics changed. |
+| 3 | Complete / 2026-11-10 | `WeatherSimulation.kt`, `PLAN.md` | Added bounded surface-air-contrast lift, humidity gating, and a six-hour condensation response. Convective condensate is limited by vapor remaining after ordinary condensation; no water is injected. Compile is the only planned check; no tests run. |
+| 4 | Complete / 2026-11-10 | `WeatherSimulation.kt`, `PLAN.md` | Added one-tile upwind bilinear elevation sampling with periodic X and clamped Y, a bounded positive-rise cooling term, and a 7°C cap shared with convection. Terrain uplift only changes saturation for existing vapor; no biome or hydrology rules changed. Compile is the only planned check; no tests run. |
