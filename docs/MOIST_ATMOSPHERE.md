@@ -35,8 +35,10 @@ The default launch retains the prescribed model. All existing weather overlays,
 wind arrows, tile inspection, terrain settings, pause and speed controls work with
 both models. Dynamical mode starts at 1 simulated hour per second, skips the old
 210-day initialization, and samples its own actual rainfall and temperature.
-Climate observations refresh hourly; the first 30 simulated days classify the
-land biomes once. They are not a claim of equilibrated annual climate.
+Climate presentation refreshes hourly. The former one-time 30-day biome
+classification is removed. Seasonal statistics discard one spin-up year and
+retain the latest two complete observed years; land cover remains provisional
+until coverage, local stationarity, and ecological persistence requirements are met.
 
 The 96×72 atmosphere shares a 12,000×9,000 km equal-area plane with the 283×212
 terrain. Exact rectangle intersections distribute rainfall and collect evaporation,
@@ -69,10 +71,11 @@ Coastal cells share one area-averaged surface temperature and heat capacity; lak
 use their land cell's thermal properties. Terrain slopes now supply diagnostic
 orographic uplift; precipitation still comes from the atmosphere's existing water.
 
-At most eight fixed physical steps run per rendered frame. Unfinished requested
-time remains visible as pending hours. High speed buttons request time but cannot
-yet deliver years/s: resolution changes and coarse climate advancement are still
-to implement. There is no long synchronous catch-up call at those speeds.
+Fixed physical steps now run on a dedicated worker, with bounded work slices and
+explicit requested/achieved/pending/unmet time reporting. No physical advancement
+runs on the render thread. High speed buttons still cannot deliver years/s;
+approximate climate advancement remains to implement. Only uncommitted rate
+demand is throttled; physical fluxes and slow reservoirs are retained.
 
 ## Physics implemented
 
@@ -139,8 +142,12 @@ roughness scales this rate as described below; there is no added polar sponge.
 The source heat capacity includes both caloric air heat and the temperature-dependent
 shallow-water potential energy. This lets latent/sensible transfers pay for their
 pressure feedback as well as their temperature change. `state.txt` reports the
-remaining energy residual, including numerical transport/mechanical dissipation.
-Exact global numerical energy conservation is not claimed.
+energy residual, including numerical transport/mechanical error. The ledger now
+also measures `numericalTransportEnergyJoules` from the state immediately before
+and after the flow/tracer step, separately from all physical heat/water sources.
+`unexplainedEnergyResidualJoules` is the residual after that numerical contribution.
+Transport error may be positive; attribution is not a correction or a claim of
+exact numerical energy conservation.
 
 This is one thermal layer on a periodic-X, bounded-Y channel, with warm-liquid microphysics and
 an idealized ocean in the standalone preview, or the terrain surface in game mode.
@@ -332,4 +339,175 @@ One ordinary 283×212 topology construction also passed its acyclicity and termi
 checks. The existing three-day reduced-grid coupled water ledger passes with
 internal ocean return. Only the four hydrology checks were rerun for that default-map
 construction. No seed sweep, multi-year run, or expensive atmospheric experiment
-was added. Repeated-year climate and reservoir behavior remain Phase 6 work.
+was added. The following Phase 6 check adds bounded repeated-year evidence.
+
+## Annual climate and delayed land-cover response (Phase 6)
+
+`SeasonalClimate` observes end-of-step surface temperature and actual rainfall on
+the coarse atmosphere grid, splitting totals and durations at orbital-season and
+year boundaries. Initial seasonal phase and non-default year lengths are respected.
+The first full model year is discarded as spin-up. Snapshots retain at most the
+last two complete observed years, with four seasonal temperature/rain aggregates,
+sampled temperature minima/maxima, peak physical-step rainfall, and wettest-season
+rain fraction. Old snapshots stay immutable. Short weather fluctuations, measured
+climate, and the world's categorical ecological state are separate.
+
+Ecology uses measured surface temperature as an explicit habitat proxy. The cold
+effective atmospheric column remains an air diagnostic and the historical
+`observedClimate()` record; it is no longer used to classify dynamical biomes.
+Surface temperature is not a calibrated two-meter air measurement. No compensating
+heat, guessed rainfall, or duplicate climate forcing was added. Climate fields are
+interpolated for tile habitat assessment only, never to transfer physical water.
+The prescribed fallback keeps its existing bootstrap/classification path.
+
+World land cover requires two post-spin-up observed years, then a local comparison
+of the latest annual cycles: mean surface temperature change at most 2°C and rain
+change at most the larger of 100 mm/year or 35% of the two annual totals. These
+are eligibility checks, not proof of an equilibrated climate. A candidate biome
+must also survive ±1°C and ±10% rain perturbations and persist for two further
+model years before the categorical tile changes. Losing eligibility or changing
+the candidate resets that delay. Ocean/mountain geography is preserved; desert,
+steppe, plains, woods, and tundra use the existing classifier. Roughness refreshes
+through the existing biome revision. There is no simulated plant population or
+continuous vegetation-density rendering. The UI identifies spin-up/annual
+observations and labels the annual surface-temperature proxy rather than presenting
+30-day rain extrapolation as established annual climate.
+
+Validation: compilation and all 32 checks pass. Three small climate/ecology tests
+cover spin-up rejection, shifted seasonal boundaries, batch-independent accounting,
+immutable rolling windows, seasonal extrema, Y mapping, eligibility, persistence,
+hysteresis, and physical terrain preservation. Existing thermal/coupled tests also
+check the unexplained energy ledger. The existing lake test now checks 36 monthly
+refill, evaporation, and spill handoffs, tracking all input and withdrawn water.
+Only its four-test class was rerun for that addition.
+
+One 8×6 coupled atmosphere on a 15×11 terrain ran three 365-day years with a
+CFL-checked 300-second experimental timestep and hour-or-shorter hydrology handoffs.
+It was repeated once to attribute the energy residual; each complete Gradle run
+took about eight seconds. Production 96×72 / 20-second physics is unchanged.
+Reproduce with the existing runner:
+
+```sh
+gradle moistAtmosphereExperiment -PmoistAtmosphereArgs='--terrain=true --days=1095 --width=8 --height=6 --step=300 --frames=4 --output=build/experiments/phase-6/coupled-climate'
+```
+
+The run's `budgets.csv` records annual checkpoints; `state.txt` includes the final
+climate summary. Final volume change was 1.64e−14, water residual 2.80e−13 (maximum
+annual-checkpoint magnitude 3.47e−13), and CFL 0.128. Ocean water at years 1/2/3
+was 1,523,724.65 / 1,523,783.89 / 1,523,785.75 mm·tiles; soil totals were
+1,562.594 / 1,562.591 / 1,562.571 mm·tiles. This particular map had no active lake
+storage; the focused lake case supplies storage/spill accounting evidence, not
+validation of real lake climate. Seasonal mean surface-temperature range averaged
+21.94°C; the two-year surface proxy averaged −15.02°C and annual rain 157.56 mm.
+No ecological transitions were expected yet: the persistence clock only becomes
+eligible at the end of this run.
+
+The three-year energy residual is +6.01e21 J, about **0.402%** of the initial
+1.50e24 J. It is measured as discrete transport energy error; after attribution,
+only 4.08e10 J (2.73e−14 of initial energy) remains unexplained. Physical radiation,
+latent/sensible exchange, and friction heat close within that bounded error.
+The positive numerical contribution remains in the simulation and must not be
+misreported as energy conservation. Absolute temperature calibration, persistent
+storms, default-resolution multi-year behavior, and ecological realism remain
+open limitations. No seed/timestep sweep or expensive production-grid run was used.
+
+## Simulation ownership (Phase 7, Step 1)
+
+The game now advances weather, initialization, hydrology, climate and ecology on
+one dedicated simulation worker. The UI receives complete immutable views through
+a latest-only mailbox, so numerical work no longer runs inside a render callback.
+Speed and pause preserve state; terrain regeneration/model reset replaces the world
+with a new generation. Requested, achieved, pending and unmet time demand are
+reported separately. Fixed physical timesteps and conservative water transfers
+are retained; high presets still need the future approximate climate engine.
+
+See `PHASE_7_WORKER.md` for ownership, demand throttling, focused checks, and the
+short desktop comparison. The old eight-steps-per-render-frame scheduling ceiling
+no longer applies.
+
+Phase 7 Step 2 retains coarse atmospheric fields in immutable display snapshots.
+Cloud and water pixels are generated on the worker; bitmap copies, GPU work and
+cloud crossfades remain on the renderer. Hydrology visuals have an independent
+bounded cadence, and dirty terrain/other overlay updates are spread across frames.
+See `PHASE_7_RENDERER.md` for the 37 passing checks, one short desktop comparison,
+and the measured worker-throughput tradeoff. The approximate climate engine is
+still future work.
+
+
+Phase 7 Step 3 adds a common typed water-flux handoff and integrated seasonal
+statistics, reusing existing soil, hydrology and surface thermal storage. The
+controlled small interval preserves pending runoff/lake water and closes the
+water balance; no fast climate engine or energy correction is activated. See
+`PHASE_7_SHARED_STATE.md` for ownership, units, focused checks and current limits.
+
+
+Phase 7 Step 4 supplies provisional geography/solar climate normals and bounded
+regional warm/cold and wet/dry anomalies, blending existing observed seasons as
+coverage becomes available. Estimates are immediately queryable without spin-up
+and do not move physical water, heat or the world clock. See
+`PHASE_7_CLIMATE_NORMALS.md` for heuristics, source labels and seven focused checks.
+Conservative fast-climate evolution remains Step 5.
+
+
+Phase 7 Step 5 implements an explicit bounded fast-climate owner transaction:
+finite-store evaporation, existing column moisture, funded representative rain,
+shared soil/hydrology/history, and stable surface thermal relaxation. Energy is
+explicitly approximate; water is audited without a corrective source. A small day
+and week advance without further fluid steps and close water within 1e-12 relative
+error. See `PHASE_7_FAST_INTERVAL.md` for the 11 focused checks, aggregate field
+semantics and limits. Automatic gameplay selection and detailed re-entry remain
+future work; Step 6 first improves coarse runoff and lakes.
+
+
+Phase 7 Step 6 integrates constant phase rainfall and drainage analytically,
+including saturation/overflow timing, and routes each coarse phase once on the
+same fine graph. Whole-interval throughput, actual represented duration, wet
+fractions and intense-rain summaries are published explicitly. A small constant-
+forcing comparison differed by 0.5382 mm soil and 0.9391% outlet flow using one
+rather than ten routing passes. See `PHASE_7_COARSE_HYDROLOGY.md` for the 15 affected
+checks and remaining within-phase/long-interval approximations. The engine still
+caps intervals at one week; Step 7 next implements seamless detailed re-entry.
+
+
+Phase 7 Step 7 adds manual fidelity switching with F in dynamical mode, preserving
+the world and shared slow state. Detailed re-entry initializes a balanced rest
+atmosphere in place from current thermal/moisture state, records its energy change,
+and restores absolute world-date forcing. Representative labels remain until a
+real detailed step completes; paused transitions do not advance the calendar.
+The 11 focused checks include a tiny 3.28-year climate schedule followed by 100
+resolved steps, with 3.4593e-15 relative lifetime water residual. See
+`PHASE_7_TRANSITIONS.md` for partition/energy semantics and limitations. M still
+switches/reset models. Climate uses fixed one-day quanta; automatic selection and
+adaptive/extreme rates remain Step 8 work.
+
+
+Phase 7 Step 8 adds automatic measured fidelity selection with hysteresis and
+adaptive quanta, including requested 1-year/s and 10-years/s controls. F remains
+a manual override and A restores automatic mode. Monthly/annual phases and bounded
+eight-phase multi-year summaries conserve water without per-year fluid/routing
+loops. Aggregate annual history is marked estimated and cannot falsely establish
+biome stability. See `PHASE_7_ADAPTIVE.md` for 19 focused passing checks and one
+short desktop comparison: observed 1.06/9.64 years per second, p99 10.24/13.16 ms.
+These are exploratory observations; aggregate hydrology/ecology accuracy and
+100 FPS remain unproven. Fast presentation and final acceptance are Steps 9–10.
+
+
+Phase 7 Step 9 separates fast visual time from the committed calendar. Climate
+uses day-averaged seasonal shading and labeled illustrative cloud drift; weather
+and water rasters crossfade while map tiles update progressively. Status and tile
+inspection now identify actual dates, periods, rate/total/peak meanings and proxy
+fields. See `PHASE_7_VISUALS.md` for seven passing focused checks and two small
+rendering smokes, including the measured seasonal-light row-fill optimization.
+Final performance, scientific and visual acceptance remains Step 10.
+
+
+Phase 7 Step 10's bounded acceptance review is recorded in
+[PHASE_7_ACCEPTANCE.md](PHASE_7_ACCEPTANCE.md). Eight focused checks and one short
+all-preset desktop pass completed: the top preset achieved 9.48 years/s with
+17.32 ms p99 frame intervals, so strict 100 FPS is not accepted. A tiny 20-year
+seasonal coarse run changed six biome tiles with relative water drift -8.840e-15;
+full-size pause acknowledgement was 62.49 ms in one observation. The initial-day
+climate/detailed rain difference is large and is explicitly not a calibration
+result. GC pressure at the highest rate, manual interaction, mature climate skill
+and long-run memory behavior remain open limits. No exhaustive suite or runtime
+gate was introduced.

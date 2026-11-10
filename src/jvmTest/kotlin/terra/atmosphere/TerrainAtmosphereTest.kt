@@ -63,6 +63,7 @@ class TerrainAtmosphereTest {
             val advanced = weather.advanceBudgeted(min(128 * config.stepSeconds, targetSeconds - weather.elapsedSeconds), 128)
             hydrology.acceptWeatherStep(weather, advanced)
             assertTrue(abs(weather.diagnostics.relativeWaterResidual) < 1e-10)
+            assertTrue(abs(weather.diagnostics.unexplainedEnergyResidualJoules / weather.diagnostics.totalModelEnergyJoules) < 1e-10)
         }
         assertTrue(weather.diagnostics.totalRainKg > 0)
         // Hydrology routes an entire accepted batch after it crosses the daily cadence.

@@ -9,6 +9,8 @@ import terra.atmosphere.MoistPhysicsConfig
 import terra.atmosphere.PlanetarySunlight
 import terra.hydrology.HydrologySimulation
 import terra.world.World
+import terra.simulation.SimulationTimings
+import terra.simulation.SimulationWork
 import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.min
@@ -20,11 +22,15 @@ class DynamicalWeather(
     world: World,
     private val hydrology: HydrologySimulation,
     val config: DryAtmosphereConfig = DryAtmosphereConfig(),
-    val physics: MoistPhysicsConfig = MoistPhysicsConfig()
+    val physics: MoistPhysicsConfig = MoistPhysicsConfig(),
+    private val timings: SimulationTimings? = null
 ) : WeatherModel {
     override val width = world.width
     override val height = world.height
     private val mapping = AtmosphereTileMapping(width, height, config)
+    internal val surfaceState get() = surface
+    internal val surfaceThermalState get() = model.surfaceThermalState
+    override val pendingWaterFluxBatch get() = surface.pendingFluxBatch
     private val surface = TerrainMoistSurface(world, mapping, hydrology)
     private val model = MoistAtmosphere(config, physics, seed = world.seed, surface = surface, initializeColumns = { x, y ->
         val c = min(config.height - 1, (y / config.dy).toInt()) * config.width +
@@ -36,30 +42,98 @@ class DynamicalWeather(
     private var view: MoistAtmosphereSnapshot = model.snapshot()
     private val temperatureIntegral = DoubleArray(config.cellCount)
     private val climate = SeasonalClimate(config.width, config.height, physics.solar.yearSeconds, physics.solar.initialYearFraction)
+    private val climateSurfaceTemperature: (Int) -> Double = { model.surfaceTemperatureKelvinAt(it) - 273.15 }
+    private val climateRain: (Int) -> Double = model::rainMmThisStepAt
+    internal val climateHistory get() = climate
+    internal val climateNormals by lazy { ClimateNormals(world, surface, physics.solar) }
+    internal fun estimateClimate(worldSeconds: Double): ClimateEstimateSnapshot =
+        climateNormals.estimate(worldSeconds, seasonalClimate)
     val seasonalClimate: SeasonalClimateSnapshot? get() = climate.snapshot
     val observedClimateYears: Int get() = climate.observedYears
     val atmosphereSnapshot: MoistAtmosphereSnapshot get() = view
+    private var fastClimate: FastClimateStepper? = null
+    internal val isClimateMode: Boolean get() = fastClimate != null
+    internal val climateDiagnostics: ClimateIntervalDiagnostics? get() = climateResult?.diagnostics
+    private var heldRepresentative: FastClimateResult? = null
+    internal var detailedReentryPending = false
+        private set
+    internal var lastHandoff: terra.atmosphere.AtmosphereHandoff? = null
+        private set
+    internal val hasRepresentativeFields get() = climateResult != null
+    private val climateResult get() = fastClimate?.latest ?: heldRepresentative
+    override fun rainEventSummary(x: Int, y: Int) = climateResult?.rainEvents(index(x, y))
+    override val fieldSemantics get() = climateResult?.semantics ?: WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW, elapsedSeconds - updateSeconds, updateSeconds)
+    internal val detailedCompletedSteps get() = model.completedSteps
     private var updateSeconds = 0.0
-    override val elapsedSeconds get() = model.elapsedSeconds
+    override val elapsedSeconds get() = fastClimate?.completedSeconds ?: model.worldSeconds
     val diagnostics get() = view.diagnostics
 
     /** Execute whole physical steps only. The caller keeps the unconsumed requested time. */
-    fun advanceBudgeted(requestedSeconds: Double, maximumSteps: Int = 8): Double {
+    fun advanceBudgeted(requestedSeconds: Double, maximumSteps: Int = 8, publishSnapshot: Boolean = true): Double {
+        check(!isClimateMode) { "Select detailed fidelity before detailed advancement" }
         require(requestedSeconds.isFinite() && requestedSeconds >= 0 && maximumSteps > 0)
         val steps = min(maximumSteps.toDouble(), floor(requestedSeconds / config.stepSeconds)).toInt()
         if (steps == 0) return 0.0
         surface.beginUpdate()
         repeat(steps) {
+            timings?.begin(SimulationWork.INTEGRATION)
             model.step()
+            timings?.end(SimulationWork.INTEGRATION)
+            timings?.begin(SimulationWork.SURFACE_BUCKET)
             surface.finishStep(config.stepSeconds)
-            climate.observe(config.stepSeconds, { model.surfaceTemperatureKelvinAt(it) - 273.15 }, model::rainMmThisStepAt)
+            timings?.end(SimulationWork.SURFACE_BUCKET)
+            timings?.begin(SimulationWork.CLIMATE_OBSERVATION)
+            climate.observe(config.stepSeconds, climateSurfaceTemperature, climateRain)
             for (c in temperatureIntegral.indices) temperatureIntegral[c] +=
                 (model.temperatureKelvinAt(c) - 273.15) * config.stepSeconds / 86400.0
+            timings?.end(SimulationWork.CLIMATE_OBSERVATION)
         }
         updateSeconds = steps * config.stepSeconds
-        view = model.snapshot()
+        surface.sealFluxBatch(updateSeconds)
+        detailedReentryPending = false
+        heldRepresentative = null
+        if (publishSnapshot) refreshSnapshot()
         return updateSeconds
     }
+
+    /** Explicit owner entry only. Automatic speed/fidelity selection is a later step. */
+    internal fun advanceClimateInterval(seconds: Double): ClimateIntervalDiagnostics {
+        require(seconds.isFinite() && seconds >= FastClimateStepper.MIN_INTERVAL_SECONDS && seconds <= 20 * physics.solar.yearSeconds)
+        val engine = fastClimate ?: FastClimateStepper(surface, hydrology, model, climate, climateNormals, elapsedSeconds)
+        val result = engine.advance(seconds)
+        fastClimate = engine
+        detailedReentryPending = false
+        heldRepresentative = null
+        updateSeconds = seconds
+        refreshSnapshot()
+        return result.diagnostics
+    }
+
+    /** Rebuild only atmosphere; no surface/history/calendar integration is performed here. */
+    internal fun resumeDetailed(): terra.atmosphere.AtmosphereHandoff? {
+        val engine = fastClimate ?: return null
+        check(surface.pendingFluxBatch?.consumed != false)
+        val handoff = model.initializeFromClimate(engine.completedSeconds)
+        heldRepresentative = engine.latest
+        fastClimate = null
+        detailedReentryPending = true
+        lastHandoff = handoff
+        refreshSnapshot()
+        return handoff
+    }
+
+    fun refreshSnapshot() {
+        timings?.begin(SimulationWork.SNAPSHOT)
+        view = model.snapshot()
+        timings?.end(SimulationWork.SNAPSHOT)
+    }
+
+    /** Snapshot owns copied fine surface fields; no live solver or transfer arrays escape. */
+    internal fun captureReadOnly(): WeatherModel = DynamicalWeatherPresentation(
+        width, height, config, physics, view, elapsedSeconds, updateSeconds,
+        climateResult?.captureFields(surface) ?: arrayOf(surface.peakRainRate.copyOf(), surface.rain.copyOf(), surface.drainage.copyOf(),
+            surface.overflow.copyOf(), surface.lakeRain.copyOf(), surface.climateRainRate.copyOf(),
+            surface.soil.copyOf()), climateResult)
 
     override fun step(seconds: Double) {
         require(seconds.isFinite() && seconds >= 0)
@@ -68,7 +142,7 @@ class DynamicalWeather(
     }
 
     fun observedClimate(): ClimateSnapshot? {
-        if (elapsedSeconds == 0.0) return null
+        if (elapsedSeconds == 0.0 || model.worldSeconds != model.elapsedSeconds || hasRepresentativeFields) return null
         val temperature = DoubleArray(width * height) { i -> sample(i % width, i / width) { x, y ->
             temperatureIntegral[y * config.width + x]
         } }
@@ -89,21 +163,21 @@ class DynamicalWeather(
     }
 
     private fun index(x: Int, y: Int) = y * width + x
-    override fun relativeHumidity(x: Int, y: Int) = sample(x, y, view::relativeHumidityAt)
-    override fun cloudWaterMm(x: Int, y: Int) = sample(x, y, view::cloudWaterMmAt)
+    override fun relativeHumidity(x: Int, y: Int) = if (hasRepresentativeFields) (atmosphericWaterMm(x, y) / 20).coerceIn(0.0, 1.0) else sample(x, y, view::relativeHumidityAt)
+    override fun cloudWaterMm(x: Int, y: Int) = climateResult?.let { result -> sample(x, y) { cx, cy -> result.cloudMm(cy * config.width + cx) } } ?: sample(x, y, view::cloudWaterMmAt)
     override fun cloudCover(x: Int, y: Int) = 1 - exp(-cloudWaterMm(x, y) / 0.15)
-    override fun atmosphericWaterMm(x: Int, y: Int) = sample(x, y, view::vaporMmAt)
-    override fun airTemperatureC(x: Int, y: Int) = sample(x, y, view::temperatureKelvinAt) - 273.15
+    override fun atmosphericWaterMm(x: Int, y: Int) = if (hasRepresentativeFields) sample(x, y) { cx, cy -> view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy) } else sample(x, y, view::vaporMmAt)
+    override fun airTemperatureC(x: Int, y: Int) = if (hasRepresentativeFields) surfaceTemperatureC(x, y) - 6.0 else sample(x, y, view::temperatureKelvinAt) - 273.15
     override fun surfaceTemperatureC(x: Int, y: Int) = sample(x, y, view::surfaceTemperatureKelvinAt) - 273.15
-    override fun windUTilesPerDay(x: Int, y: Int) = sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
-    override fun windVTilesPerDay(x: Int, y: Int) = -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters
+    override fun windUTilesPerDay(x: Int, y: Int) = if (hasRepresentativeFields) 0.0 else sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
+    override fun windVTilesPerDay(x: Int, y: Int) = if (hasRepresentativeFields) 0.0 else -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters
     override fun precipitationMmPerHour(x: Int, y: Int) = if (updateSeconds > 0) rainMmThisUpdate(x, y) * 3600 / updateSeconds else 0.0
-    override fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) = surface.peakRainRate[index(x, y)]
-    override fun rainMmThisUpdate(x: Int, y: Int) = surface.rain[index(x, y)]
-    override fun drainageMmThisUpdate(x: Int, y: Int) = surface.drainage[index(x, y)]
-    override fun overflowMmThisUpdate(x: Int, y: Int) = surface.overflow[index(x, y)]
-    override fun lakeDirectRainMmThisUpdate(x: Int, y: Int) = surface.lakeRain[index(x, y)]
-    // Lake evaporation was already withdrawn and paid for during the physical surface exchange.
+    override fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) = climateResult?.field(0, index(x, y)) ?: surface.peakRainRate[index(x, y)]
+    override fun rainMmThisUpdate(x: Int, y: Int) = climateResult?.field(1, index(x, y)) ?: surface.rain[index(x, y)]
+    override fun drainageMmThisUpdate(x: Int, y: Int) = climateResult?.field(2, index(x, y)) ?: surface.drainage[index(x, y)]
+    override fun overflowMmThisUpdate(x: Int, y: Int) = climateResult?.field(3, index(x, y)) ?: surface.overflow[index(x, y)]
+    override fun lakeDirectRainMmThisUpdate(x: Int, y: Int) = climateResult?.field(4, index(x, y)) ?: surface.lakeRain[index(x, y)]
+    // Lake evaporation is already withdrawn; detailed physics pays latent heat, climate labels its energy approximation.
     override fun lakePotentialEvaporationMmThisUpdate(x: Int, y: Int) = 0.0
     override fun thirtyDayRainMmPerHour(x: Int, y: Int) = surface.climateRainRate[index(x, y)]
     override fun annualizedRainMmPerYear(x: Int, y: Int) = thirtyDayRainMmPerHour(x, y) * 24 * 365

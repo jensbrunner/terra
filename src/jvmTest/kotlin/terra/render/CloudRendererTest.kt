@@ -12,6 +12,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import terra.weather.WeatherModel
+import terra.weather.WeatherFieldSemantics
+import terra.weather.WeatherFieldQuality
 import terra.weather.WeatherSimulation
 import terra.world.World
 
@@ -22,15 +24,15 @@ class CloudRendererTest {
         val renderer = CloudRenderer(weather.width, weather.height, 31742)
         assertTrue(renderer.update(weather))
         assertEquals(0.0, weather.elapsedSeconds)
-        for (y in 0 until renderer.bitmap.height) for (x in 2..20) {
-            assertEquals(0, renderer.bitmap[x, y].a)
+        for (y in 0 until renderer.frame.height) for (x in 2..20) {
+            assertEquals(0, renderer.frame[x, y].a)
         }
         writeVisualReview(renderer, weather)
         weather.empty = true
         weather.elapsedSeconds = 20.0
         renderer.update(weather)
-        for (y in 0 until renderer.bitmap.height) for (x in 0 until renderer.bitmap.width) {
-            assertEquals(0, renderer.bitmap[x, y].a)
+        for (y in 0 until renderer.frame.height) for (x in 0 until renderer.frame.width) {
+            assertEquals(0, renderer.frame[x, y].a)
         }
     }
 
@@ -39,16 +41,21 @@ class CloudRendererTest {
         val weather = CloudFixture(uniform = true)
         val renderer = CloudRenderer(weather.width, weather.height, 31742)
         renderer.update(weather)
-        val w = renderer.bitmap.width
-        val h = renderer.bitmap.height
-        val before = IntArray(w * h) { renderer.bitmap[it % w, it / w].a }
+        val frozen = renderer.frame
+        val w = renderer.frame.width
+        val h = renderer.frame.height
+        val before = IntArray(w * h) { renderer.frame[it % w, it / w].a }
         // 40 tiles/day for 1/80 day: exactly one rendered pixel east.
         weather.elapsedSeconds = 86400.0 / 80
-        renderer.update(weather)
+        // A new immutable publication must not reset one owner's advected texture.
+        val published = object : WeatherModel by weather {}
+        renderer.update(published)
+        assertTrue(frozen !== renderer.frame)
+        for (y in 0 until h) for (x in 0 until w) assertEquals(before[y * w + x], frozen[x, y].a)
         var movedError = 0L
         var stationaryError = 0L
         for (y in 0 until h) for (x in 0 until w) {
-            val alpha = renderer.bitmap[x, y].a
+            val alpha = renderer.frame[x, y].a
             movedError += abs(alpha - before[y * w + (x + w - 1) % w])
             stationaryError += abs(alpha - before[y * w + x])
         }
@@ -56,14 +63,37 @@ class CloudRendererTest {
         assertFalse(renderer.update(weather))
         weather.elapsedSeconds = 0.0
         assertTrue(renderer.update(weather))
-        for (y in 0 until h) for (x in 0 until w) assertEquals(before[y * w + x], renderer.bitmap[x, y].a)
+        for (y in 0 until h) for (x in 0 until w) assertEquals(before[y * w + x], renderer.frame[x, y].a)
+    }
+
+    @Test
+    fun illustrativeCloudMotionUsesVisualIncrementInsteadOfSkippedYears() {
+        val a = CloudFixture(uniform = true, representative = true)
+        val b = CloudFixture(uniform = true, representative = true)
+        val short = CloudRenderer(a.width, a.height, 31742)
+        val long = CloudRenderer(b.width, b.height, 31742)
+        short.update(a)
+        long.update(b)
+        val frozen = long.frame
+        a.elapsedSeconds = 86400.0
+        b.elapsedSeconds = 20 * 365 * 86400.0
+        short.update(a, visualElapsedSeconds = 0.2)
+        long.update(b, visualElapsedSeconds = 0.2)
+        var moved = false
+        for (y in 0 until frozen.height) for (x in 0 until frozen.width) {
+            assertEquals(short.frame[x, y], long.frame[x, y])
+            if (long.frame[x, y] != frozen[x, y]) moved = true
+        }
+        assertTrue(moved)
+        assertFalse(long.update(b, visualElapsedSeconds = 0.2)) // Paused state does no synthesis.
+        assertEquals(20 * 365 * 86400.0, b.elapsedSeconds)
     }
 
     /** One small before/after artifact for visual review, not a physics experiment. */
     private fun writeVisualReview(renderer: CloudRenderer, weather: CloudFixture) {
         val scale = 3
-        val panelWidth = renderer.bitmap.width * scale
-        val panelHeight = renderer.bitmap.height * scale
+        val panelWidth = renderer.frame.width * scale
+        val panelHeight = renderer.frame.height * scale
         val output = BufferedImage(panelWidth * 2 + 36, panelHeight + 54, BufferedImage.TYPE_INT_RGB)
         val graphics = output.createGraphics()
         graphics.color = Color(17, 28, 37)
@@ -72,12 +102,12 @@ class CloudRendererTest {
         graphics.drawString("Previous opacity overlay", 12, 23)
         graphics.drawString("Wind-advected cloud detail", panelWidth + 24, 23)
         for (panel in 0..1) {
-            val image = BufferedImage(renderer.bitmap.width, renderer.bitmap.height, BufferedImage.TYPE_INT_RGB)
+            val image = BufferedImage(renderer.frame.width, renderer.frame.height, BufferedImage.TYPE_INT_RGB)
             for (y in 0 until image.height) for (x in 0 until image.width) {
                 val tileX = x / CloudRenderer.PIXELS_PER_TILE
                 val tileY = y / CloudRenderer.PIXELS_PER_TILE
                 val water = weather.cloudWaterMm(tileX, tileY)
-                val color = renderer.bitmap[x, y]
+                val color = renderer.frame[x, y]
                 val alpha = if (panel == 0) 1 - exp(-water / 0.15) else color.a / 255.0
                 val checker = ((tileX / 7 + tileY / 7) % 2) * 9
                 val base = intArrayOf(48 + checker, 85 + checker, 73 + checker)
@@ -97,7 +127,10 @@ class CloudRendererTest {
     }
 }
 
-private class CloudFixture(private val uniform: Boolean = false) : WeatherModel by WeatherSimulation(World(31742, 96, 72)) {
+private class CloudFixture(private val uniform: Boolean = false, private val representative: Boolean = false) : WeatherModel by WeatherSimulation(World(31742, 96, 72)) {
+    override val fieldSemantics get() = if (representative)
+        WeatherFieldSemantics(WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL, 0.0, 20 * 365 * 86400.0)
+        else WeatherFieldSemantics.RESOLVED
     override val width = 96
     override val height = 72
     override var elapsedSeconds = 0.0

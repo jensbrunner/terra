@@ -139,6 +139,15 @@ class DryAtmosphere internal constructor(
         validate(h, mx, my)
     }
 
+    /** Balanced rest state for climate re-entry; retains the physical-step counter and allocation. */
+    internal fun initializeRestState(): Double {
+        val meanDepth = h.average()
+        h.fill(meanDepth)
+        mx.fill(0.0); my.fill(0.0)
+        maximumCourant = 0.0
+        return meanDepth
+    }
+
     fun step() {
         val dt = config.stepSeconds
         columns?.beginStep()
@@ -188,6 +197,9 @@ class DryAtmosphere internal constructor(
         return before * (1 - retention * retention)
     }
 
+    // After commit, next buffers hold the preceding state, available until the next step.
+    internal fun previousDepthAt(i: Int): Double = nextH[i]
+    internal fun previousKineticEnergyAt(i: Int): Double = 0.5 * (nextMx[i] * nextMx[i] + nextMy[i] * nextMy[i]) / nextH[i]
     internal fun eastWindAt(i: Int): Double = mx[i] / h[i]
     internal fun northWindAt(i: Int): Double = my[i] / h[i]
     internal fun depthAt(i: Int): Double = h[i]

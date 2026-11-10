@@ -9,13 +9,19 @@ import kotlin.math.max
 import kotlin.math.PI
 import kotlin.math.sin
 import kotlin.math.sqrt
+import terra.hydrology.WaterFluxBatch
 import terra.world.Terrain
 import terra.world.World
 
 /** A local water-cycle model with atmospheric and soil water stored as millimeters. */
 class WeatherSimulation(private val world: World) : WeatherModel {
+    override val fieldSemantics get() = pendingWaterFluxBatch?.let {
+        WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW, elapsedSeconds - it.durationSeconds, it.durationSeconds)
+    } ?: WeatherFieldSemantics.RESOLVED
     override val width = world.width
     override val height = world.height
+    override var pendingWaterFluxBatch: WaterFluxBatch? = null
+        private set
     private val count = width * height
 
     private val atmosphericWaterMm = DoubleArray(count)
@@ -134,15 +140,15 @@ class WeatherSimulation(private val world: World) : WeatherModel {
 
     /** Process all elapsed simulated time in bounded internal steps. */
     override fun step(seconds: Double) {
-        require(seconds >= 0.0) { "Simulation time cannot move backwards" }
+        require(seconds.isFinite() && seconds >= 0.0) { "Simulation time must be finite and non-negative" }
+        if (seconds == 0.0) return
+        pendingWaterFluxBatch = null
         outerRainMm.fill(0.0)
         drainageMmThisUpdate.fill(0.0)
         overflowMmThisUpdate.fill(0.0)
         lakeDirectRainMm.fill(0.0)
         lakePotentialEvaporationMm.fill(0.0)
         peakSubstepPrecipitationMmPerHour.fill(0.0)
-        if (seconds == 0.0) return
-
         val substepCount = ceil(seconds / MAX_WEATHER_STEP_SECONDS).toLong().coerceAtLeast(1L)
         val substepSeconds = seconds / substepCount
         var substepIndex = 0L
@@ -155,6 +161,7 @@ class WeatherSimulation(private val world: World) : WeatherModel {
         for (i in 0 until count) {
             precipitationMmPerHour[i] = outerRainMm[i] / elapsedHours
         }
+        pendingWaterFluxBatch = WaterFluxBatch.fromWeather(this, seconds, tracked = true)
     }
 
     /** Replace the wet-lake surface mask consumed by subsequent weather substeps. */

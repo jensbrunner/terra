@@ -1,13 +1,34 @@
 package terra.weather
 
-/** Tile-space view shared by the prescribed and dynamical atmospheres.
- * Water fluxes belong to one completed update; positive wind V points down the map.
- */
-interface WeatherModel {
+import terra.hydrology.HydrologyExchange
+import terra.hydrology.WaterFluxBatch
+
+/** Quality of representative fields, independently of integrated rainfall totals. */
+enum class WeatherFieldQuality { RESOLVED_NOW, REPRESENTATIVE_FOR_INTERVAL }
+
+/** Coarse-event diagnostics, not resolved storm intensity or an infiltration parameter. */
+data class RainEventSummary(val wetFraction: Double, val intenseRainMm: Double)
+
+data class WeatherFieldSemantics(
+    val quality: WeatherFieldQuality, val intervalStartSeconds: Double = 0.0,
+    val intervalDurationSeconds: Double = 0.0, val energyApproximate: Boolean = false, val aggregateYears: Boolean = false
+) {
+    companion object { val RESOLVED = WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW) }
+}
+
+/** Tile-space view; water fluxes belong to one completed update, and wind V points down-map. */
+interface WeatherModel : HydrologyExchange {
+    /** Rain totals are integrated over the update; representative peaks describe subperiods. */
+    val fieldSemantics: WeatherFieldSemantics get() = WeatherFieldSemantics.RESOLVED
+    fun rainEventSummary(x: Int, y: Int): RainEventSummary? = null
+    /** Owner-only handoff; immutable presentation models leave this null. */
+    val pendingWaterFluxBatch: WaterFluxBatch? get() = null
     val width: Int
     val height: Int
     /** Completed simulation time; presentation never advances the model clock. */
     val elapsedSeconds: Double
+    /** Stable across immutable publications of one weather owner; changes on regeneration. */
+    val presentationIdentity: Any get() = this
     fun step(seconds: Double)
     fun relativeHumidity(x: Int, y: Int): Double
     fun cloudCover(x: Int, y: Int): Double
@@ -30,7 +51,4 @@ interface WeatherModel {
     fun cloudWaterMm(x: Int, y: Int): Double
     fun soilWaterMm(x: Int, y: Int): Double
     fun soilMoisture(x: Int, y: Int): Double
-    fun updateLakeWaterMask(mask: BooleanArray)
-    fun returnLakeEvaporationMm(x: Int, y: Int, amountMm: Double)
-    fun hydrologyAccepted() {}
 }

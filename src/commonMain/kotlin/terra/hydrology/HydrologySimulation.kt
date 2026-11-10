@@ -10,7 +10,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     val height: Int = topology.height
     private val count = width * height
     private val candidates = topology.lakeCandidates
-    private val lakeCount = candidates.size
+    val lakeCount = candidates.size
     val oceanTileCount = (0 until count).count { !topology.isLandTile(it) }
     /** One finite well-mixed reservoir; temperatures remain spatially varying in the atmosphere. */
     var oceanWaterMmTiles: Double = oceanTileCount * 10_000.0
@@ -66,7 +66,19 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     val storedAndPendingWaterMmTiles: Double
         get() = oceanWaterMmTiles + lakeStorageMmTiles.sum() + pendingRunoffMmTiles.sum() + pendingLakeRainMmTiles.sum()
 
+    var completedRoutingPasses = 0L
+        private set
+    var aggregatedClimateInterval = false
+        private set
     private var lakeEvaporationChanged = false
+    private val presentationGeography by lazy {
+        HydrologyGeography(width, height, BooleanArray(count) { topology.isLandTile(it) },
+            topology.downstreamIndex.copyOf(), topology.upstreamLandTileCount.copyOf(),
+            BooleanArray(count) { topology.isVirtualSpillLink(it) }, lakeIdByTile.copyOf())
+    }
+
+    fun snapshot(): HydrologySnapshot = HydrologySnapshot(presentationGeography, routedPeriodRevision,
+        dischargeMmTilesPerDay.copyOf(), lakeWetMask.copyOf(), lakeStorageMmTiles.copyOf(), lakeWaterSurfaceElevation.copyOf(), routedMmTiles.copyOf(), lastRoutedPeriodDays, aggregatedClimateInterval)
 
     /** Immediate finite-store withdrawal for a coupled atmosphere; caller pays the latent heat. */
     fun evaporateLakeWaterMmTiles(x: Int, y: Int, requested: Double): Double {
@@ -81,7 +93,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     }
 
     /** Refresh geometry once after a batch, rather than once for every surface fragment. */
-    fun finishSurfaceExchange(weather: WeatherModel) {
+    fun finishSurfaceExchange(weather: HydrologyExchange) {
         if (!lakeEvaporationChanged) return
         for (lake in candidates.indices) lakeWaterSurfaceElevation[lake] = waterSurfaceElevation(lake)
         updateLakeWetMask(weather)
@@ -116,28 +128,60 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
             "Elapsed simulated time must be finite and non-negative"
         }
         if (elapsedSimulatedSeconds == 0.0) return
-        finishSurfaceExchange(weather)
-
-        for (y in 0 until height) for (x in 0 until width) {
-            val i = y * width + x
-            if (topology.isLandTile(i)) {
-                val drainageMm = weather.drainageMmThisUpdate(x, y)
-                val overflowMm = weather.overflowMmThisUpdate(x, y)
-                if (drainageMm > 0.0) pendingRunoffMmTiles[i] += drainageMm
-                if (overflowMm > 0.0) pendingRunoffMmTiles[i] += overflowMm
-            }
-            val directRainMm = weather.lakeDirectRainMmThisUpdate(x, y)
-            val potentialEvaporationMm = weather.lakePotentialEvaporationMmThisUpdate(x, y)
-            if (directRainMm > 0.0) pendingLakeRainMmTiles[i] += directRainMm
-            if (potentialEvaporationMm > 0.0) {
-                pendingLakePotentialEvaporationMmTiles[i] += potentialEvaporationMm
-            }
-        }
-
-        pendingElapsedSeconds += elapsedSimulatedSeconds
-        if (pendingElapsedSeconds >= HYDROLOGY_CADENCE_SECONDS) routePendingPeriod(weather)
-        weather.hydrologyAccepted()
+        val batch = weather.pendingWaterFluxBatch ?: WaterFluxBatch.fromWeather(weather, elapsedSimulatedSeconds)
+        require(batch.durationSeconds == elapsedSimulatedSeconds) { "Handoff duration must match the completed weather update" }
+        acceptFluxBatch(batch)
     }
+
+    /** Detailed/prescribed compatibility path retains its existing daily cadence. */
+    fun acceptFluxBatch(batch: WaterFluxBatch) = acceptBatch(batch, forceRoute = false)
+
+    /** Route the actual representative phase once, including any pre-existing pending duration. */
+    fun acceptClimateFluxBatch(batch: WaterFluxBatch): Double {
+        val representedSeconds = pendingElapsedSeconds + batch.durationSeconds
+        acceptBatch(batch, forceRoute = true)
+        aggregatedClimateInterval = true
+        return representedSeconds
+    }
+
+    /** Only publishes diagnostic throughput: never credits ocean or routes physical water again. */
+    internal fun publishClimateThroughput(seconds: Double, throughput: DoubleArray, lakeInflow: DoubleArray, outlet: Double) {
+        require(seconds.isFinite() && seconds > 0 && throughput.size == count && lakeInflow.size == lakeCount)
+        require(throughput.all { it.isFinite() && it >= 0 } && lakeInflow.all { it.isFinite() && it >= 0 } && outlet.isFinite() && outlet >= 0)
+        throughput.copyInto(routedMmTiles)
+        lakeInflow.copyInto(lakeInflowMmTiles)
+        lastRoutedPeriodDays = seconds / SECONDS_PER_DAY
+        for (i in 0 until count) dischargeMmTilesPerDay[i] = throughput[i] / lastRoutedPeriodDays
+        outletMmTilesLastPeriod = outlet
+        aggregatedClimateInterval = true
+        routedPeriodRevision++
+    }
+
+    private fun acceptBatch(batch: WaterFluxBatch, forceRoute: Boolean) {
+        require(batch.width == width && batch.height == height) { "Flux and hydrology dimensions must match" }
+        batch.claim()
+        val exchange = batch.exchange
+        finishSurfaceExchange(exchange)
+        for (i in 0 until count) {
+            val runoff = batch.runoffMmAt(i)
+            val rain = batch.directLakeRainMmAt(i)
+            val evaporation = batch.potentialLakeEvaporationMmAt(i)
+            check(runoff.isFinite() && runoff >= 0 && rain.isFinite() && rain >= 0 && evaporation.isFinite() && evaporation >= 0)
+            check(runoff == 0.0 || topology.isLandTile(i)) { "Runoff must come from land" }
+            check(rain == 0.0 || lakeIdByTile[i] >= 0) { "Direct lake rain must target a lake candidate" }
+            check(evaporation == 0.0 || lakeIdByTile[i] >= 0) { "Lake evaporation must target a lake candidate" }
+            pendingRunoffMmTiles[i] += runoff
+            pendingLakeRainMmTiles[i] += rain
+            pendingLakePotentialEvaporationMmTiles[i] += evaporation
+        }
+        pendingElapsedSeconds += batch.durationSeconds
+        if (forceRoute || pendingElapsedSeconds >= HYDROLOGY_CADENCE_SECONDS) routePendingPeriod(exchange)
+        exchange.hydrologyAccepted()
+    }
+
+    fun waterInventory() = HydrologyWaterInventory(oceanWaterMmTiles, lakeStorageMmTiles.sum(),
+        pendingRunoffMmTiles.sum(), pendingLakeRainMmTiles.sum(), pendingLakePotentialEvaporationMmTiles.sum(),
+        pendingElapsedSeconds)
 
     /** Latest routed throughput for this tile, in mm·tiles over the latest processed period. */
     fun routedMmTiles(x: Int, y: Int): Double = routedMmTiles[index(x, y)]
@@ -179,7 +223,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     fun isVirtualSpillLink(x: Int, y: Int): Boolean =
         topology.isVirtualSpillLink(index(x, y))
 
-    private fun routePendingPeriod(weather: WeatherModel) {
+    private fun routePendingPeriod(weather: HydrologyExchange) {
         val elapsedDays = pendingElapsedSeconds / SECONDS_PER_DAY
         routedMmTiles.fill(0.0)
         for (i in 0 until count) routedMmTiles[i] = pendingRunoffMmTiles[i]
@@ -226,6 +270,8 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         outletMmTilesTotal += outletAmount
         receiveOceanWaterMmTiles(outletAmount)
         lastRoutedPeriodDays = elapsedDays
+        aggregatedClimateInterval = false
+        completedRoutingPasses++
         routedPeriodRevision++
         pendingRunoffMmTiles.fill(0.0)
         pendingLakeRainMmTiles.fill(0.0)
@@ -234,7 +280,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         updateLakeWetMask(weather)
     }
 
-    private fun updateLake(lakeId: Int, weather: WeatherModel): Double {
+    private fun updateLake(lakeId: Int, weather: HydrologyExchange): Double {
         val inflow = lakeInflowMmTiles[lakeId]
         val directRain = lakeDirectRainMmTiles[lakeId]
         val potentialEvaporation = lakePotentialEvaporationMmTiles[lakeId]
@@ -254,7 +300,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     }
 
     private fun returnLakeEvaporation(
-        weather: WeatherModel,
+        weather: HydrologyExchange,
         lakeId: Int,
         actualEvaporation: Double,
         potentialEvaporation: Double
@@ -284,7 +330,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         return returned
     }
 
-    private fun updateLakeWetMask(weather: WeatherModel) {
+    private fun updateLakeWetMask(weather: HydrologyExchange) {
         lakeWetMask.fill(false)
         for (lakeId in candidates.indices) {
             if (lakeStorageMmTiles[lakeId] <= 0.0) continue

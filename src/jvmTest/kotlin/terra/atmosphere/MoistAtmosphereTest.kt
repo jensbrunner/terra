@@ -65,6 +65,7 @@ class MoistAtmosphereTest {
         val final = model.snapshot()
         assertTrue(final.dynamics.eastWindAt(geometry.width / 4, 3) > 0)
         assertTrue(abs(final.diagnostics.relativeWaterResidual) < 1e-11)
+        assertTrue(abs(final.diagnostics.unexplainedEnergyResidualJoules / final.diagnostics.totalModelEnergyJoules) < 1e-10)
         for (y in 0 until geometry.height) for (x in 0 until geometry.width) {
             assertTrue(final.vaporMmAt(x, y).isFinite() && final.vaporMmAt(x, y) >= 0)
             assertTrue(final.cloudWaterMmAt(x, y).isFinite() && final.cloudWaterMmAt(x, y) >= 0)

@@ -6,6 +6,7 @@ import korlibs.korge.scene.sceneContainer
 import korlibs.math.geom.Size
 import korlibs.render.awt.AwtGameWindow
 import terra.ui.AtlasScene
+import terra.experiments.DesktopPerformanceProbe
 import java.awt.EventQueue
 import javax.swing.JFrame
 
@@ -22,7 +23,9 @@ suspend fun main() {
             }
         }
         sceneContainer().changeTo {
-            AtlasScene(dynamicalAtmosphere = System.getProperty("terra.weatherModel") == "dynamical")
+            AtlasScene(dynamicalAtmosphere = System.getProperty("terra.weatherModel") == "dynamical",
+                performanceProbe = DesktopPerformanceProbe.fromProperties(
+                    "vsync=${gameWindow.vsync}; configured_fps=${gameWindow.fps}; preferred_fps=${gameWindow.preferredFps}"))
         }
     }
 }

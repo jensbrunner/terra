@@ -19,6 +19,7 @@ class World(
     private val cells = Array(width * height) {
         Cell(0.0, 0.0, Terrain.OCEAN)
     }
+    private val publishedTerrainChanges = BooleanArray(width * height)
     private var climateBiomesApplied = false
     private val pendingBiome = arrayOfNulls<Terrain>(width * height)
     private val pendingBiomeSeconds = DoubleArray(width * height)
@@ -29,6 +30,17 @@ class World(
 
     init {
         generate()
+    }
+
+    fun snapshot(generation: Long, previous: WorldSnapshot? = null): WorldSnapshot {
+        if (previous != null && previous.generation == generation) {
+            for (i in cells.indices) if (cells[i].terrain != previous[i % width, i / width].terrain)
+                publishedTerrainChanges[i] = true
+        }
+        val dirty = IntArray(publishedTerrainChanges.count { it })
+        var next = 0
+        for (i in cells.indices) if (publishedTerrainChanges[i]) dirty[next++] = i
+        return WorldSnapshot(generation, seed, width, height, biomeRevision, cells.copyOf(), landBiomeSummary(), dirty)
     }
 
     private fun generate() {

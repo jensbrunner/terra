@@ -1,6 +1,7 @@
 package terra.atmosphere
 
 import kotlin.math.PI
+import kotlin.math.acos
 import kotlin.math.asin
 import kotlin.math.cos
 import kotlin.math.max
@@ -60,6 +61,15 @@ class PlanetarySunlight(
         cosLatitude[y] * cosDeclination * (cosLongitude[x] * cosRotation - sinLongitude[x] * sinRotation)
 
     fun inputFactor(x: Int, y: Int): Double = max(0.0, cosineZenith(x, y))
+
+    /** Diurnal mean of the same cosine-zenith geometry; independent of longitude/rotation. */
+    fun dailyMeanInputFactor(y: Int): Double {
+        val a = sinLatitude[y] * sinDeclination
+        val b = cosLatitude[y] * cosDeclination
+        if (b <= 1e-15) return max(0.0, a)
+        val sunset = acos((-a / b).coerceIn(-1.0, 1.0))
+        return max(0.0, (sunset * a + b * sin(sunset)) / PI)
+    }
 
     /** Smooth visual twilight around the horizon, independent of shortwave intensity. */
     fun nightOpacity(x: Int, y: Int): Double {

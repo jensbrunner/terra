@@ -1581,17 +1581,71 @@ repeated-year climate and ocean/soil/lake behavior remain Phase 6 work.
 
 Tasks:
 
-- [ ] Establish reliable seasonal and long-term climate statistics.
-- [ ] Replace premature 30-day biome assumptions.
-- [ ] Separate temporary weather from ecological state.
-- [ ] Add slow vegetation/biome response only after climate is credible.
-- [ ] Preserve desert, steppe, plains, woods, tundra, ocean, and mountain distinctions.
-- [ ] Evaluate long-term ocean, lake, and soil-water behavior.
-- [ ] Ensure repeated years do not produce unexplained water or energy drift.
+- [x] Establish reliable seasonal and long-term climate statistics.
+- [x] Replace premature 30-day biome assumptions.
+- [x] Separate temporary weather from ecological state.
+- [x] Add slow vegetation/biome response only after climate is credible.
+- [x] Preserve desert, steppe, plains, woods, tundra, ocean, and mountain distinctions.
+- [x] Evaluate long-term ocean, lake, and soil-water behavior.
+- [x] Ensure repeated years do not produce unexplained water or energy drift.
 
 **Success:** Recognizable annual cycles, different wet/dry climates, and gradual ecological change.
 
 Avoid adding fully simulated ecosystems prematurely. Climate stability comes first.
+
+---
+
+### Phase 6 result — 10 November 2026
+
+Added bounded `SeasonalClimate` observations on the atmospheric grid. The first
+full model year is spin-up; the latest two complete observed years provide four
+orbital-season temperature/rain aggregates, sampled temperature extrema, peak rain,
+and seasonality. Observations split at seasonal/year boundaries with the configured
+year length and initial phase. Snapshots are immutable and memory does not grow
+with elapsed years. Existing cumulative weather diagnostics remain separate.
+
+Removed dynamical mode's one-time 30-day biome classification. Ecology now uses
+measured surface temperature as a stated habitat proxy, avoiding the cold effective
+column temperature. Two post-spin-up annual cycles and local stationarity are
+required; candidate cover must survive temperature/rain perturbations and persist
+for two further years. Losing eligibility resets the delay. Ocean/mountains remain
+physical geography; the existing land biome distinctions and roughness revision
+are preserved. UI labels distinguish provisional land cover, annual observations,
+and surface-proxy temperatures. The prescribed fallback retains its old bootstrap.
+
+**Focused checks:** Compilation and all 32 tests passed. Three added cases cover
+seasonal accounting/offset boundaries and spin-up, immutable windows/extrema and
+map orientation, and gated ecological inertia/hysteresis/physical overrides.
+Existing thermal and coupled checks now verify an unexplained-energy ledger. The
+lake case adds 36 cheap monthly fill/evaporation/spill handoffs; only its four-test
+class was rerun for that addition.
+
+**Bounded repeated-year assessment:** Extended the existing moist experiment runner
+with terrain coupling and annual budget CSV output. One 8×6 atmosphere / 15×11
+terrain ran three years (315,360 fixed 300-second steps), repeated once to attribute
+a material energy residual. Each run took about eight seconds including Gradle.
+Production resolution/timestep are unchanged; no exhaustive sweep was run.
+Results are in `build/experiments/phase-6/coupled-climate/`; the command is in
+`docs/MOIST_ATMOSPHERE.md`. Final water residual is 2.80e−13 (annual-checkpoint
+maximum 3.47e−13), volume change 1.64e−14, CFL 0.128. Ocean and soil totals settle
+between years 2–3; no active lake formed in this map, so the focused lake cycles
+provide only accounting coverage. Mean seasonal surface-temperature range is
+21.94°C. No biome transition is expected at the first eligibility boundary.
+
+The energy assessment exposed +6.01e21 J of discrete transport energy change,
+**0.402%** of initial model energy over three years. The added ledger measures
+transport separately before any physical source update; after this attribution,
+the unexplained residual is 4.08e10 J, or 2.73e−14 of initial energy. No artificial
+heat correction was applied. Water and physical source bookkeeping close in this
+bounded run; numerical energy conservation is not claimed, and positive transport
+error remains an explicit limitation.
+
+**Open acceptance limits:** Annual coverage and stationarity are operational gates,
+not proof of physically calibrated climate. Surface temperatures remain cool and
+are not calibrated near-surface air values. Persistent storms, production-grid
+multi-year behavior, real lake climate, and ecological realism remain unvalidated.
+The delayed categorical response is a minimal ecological model, not continuous
+vegetation biomass or a full ecosystem.
 
 ---
 

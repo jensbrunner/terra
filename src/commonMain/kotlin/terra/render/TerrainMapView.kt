@@ -14,37 +14,45 @@ import korlibs.korge.view.tiles.tileMap
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
-import terra.hydrology.HydrologySimulation
 import terra.weather.WeatherLayer
 import terra.weather.WeatherModel
+import terra.weather.WeatherFieldQuality
+import terra.atmosphere.SolarConfig
 import terra.world.Terrain
-import terra.world.World
+import terra.world.WorldSnapshot
+import terra.simulation.SimulationTimings
+import terra.simulation.SimulationWork
 
 /** Draws the terrain tile map and its independently toggled weather overlays. */
 class TerrainMapView(
     parent: Container,
-    initialWorld: World,
-    private val terrainTextures: Map<Terrain, Bitmap32>
+    initialWorld: WorldSnapshot,
+    private val terrainTextures: Map<Terrain, Bitmap32>,
+    private val timings: SimulationTimings? = null
 ) {
     private var world = initialWorld
     private val terrainTileSet = createTerrainTileSet()
     private val terrainTileMapData = TileMapData(world.width, world.height, terrainTileSet)
-    private val cloudRenderer = CloudRenderer(world.width, world.height, world.seed)
-    private var cloudRefreshElapsedSeconds = 0.0
+    private val queuedTerrain = BooleanArray(world.width * world.height)
+    private val terrainQueue = ArrayDeque<Int>()
+    private var nextOverlay = 0
+    private var cloudFrame: RasterFrame? = null
+    private val layerWeather = mutableMapOf<WeatherLayer, WeatherModel>()
     private val overlayBitmaps = WeatherLayer.entries.associateWith { layer ->
-        if (layer == WeatherLayer.CLOUDS) cloudRenderer.bitmap else Bitmap32(world.width, world.height)
+        if (layer == WeatherLayer.CLOUDS) Bitmap32(world.width * CloudRenderer.PIXELS_PER_TILE, world.height * CloudRenderer.PIXELS_PER_TILE) else Bitmap32(world.width, world.height)
     }
+    private val overlayFades = overlayBitmaps.mapValues { (_, bitmap) -> LayerFade(Bitmap32(bitmap.width, bitmap.height)) }
+    private var lightingWeather: WeatherModel? = null
+    private var seasonalLighting: SeasonalLighting? = null
     private val surfaceWaterBitmap = Bitmap32(
         world.width * SURFACE_WATER_PIXELS_PER_TILE,
         world.height * SURFACE_WATER_PIXELS_PER_TILE
     )
+    private val waterFade = LayerFade(Bitmap32(surfaceWaterBitmap.width, surfaceWaterBitmap.height))
+    private val nightTint = Colors["#071321"]
     private val transparentPixel = Colors["#000000"].withA(0)
     private val windArrowOutline = Colors["#101820"].withA(230)
     private val windArrowStroke = Colors["#f3f1d4"].withA(245)
-    private val riverBankColor = Colors["#143b50"].withA(238)
-    private val riverColor = Colors["#3b9cbd"].withA(232)
-    private val lakeBankColor = Colors["#22546a"].withA(225)
-    private val lakeColor = Colors["#347f9d"].withA(190)
     private var overlayContainers: Map<WeatherLayer, Container>
     private val surfaceWaterContainer: Container
     private val selectionBorder: Container
@@ -59,22 +67,37 @@ class TerrainMapView(
         terrainContainer.scaleY = 1.0 / terrainTileSet.height.toDouble()
 
         surfaceWaterContainer = parent.container {
-            image(surfaceWaterBitmap) {
+            waterFade.previousImage = image(waterFade.previous) {
                 scaleX = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
                 scaleY = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
-                smoothing = false
+                smoothing = false; alpha = 0.0
+            }
+            waterFade.currentImage = image(surfaceWaterBitmap) {
+                scaleX = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
+                scaleY = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
+                smoothing = false; alpha = 0.0
             }
         }
 
         overlayContainers = WeatherLayer.entries.associateWith { layer ->
             parent.container {
                 visible = false
-                image(overlayBitmaps.getValue(layer)) {
+                val fade = overlayFades.getValue(layer)
+                fade.previousImage = image(fade.previous) {
+                    val pixelsPerTile = if (layer == WeatherLayer.CLOUDS) CloudRenderer.PIXELS_PER_TILE else 1
+                    scaleX = 1.0 / pixelsPerTile
+                    scaleY = 1.0 / pixelsPerTile
+                    smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS
+                    alpha = 0.0
+                }
+                val overlayImage = image(overlayBitmaps.getValue(layer)) {
                     val pixelsPerTile = if (layer == WeatherLayer.CLOUDS) CloudRenderer.PIXELS_PER_TILE else 1
                     scaleX = 1.0 / pixelsPerTile
                     scaleY = 1.0 / pixelsPerTile
                     smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS
                 }
+                fade.currentImage = overlayImage
+                overlayImage.alpha = 0.0
             }
         }
 
@@ -89,198 +112,96 @@ class TerrainMapView(
         }
     }
 
-    fun updateWorld(newWorld: World) {
+    fun updateWorld(newWorld: WorldSnapshot) {
         require(newWorld.width == world.width && newWorld.height == world.height) {
             "Terrain map dimensions cannot change after the view is created"
         }
-        if (newWorld !== world) cloudRenderer.reset(newWorld.seed)
+        val generationChanged = world.generation != newWorld.generation
         world = newWorld
-        updateTerrainTileMapData()
+        if (generationChanged) {
+            cloudFrame = null
+            layerWeather.clear()
+            lightingWeather = null
+            for ((layer, bitmap) in overlayBitmaps) { bitmap.fill(transparentPixel); overlayFades.getValue(layer).reset() }
+            surfaceWaterBitmap.fill(transparentPixel); waterFade.reset()
+            for (i in queuedTerrain.indices) enqueueTerrain(i)
+        } else for (i in 0 until world.changedTerrainCount) enqueueTerrain(world.changedTerrainIndex(i))
     }
 
-    /** Redraw the water layer after hydrology publishes a new routed period. */
-    fun updateSurfaceWater(hydrology: HydrologySimulation) {
-        require(hydrology.width == world.width && hydrology.height == world.height) {
-            "Surface-water dimensions must match the terrain map"
-        }
-        surfaceWaterBitmap.lock {
-            clearSurfaceWaterPixels()
-            drawLakeTiles(hydrology)
-            drawRiverLinks(hydrology)
-        }
+    /** Only the completed pixel copy/texture invalidation runs on the renderer thread. */
+    fun updateSurfaceWater(frame: RasterFrame) {
+        waterFade.begin(surfaceWaterBitmap)
+        upload(surfaceWaterBitmap, frame)
+        waterFade.complete(surfaceWaterBitmap)
     }
 
-    private fun clearSurfaceWaterPixels() {
-        surfaceWaterBitmap.fill(transparentPixel)
+    private fun upload(bitmap: Bitmap32, frame: RasterFrame) {
+        require(bitmap.width == frame.width && bitmap.height == frame.height)
+        bitmap.lock { frame.copyInto(bitmap.ints) }
     }
 
-    private fun drawLakeTiles(hydrology: HydrologySimulation) {
-        val scale = SURFACE_WATER_PIXELS_PER_TILE
-        for (y in 0 until world.height) for (x in 0 until world.width) {
-            if (!hydrology.isLakeTileWet(x, y)) continue
-            val left = x * scale
-            val top = y * scale
-            for (py in 0 until scale) for (px in 0 until scale) {
-                surfaceWaterBitmap[left + px, top + py] = lakeColor
-            }
-        }
-
-        for (y in 0 until world.height) for (x in 0 until world.width) {
-            if (!hydrology.isLakeTileWet(x, y)) continue
-            val left = x * scale
-            val top = y * scale
-            if (y == 0 || !hydrology.isLakeTileWet(x, y - 1)) {
-                for (px in 0 until scale) surfaceWaterBitmap[left + px, top] = lakeBankColor
-            }
-            if (!hydrology.isLakeTileWet((x + 1) % world.width, y)) {
-                for (py in 0 until scale) surfaceWaterBitmap[left + scale - 1, top + py] = lakeBankColor
-            }
-            if (y == world.height - 1 || !hydrology.isLakeTileWet(x, y + 1)) {
-                for (px in 0 until scale) surfaceWaterBitmap[left + px, top + scale - 1] = lakeBankColor
-            }
-            if (!hydrology.isLakeTileWet((x + world.width - 1) % world.width, y)) {
-                for (py in 0 until scale) surfaceWaterBitmap[left, top + py] = lakeBankColor
-            }
-        }
-    }
-
-    private fun drawRiverLinks(hydrology: HydrologySimulation) {
-        val scale = SURFACE_WATER_PIXELS_PER_TILE
-        for (y in 0 until world.height) for (x in 0 until world.width) {
-            if (!hydrology.isLandTile(x, y) || !hydrology.isStreamTile(x, y)) continue
-            val downstream = hydrology.downstreamTileIndex(x, y)
-            val centerX = x * scale + scale / 2
-            val centerY = y * scale + scale / 2
-            val width = riverPixelWidth(hydrology.dischargeMmTilesPerDay(x, y))
-
-            if (downstream >= 0) {
-                if (!hydrology.isVirtualSpillLink(x, y)) {
-                    val nextX = downstream % world.width
-                    val nextY = downstream / world.width
-                    var deltaX = nextX - x
-                    if (deltaX > world.width / 2) deltaX -= world.width
-                    if (deltaX < -world.width / 2) deltaX += world.width
-                    val drawnNextX = x + deltaX
-                    val deltaY = nextY - y
-                    if (abs(deltaX) <= 1 && abs(deltaY) <= 1) {
-                        val downstreamIsLake = hydrology.isLakeCandidateTile(nextX, nextY)
-                        val downstreamIsWetLake = downstreamIsLake && hydrology.isLakeTileWet(nextX, nextY)
-                        val downstreamIsVisible = !hydrology.isLandTile(nextX, nextY) ||
-                            hydrology.isStreamTile(nextX, nextY) || downstreamIsWetLake
-                        if (downstreamIsVisible) {
-                            val endX = if (downstreamIsLake && !downstreamIsWetLake) {
-                                drawnNextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
-                            } else {
-                                drawnNextX * scale + scale / 2
-                            }
-                            val endY = if (downstreamIsLake && !downstreamIsWetLake) {
-                                nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
-                            } else {
-                                nextY * scale + scale / 2
-                            }
-                            drawRiverSegment(centerX, centerY, endX, endY, width)
-                        } else if (downstreamIsLake) {
-                            val edgeX = drawnNextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
-                            val edgeY = nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
-                            drawRiverSegment(centerX, centerY, edgeX, edgeY, width)
-                        }
-                    }
-                }
-            }
-            drawRiverBrush(centerX, centerY, width + RIVER_BANK_EXTRA_PIXELS, riverBankColor)
-            drawRiverBrush(centerX, centerY, width, riverColor)
-        }
-    }
-
-    private fun riverPixelWidth(dischargeMmTilesPerDay: Double): Int = when {
-        dischargeMmTilesPerDay <= RIVER_WIDTH_1_MAX_DISCHARGE_MM_TILES_PER_DAY -> 1
-        dischargeMmTilesPerDay <= RIVER_WIDTH_2_MAX_DISCHARGE_MM_TILES_PER_DAY -> 2
-        else -> SURFACE_WATER_PIXELS_PER_TILE
-    }
-
-    private fun drawRiverSegment(startX: Int, startY: Int, endX: Int, endY: Int, width: Int) {
-        drawSegmentBrush(startX, startY, endX, endY, width + RIVER_BANK_EXTRA_PIXELS, riverBankColor)
-        drawSegmentBrush(startX, startY, endX, endY, width, riverColor)
-    }
-
-    private fun drawSegmentBrush(
-        startX: Int,
-        startY: Int,
-        endX: Int,
-        endY: Int,
-        width: Int,
-        color: korlibs.image.color.RGBA
-    ) {
-        var x = startX
-        var y = startY
-        val deltaX = abs(endX - startX)
-        val stepX = if (startX < endX) 1 else -1
-        val deltaY = -abs(endY - startY)
-        val stepY = if (startY < endY) 1 else -1
-        var error = deltaX + deltaY
-        while (true) {
-            drawRiverBrush(x, y, width, color)
-            if (x == endX && y == endY) break
-            val doubledError = 2 * error
-            if (doubledError >= deltaY) {
-                error += deltaY
-                x += stepX
-            }
-            if (doubledError <= deltaX) {
-                error += deltaX
-                y += stepY
-            }
-        }
-    }
-
-    private fun drawRiverBrush(centerX: Int, centerY: Int, width: Int, color: korlibs.image.color.RGBA) {
-        val offset = width / 2
-        for (dy in 0 until width) for (dx in 0 until width) {
-            val x = ((centerX + dx - offset) % surfaceWaterBitmap.width + surfaceWaterBitmap.width) % surfaceWaterBitmap.width
-            val y = centerY + dy - offset
-            if (y in 0 until surfaceWaterBitmap.height) {
-                surfaceWaterBitmap[x, y] = color
-            }
-        }
-    }
-
-    fun updateOverlays(weather: WeatherModel, activeLayers: Set<WeatherLayer>, elapsedRealSeconds: Double = CloudRenderer.REFRESH_SECONDS) {
-        cloudRefreshElapsedSeconds += elapsedRealSeconds
-        for (layer in WeatherLayer.entries) {
-            val container = overlayContainers.getValue(layer)
-            container.visible = layer in activeLayers
-            if (!container.visible) continue
-
+    fun updateOverlays(weather: WeatherModel, activeLayers: Set<WeatherLayer>, clouds: RasterFrame?, solar: SolarConfig) {
+        for (layer in WeatherLayer.entries) overlayContainers.getValue(layer).visible = layer in activeLayers
+        // Round robin prevents later layers starving when publications arrive during a refresh.
+        var renderedOverlay = false
+        val firstOverlay = nextOverlay
+        repeat(WeatherLayer.entries.size) { offset ->
+            val index = (firstOverlay + offset) % WeatherLayer.entries.size
+            val layer = WeatherLayer.entries[index]
+            if (layer !in activeLayers) return@repeat
             val bitmap = overlayBitmaps.getValue(layer)
             if (layer == WeatherLayer.CLOUDS) {
-                if (cloudRefreshElapsedSeconds >= CloudRenderer.REFRESH_SECONDS) {
-                    cloudRenderer.update(weather)
-                    cloudRefreshElapsedSeconds %= CloudRenderer.REFRESH_SECONDS
+                if (clouds != null && clouds !== cloudFrame) {
+                    timings?.begin(SimulationWork.CLOUD_BITMAP)
+                    overlayFades.getValue(layer).begin(bitmap)
+                    upload(bitmap, clouds)
+                    overlayFades.getValue(layer).complete(bitmap)
+                    cloudFrame = clouds
+                    timings?.end(SimulationWork.CLOUD_BITMAP)
                 }
-                continue
+                return@repeat
+            }
+            if (renderedOverlay || layerWeather[layer] === weather) return@repeat
+            renderedOverlay = true
+            nextOverlay = (index + 1) % WeatherLayer.entries.size
+            layerWeather[layer] = weather
+            overlayFades.getValue(layer).begin(bitmap)
+            val representative = weather.fieldSemantics.quality == WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL
+            if (layer == WeatherLayer.DAY_NIGHT && representative && lightingWeather !== weather) {
+                seasonalLighting = SeasonalLighting.capture(world.height, weather.fieldSemantics, solar)
+                lightingWeather = weather
+            }
+            if (layer == WeatherLayer.DAY_NIGHT) {
+                timings?.begin(SimulationWork.OTHER_OVERLAYS)
+                bitmap.lock {
+                    for (y in 0 until world.height) {
+                        if (representative) {
+                            val color = nightTint.withA((seasonalLighting!!.opacityAtRow(y) * 255).toInt()).value
+                            bitmap.ints.fill(color, y * world.width, (y + 1) * world.width)
+                        } else for (x in 0 until world.width) bitmap[x, y] = nightTint.withA((weather.nightOpacity(x, y) * 255).toInt())
+                    }
+                }
+                overlayFades.getValue(layer).complete(bitmap)
+                timings?.end(SimulationWork.OTHER_OVERLAYS)
+                return@repeat
             }
             if (layer == WeatherLayer.WIND) {
+                timings?.begin(SimulationWork.OTHER_OVERLAYS)
                 updateWindOverlay(bitmap, weather)
-                continue
+                overlayFades.getValue(layer).complete(bitmap)
+                timings?.end(SimulationWork.OTHER_OVERLAYS)
+                return@repeat
             }
+            timings?.begin(SimulationWork.OTHER_OVERLAYS)
             bitmap.lock {
                 for (y in 0 until world.height) {
                     for (x in 0 until world.width) {
-                        val color = when (layer) {
-                            WeatherLayer.DAY_NIGHT -> Colors["#071321"]
-                            WeatherLayer.WIND -> windArrowStroke
-                            else -> tileColor(layer, weather, x, y)
-                        }
-                        val opacity = when (layer) {
-                            WeatherLayer.DAY_NIGHT -> weather.nightOpacity(x, y)
-                            WeatherLayer.WIND -> 0.0
-                            else -> 0.42
-                        }
-
-                        bitmap[x, y] = color.withA((opacity * 255).toInt())
+                        bitmap[x, y] = tileColor(layer, weather, x, y).withA((0.42 * 255).toInt())
                     }
                 }
             }
+            overlayFades.getValue(layer).complete(bitmap)
+            timings?.end(SimulationWork.OTHER_OVERLAYS)
         }
     }
 
@@ -392,19 +313,43 @@ class TerrainMapView(
         )
     }
 
+    /** Crossfade completed rasters; no visual fraction is ever written back to physical state. */
+    fun advanceVisuals(realSeconds: Double) {
+        val seconds = realSeconds.coerceIn(0.0, 0.25)
+        for (fade in overlayFades.values) fade.advance(seconds)
+        waterFade.advance(seconds)
+        advanceTerrainUpdates()
+    }
+
+    private fun enqueueTerrain(index: Int) {
+        if (!queuedTerrain[index]) { queuedTerrain[index] = true; terrainQueue.addLast(index) }
+    }
+
+    /** Amortize abrupt biome/world changes; selection/physics always use the latest complete view. */
+    private fun advanceTerrainUpdates() {
+        if (terrainQueue.isEmpty()) return
+        timings?.begin(SimulationWork.TERRAIN_TILES)
+        repeat(minOf(1024, terrainQueue.size)) {
+            val i = terrainQueue.removeFirst()
+            queuedTerrain[i] = false
+            val x = i % world.width; val y = i / world.width
+            terrainTileMapData[x, y] = Tile(world[x, y].terrain.ordinal)
+        }
+        timings?.end(SimulationWork.TERRAIN_TILES)
+    }
+
     private fun updateTerrainTileMapData() {
+        timings?.begin(SimulationWork.TERRAIN_TILES)
         for (y in 0 until world.height) {
             for (x in 0 until world.width) {
                 terrainTileMapData[x, y] = Tile(world[x, y].terrain.ordinal)
             }
         }
+        timings?.end(SimulationWork.TERRAIN_TILES)
     }
 
     private companion object {
-        const val SURFACE_WATER_PIXELS_PER_TILE = 3
-        const val RIVER_BANK_EXTRA_PIXELS = 2
-        const val RIVER_WIDTH_1_MAX_DISCHARGE_MM_TILES_PER_DAY = 10.0
-        const val RIVER_WIDTH_2_MAX_DISCHARGE_MM_TILES_PER_DAY = 200.0
+        const val SURFACE_WATER_PIXELS_PER_TILE = SurfaceWaterRasterizer.PIXELS_PER_TILE
         const val WIND_ARROW_SPACING_X = 16
         const val WIND_ARROW_SPACING_Y = 12
         const val MIN_VISIBLE_WIND_SPEED = 0.05
@@ -414,4 +359,28 @@ class TerrainMapView(
         const val WIND_ARROW_HEAD_LENGTH = 1.8
         const val WIND_ARROW_HEAD_ANGLE = 0.65
     }
+}
+
+/** Render-thread blend buffers. Hidden layers retain data, and generation reset hides obsolete rasters. */
+private class LayerFade(val previous: Bitmap32) {
+    var previousImage: Image? = null
+    var currentImage: Image? = null
+    private var age = 0.0
+    private var hasData = false
+    fun begin(current: Bitmap32) {
+        previous.lock { if (hasData) current.ints.copyInto(previous.ints) else previous.ints.fill(0) }
+        hasData = true
+        age = 0.0
+        advance(0.0)
+    }
+    fun complete(current: Bitmap32) {
+        if (previous.ints.contentEquals(current.ints)) { age = 0.18; advance(0.0) }
+    }
+    fun advance(seconds: Double) {
+        age = minOf(0.18, age + seconds)
+        val fraction = if (hasData) age / 0.18 else 0.0
+        previousImage?.alpha = if (hasData) 1.0 - fraction else 0.0
+        currentImage?.alpha = fraction
+    }
+    fun reset() { hasData = false; advance(0.0) }
 }

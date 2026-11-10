@@ -97,6 +97,17 @@ class GlobalHydrologyTest {
         assertEquals(capacity, hydrology.lakeStorageMmTiles(0), 1e-9)
         assertEquals(oceanBefore + 4080 - capacity, hydrology.oceanWaterMmTiles, 1e-9)
         assertEquals(oceanBefore + 4080, hydrology.storedAndPendingWaterMmTiles, 1e-9)
+        // Three inexpensive annual cycles of monthly basin refill, evaporation,
+        // and spill. Evaporation leaves this subsystem for the atmosphere.
+        var expected = oceanBefore + 4080
+        weather.runoff = { if (it in depression) 20.0 else 0.0 }
+        repeat(36) {
+            val evaporated = hydrology.evaporateLakeWaterMmTiles(0, 4, 10.0)
+            hydrology.acceptWeatherStep(weather, 365 * 86400.0 / 12)
+            expected += 80 - evaporated
+            assertEquals(expected, hydrology.storedAndPendingWaterMmTiles, 1e-8)
+            assertEquals(capacity, hydrology.lakeStorageMmTiles(0), 1e-8)
+        }
     }
 
     @Test

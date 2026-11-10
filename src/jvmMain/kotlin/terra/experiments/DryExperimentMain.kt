@@ -66,6 +66,7 @@ fun main(args: Array<String>) {
     val initialImage = DryAtmosphereImages.frame(initial, initialMoist)
     ImageIO.write(initialImage, "png", File(output, "initial.png"))
     println("${if (moist) "Moist" else "Dry"} $scenario ${config.width}×${config.height}: $steps fixed ${config.stepSeconds}s steps")
+    val budgets = StringBuilder("day,relative_water_residual,energy_residual_J,numerical_transport_energy_J,unexplained_energy_residual_J,ocean_mm_tiles,soil_mm_tiles,lake_and_pending_mm_tiles,observed_years\n")
     AnimatedGif(File(output, "atmosphere.gif")).use { animation ->
         animation.add(initialImage)
         while (completedSteps() < steps) {
@@ -75,7 +76,7 @@ fun main(args: Array<String>) {
                     steps - completedSteps(), stride - completedSteps() % stride).toInt()
                 val advanced = coupled.advanceBudgeted(batch * config.stepSeconds, batch)
                 hydrology!!.acceptWeatherStep(coupled, advanced)
-                world!!.advanceClimateBiomes(coupled.seasonalClimate, advanced)
+                world.advanceClimateBiomes(coupled.seasonalClimate, advanced)
             } else if (wetModel != null) wetModel.step() else model!!.step()
             if (completedSteps() % stride == 0L || completedSteps() == steps) {
                 val wet = wetSnapshot()
@@ -85,10 +86,13 @@ fun main(args: Array<String>) {
                 if (coupled != null) {
                     val diagnostics = wet!!.diagnostics
                     val soil = (0 until coupled.height).sumOf { y -> (0 until coupled.width).sumOf { x -> coupled.soilWaterMm(x, y) } }
+                    budgets.append("${elapsedSeconds() / 86400},${diagnostics.relativeWaterResidual},${diagnostics.energyResidualJoules}," +
+                        "${diagnostics.numericalTransportEnergyJoules},${diagnostics.unexplainedEnergyResidualJoules},${hydrology!!.oceanWaterMmTiles},$soil,${hydrology.storedAndPendingWaterMmTiles - hydrology.oceanWaterMmTiles},${coupled.observedClimateYears}\n")
                     println("water_residual=${diagnostics.relativeWaterResidual}; energy_residual_J=${diagnostics.energyResidualJoules}; " +
-                        "ocean_mm_tiles=${hydrology!!.oceanWaterMmTiles}; soil_mm_tiles=$soil; " +
+                        "transport_energy_J=${diagnostics.numericalTransportEnergyJoules}; unexplained_energy_J=${diagnostics.unexplainedEnergyResidualJoules}; " +
+                        "ocean_mm_tiles=${hydrology.oceanWaterMmTiles}; soil_mm_tiles=$soil; " +
                         "lake_and_pending_mm_tiles=${hydrology.storedAndPendingWaterMmTiles - hydrology.oceanWaterMmTiles}; " +
-                        "observed_years=${coupled.observedClimateYears}; biome_revision=${world!!.biomeRevision}")
+                        "observed_years=${coupled.observedClimateYears}; biome_revision=${world.biomeRevision}")
                 }
             }
         }
@@ -110,6 +114,7 @@ fun main(args: Array<String>) {
         "final_non_zonal_rms_wind_m_s=${nonZonalRmsWind(final)}\n" +
         "interpretation=equivalent-fluid height; not pressure in hPa; terrain_coupled=$terrain\n"
     val wetText = finalMoist?.diagnostics?.let { d ->
+        "initial_model_energy_J=${initialMoist!!.diagnostics.totalModelEnergyJoules}\ntotal_model_energy_J=${d.totalModelEnergyJoules}\n" +
         "mean_vapor_mm=${d.meanVaporMm}\nmean_cloud_mm=${d.meanCloudMm}\nmean_rain_total_mm=${d.meanRainTotalMm}\n" +
             "maximum_rain_mm_h=${d.maximumRainMmPerHour}\nmean_air_temperature_K=${d.meanAirTemperatureKelvin}\n" +
             "relative_water_residual=${d.relativeWaterResidual}\nnet_radiation_J=${d.netRadiationJoules}\n" +
@@ -117,6 +122,7 @@ fun main(args: Array<String>) {
             "solar_day_seconds=${finalMoist.physics.solar.daySeconds}\nsolar_year_seconds=${finalMoist.physics.solar.yearSeconds}\n" +
             "axial_tilt_degrees=${finalMoist.physics.solar.axialTiltDegrees}\n" +
             "mean_tropical_surface_K=${meanBandTemperature(finalMoist, true)}\nmean_polar_surface_K=${meanBandTemperature(finalMoist, false)}\n" +
+            "numerical_transport_energy_J=${d.numericalTransportEnergyJoules}\nunexplained_energy_residual_J=${d.unexplainedEnergyResidualJoules}\n" +
             "energy_residual_J=${d.energyResidualJoules}\ntotal_evaporation_kg=${d.totalEvaporationKg}\ntotal_rain_kg=${d.totalRainKg}\n"
     } ?: ""
     val climateText = coupled?.seasonalClimate?.let { climate ->
@@ -127,9 +133,10 @@ fun main(args: Array<String>) {
                 (0..3).maxOf { climate.seasonMeanSurfaceTemperatureC(it, cell) } -
                     (0..3).minOf { climate.seasonMeanSurfaceTemperatureC(it, cell) }
             }.average()}\n" +
-            "biome_revision=${world!!.biomeRevision}\nocean_mm_tiles=${hydrology!!.oceanWaterMmTiles}\n"
+            "biome_revision=${world.biomeRevision}\nocean_mm_tiles=${hydrology!!.oceanWaterMmTiles}\n"
     } ?: ""
     File(output, "state.txt").writeText(text + wetText + climateText)
+    if (coupled != null) File(output, "budgets.csv").writeText(budgets.toString())
     println(text)
     print(wetText + climateText)
     println("Preview: ${File(output, "atmosphere.gif").absolutePath}")

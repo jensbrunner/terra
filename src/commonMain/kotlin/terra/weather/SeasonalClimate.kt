@@ -30,8 +30,11 @@ class SeasonalClimate(
     private var yearElapsed = 0.0
     private var segment = 0
     private var completedYears = 0
+    private var currentYearEstimated = false
     private var latest: ClimateYear? = null
     var snapshot: SeasonalClimateSnapshot? = null
+        private set
+    var elapsedSeconds = 0.0
         private set
     val observedYears: Int get() = max(0, completedYears - 1)
 
@@ -44,6 +47,61 @@ class SeasonalClimate(
      * Split duration and rainfall at exact seasonal/year boundaries, including offset years.
      */
     fun observe(seconds: Double, surfaceTemperatureC: (Int) -> Double, rainMm: (Int) -> Double) {
+        accumulate(seconds, surfaceTemperatureC, rainMm)
+    }
+
+    /** Bulk ingestion keeps existing spin-up, seasonal splits and two-observed-year eligibility. */
+    fun observeInterval(summary: ClimateIntervalSummary) {
+        require(summary.width == width && summary.height == height)
+        require(summary.startSeconds == elapsedSeconds) { "Climate interval must follow the last committed observation" }
+        accumulate(summary.durationSeconds, summary::meanTemperatureC, summary::precipitationMm,
+            summary::minimumTemperatureC, summary::maximumTemperatureC, summary::peakRainMmPerHour)
+    }
+
+    /** Keep only the boundary fragments and last two annual estimates; skip middle years arithmetically.
+     * The representative seasonal rates are estimates, never independent proof of stationarity.
+     */
+    internal fun observeAggregate(start: Double, seconds: Double, summary: SeasonalAggregate) {
+        require(start == elapsedSeconds && seconds.isFinite() && seconds > yearSeconds)
+        require(summary.temperatureC.size == 4 && summary.rainMmPerSecond.size == 4)
+        for (season in 0..3) {
+            require(summary.temperatureC[season].size == count && summary.rainMmPerSecond[season].size == count)
+            require(summary.temperatureC[season].all { it.isFinite() } && summary.rainMmPerSecond[season].all { it.isFinite() && it >= 0 })
+        }
+        val target = start + seconds
+        fun consume(duration: Double) {
+            var remaining = duration
+            while (remaining > 0.0) {
+                val span = min(remaining, boundaries[segment + 1] - yearElapsed)
+                val season = seasons[segment]
+                currentYearEstimated = true
+                accumulate(span, { summary.temperatureC[season][it] }, { summary.rainMmPerSecond[season][it] * span },
+                    { summary.minimumC[it] }, { summary.maximumC[it] }, { summary.peakMmPerHour[it] })
+                remaining -= span
+            }
+        }
+        consume(min(seconds, yearSeconds - yearElapsed))
+        val complete = floor((target - elapsedSeconds) / yearSeconds).toInt().coerceAtLeast(0)
+        if (complete > 0) {
+            val duration = DoubleArray(4) { yearSeconds / 4 }
+            val year = ClimateYear(Array(4) { s -> DoubleArray(count) { summary.temperatureC[s][it] * duration[s] } },
+                Array(4) { s -> DoubleArray(count) { summary.rainMmPerSecond[s][it] * duration[s] } }, duration,
+                summary.minimumC.copyOf(), summary.maximumC.copyOf(), summary.peakMmPerHour.copyOf(), estimated = true)
+            val previous = if (complete >= 2) year else latest
+            completedYears += complete
+            snapshot = SeasonalClimateSnapshot(width, height, yearSeconds, observedYears, previous, year)
+            latest = year
+            elapsedSeconds += complete * yearSeconds
+        }
+        if (target > elapsedSeconds) consume(target - elapsedSeconds)
+        elapsedSeconds = target
+    }
+
+    private fun accumulate(
+        seconds: Double, surfaceTemperatureC: (Int) -> Double, rainMm: (Int) -> Double,
+        intervalMinimum: ((Int) -> Double)? = null, intervalMaximum: ((Int) -> Double)? = null,
+        intervalPeakRain: ((Int) -> Double)? = null
+    ) {
         require(seconds.isFinite() && seconds > 0)
         var remaining = seconds
         while (remaining > 0.0) {
@@ -56,9 +114,9 @@ class SeasonalClimate(
                 check(t.isFinite() && r.isFinite() && r >= 0)
                 temperature[season][cell] += t * span
                 rain[season][cell] += r * (span / seconds)
-                minimum[cell] = min(minimum[cell], t)
-                maximum[cell] = max(maximum[cell], t)
-                peakRain[cell] = max(peakRain[cell], r * 3600 / seconds)
+                minimum[cell] = min(minimum[cell], intervalMinimum?.invoke(cell) ?: t)
+                maximum[cell] = max(maximum[cell], intervalMaximum?.invoke(cell) ?: t)
+                peakRain[cell] = max(peakRain[cell], intervalPeakRain?.invoke(cell) ?: (r * 3600 / seconds))
             }
             remaining -= span
             yearElapsed += span
@@ -68,24 +126,26 @@ class SeasonalClimate(
                     completedYears++
                     if (completedYears > 1) {
                         val year = ClimateYear(temperature.map { it.copyOf() }.toTypedArray(),
-                            rain.map { it.copyOf() }.toTypedArray(), durations.copyOf(), minimum.copyOf(), maximum.copyOf(), peakRain.copyOf())
+                            rain.map { it.copyOf() }.toTypedArray(), durations.copyOf(), minimum.copyOf(), maximum.copyOf(), peakRain.copyOf(), currentYearEstimated)
                         snapshot = SeasonalClimateSnapshot(width, height, yearSeconds, observedYears, latest, year)
                         latest = year
                     }
                     temperature.forEach { it.fill(0.0) }; rain.forEach { it.fill(0.0) }
                     durations.fill(0.0); minimum.fill(Double.POSITIVE_INFINITY)
                     maximum.fill(Double.NEGATIVE_INFINITY); peakRain.fill(0.0)
+                    currentYearEstimated = false
                     yearElapsed = 0.0
                     segment = 0
                 }
             }
         }
+        elapsedSeconds += seconds
     }
 }
 
 internal class ClimateYear(
     val temperatureIntegral: Array<DoubleArray>, val rain: Array<DoubleArray>, val durations: DoubleArray,
-    val minimum: DoubleArray, val maximum: DoubleArray, val peakRain: DoubleArray
+    val minimum: DoubleArray, val maximum: DoubleArray, val peakRain: DoubleArray, val estimated: Boolean = false
 ) {
     fun temperature(cell: Int): Double = temperatureIntegral.sumOf { it[cell] } / durations.sum()
     fun precipitation(cell: Int): Double = rain.sumOf { it[cell] }
@@ -98,6 +158,7 @@ class SeasonalClimateSnapshot internal constructor(
     val width: Int, val height: Int, val yearSeconds: Double, val observedYears: Int,
     private val previous: ClimateYear?, private val latest: ClimateYear
 ) {
+    val containsAggregateEstimates: Boolean get() = latest.estimated || previous?.estimated == true
     val hasAnnualCoverage: Boolean get() = previous != null
     val windowYears: Int get() = if (previous == null) 1 else 2
     fun meanSurfaceTemperatureC(cell: Int): Double =
@@ -109,6 +170,10 @@ class SeasonalClimateSnapshot internal constructor(
             ((previous?.durations?.get(season) ?: 0.0) + latest.durations[season])
     fun seasonPrecipitationMm(season: Int, cell: Int): Double =
         ((previous?.rain?.get(season)?.get(cell) ?: 0.0) + latest.rain[season][cell]) / windowYears
+    /** Actual season depth divided by represented duration, independent of orbital-year length. */
+    fun seasonMeanPrecipitationMmPerDay(season: Int, cell: Int): Double =
+        ((previous?.rain?.get(season)?.get(cell) ?: 0.0) + latest.rain[season][cell]) * 86400.0 /
+            ((previous?.durations?.get(season) ?: 0.0) + latest.durations[season])
     fun minimumSurfaceTemperatureC(cell: Int): Double = min(previous?.minimum?.get(cell) ?: Double.POSITIVE_INFINITY, latest.minimum[cell])
     fun maximumSurfaceTemperatureC(cell: Int): Double = max(previous?.maximum?.get(cell) ?: Double.NEGATIVE_INFINITY, latest.maximum[cell])
     fun peakRainMmPerHour(cell: Int): Double = max(previous?.peakRain?.get(cell) ?: 0.0, latest.peakRain[cell])
@@ -122,6 +187,7 @@ class SeasonalClimateSnapshot internal constructor(
     fun annualPrecipitationAtTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int): Double =
         sampleTile(x, y, tileWidth, tileHeight, ::annualPrecipitationMm)
     fun stableAtTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int): Boolean {
+        if (containsAggregateEstimates) return false
         val old = previous ?: return false
         val temperatureChange = sampleTile(x, y, tileWidth, tileHeight) { latest.temperature(it) - old.temperature(it) }
         val rainChange = sampleTile(x, y, tileWidth, tileHeight) { latest.precipitation(it) - old.precipitation(it) }
@@ -141,3 +207,9 @@ class SeasonalClimateSnapshot internal constructor(
             (field(y1 * width + x0) * (1 - fx) + field(y1 * width + x1) * fx) * fy
     }
 }
+
+/** Producer-owned scratch summary, consumed synchronously on the simulation owner. */
+internal class SeasonalAggregate(
+    val temperatureC: Array<DoubleArray>, val rainMmPerSecond: Array<DoubleArray>,
+    val minimumC: DoubleArray, val maximumC: DoubleArray, val peakMmPerHour: DoubleArray
+)

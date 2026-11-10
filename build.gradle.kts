@@ -30,6 +30,13 @@ kotlin {
 tasks.withType<JavaExec>().configureEach {
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     systemProperty("terra.weatherModel", providers.gradleProperty("weatherModel").orElse("prescribed").get())
+    systemProperty("terra.profile", providers.gradleProperty("performanceProfile").orElse("false").get())
+    systemProperty("terra.profile.seconds", providers.gradleProperty("profileSeconds").orElse("2.0").get())
+    systemProperty("terra.profile.warmup", providers.gradleProperty("profileWarmup").orElse("0.5").get())
+    systemProperty("terra.profile.speeds", providers.gradleProperty("profileSpeeds").orElse("").get())
+    systemProperty("terra.profile.dayNight", providers.gradleProperty("profileDayNight").orElse("false").get())
+    systemProperty("terra.profile.clouds", providers.gradleProperty("profileClouds").orElse("").get())
+    systemProperty("terra.profile.output", providers.gradleProperty("profileOutput").orElse("build/experiments/phase-7/baseline").get())
     systemProperty("terra.atmosphereGeometry", providers.gradleProperty("atmosphereGeometry").orElse("LATITUDE_CHANNEL").get())
 }
 
