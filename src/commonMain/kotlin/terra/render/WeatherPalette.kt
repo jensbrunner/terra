@@ -3,7 +3,7 @@ package terra.render
 import korlibs.image.color.Colors
 import kotlin.math.sqrt
 import terra.weather.WeatherLayer
-import terra.weather.WeatherSimulation
+import terra.weather.WeatherModel
 
 private val humidityPalette = listOf("#c49b66", "#e4d7a1", "#8ec6a1", "#469ea5", "#194c82")
 private val cloudPalette = listOf("#101c2b", "#34475c", "#798796", "#c4c8ca", "#f6f6ef")
@@ -13,7 +13,7 @@ private val annualPrecipitationPalette =
 private val climateRainPalette = listOf("#bb9d67", "#d8cc8b", "#72ae82", "#388f9e", "#294f91")
 private val temperaturePalette = listOf("#344f9a", "#73aeb5", "#d8d5a3", "#e6a04f", "#b84b3f")
 
-internal fun tileColor(layer: WeatherLayer, weather: WeatherSimulation, x: Int, y: Int) =
+internal fun tileColor(layer: WeatherLayer, weather: WeatherModel, x: Int, y: Int) =
     when (layer) {
         WeatherLayer.HUMIDITY -> ramp(weather.relativeHumidity(x, y), humidityPalette)
         WeatherLayer.CLOUDS -> ramp(weather.cloudCover(x, y), cloudPalette)

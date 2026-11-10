@@ -1,0 +1,4 @@
+mode,speed,trial,wall_seconds,completed_sim_seconds,offered_sim_seconds,pending_start_seconds,pending_end_seconds,weather_wall_seconds,hydrology_wall_seconds,overlay_wall_seconds,surface_water_wall_seconds,process_cpu_seconds,calling_thread_allocated_bytes,gc_millis,sampled_peak_heap_bytes,endpoint_peak_rss_bytes,weather_calls,frames,dropped_frame_samples,frame_p50_seconds,frame_p95_seconds,frame_max_seconds,simulated_days_per_second
+headless-capacity,ONE_MONTH,1,30.0506085,2.47536E7,2.47536E7,0.0,0.0,29.988401041,0.061230548,0.0,0.0,29.973377,11576,0,34599256,98615296,191,0,0,NaN,NaN,NaN,9.533916759123198
+headless-capacity,ONE_MONTH,2,30.055044916,2.43648E7,2.43648E7,0.0,0.0,29.993169835,0.060915756,0.0,0.0,29.938698,1184,0,34599256,98926592,188,0,0,NaN,NaN,NaN,9.382784181096847
+headless-capacity,ONE_MONTH,3,30.116676167,2.44944E7,2.44944E7,0.0,0.0,30.054982376,0.060812543,0.0,0.0,30.096249,1184,0,34599256,66371584,189,0,0,NaN,NaN,NaN,9.413389393569329

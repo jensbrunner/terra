@@ -16,7 +16,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import terra.hydrology.HydrologySimulation
 import terra.weather.WeatherLayer
-import terra.weather.WeatherSimulation
+import terra.weather.WeatherModel
 import terra.world.Terrain
 import terra.world.World
 
@@ -251,7 +251,7 @@ class TerrainMapView(
         }
     }
 
-    fun updateOverlays(weather: WeatherSimulation, activeLayers: Set<WeatherLayer>) {
+    fun updateOverlays(weather: WeatherModel, activeLayers: Set<WeatherLayer>) {
         for (layer in WeatherLayer.entries) {
             val container = overlayContainers.getValue(layer)
             container.visible = layer in activeLayers
@@ -290,7 +290,7 @@ class TerrainMapView(
         }
     }
 
-    private fun updateWindOverlay(bitmap: Bitmap32, weather: WeatherSimulation) {
+    private fun updateWindOverlay(bitmap: Bitmap32, weather: WeatherModel) {
         bitmap.lock {
             for (y in 0 until world.height) {
                 for (x in 0 until world.width) bitmap[x, y] = transparentPixel

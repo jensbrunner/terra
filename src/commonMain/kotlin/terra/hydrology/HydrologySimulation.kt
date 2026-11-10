@@ -1,6 +1,6 @@
 package terra.hydrology
 
-import terra.weather.WeatherSimulation
+import terra.weather.WeatherModel
 import kotlin.math.max
 import kotlin.math.min
 
@@ -41,9 +41,36 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     var lastRoutedPeriodDays: Double = 0.0
         private set
 
-    /** Increments once whenever a complete hydrology period is routed. */
+    /** Increments when a routing period completes or immediate evaporation changes lake geometry. */
     var routedPeriodRevision: Long = 0L
         private set
+
+    /** Water in lakes and in the unprocessed routing interval; excludes exported outlet water. */
+    val storedAndPendingWaterMmTiles: Double
+        get() = lakeStorageMmTiles.sum() + pendingRunoffMmTiles.sum() + pendingLakeRainMmTiles.sum()
+
+    private var lakeEvaporationChanged = false
+
+    /** Immediate finite-store withdrawal for a coupled atmosphere; caller pays the latent heat. */
+    fun evaporateLakeWaterMmTiles(x: Int, y: Int, requested: Double): Double {
+        require(requested.isFinite() && requested >= 0.0)
+        val tile = index(x, y)
+        val lake = lakeIdByTile[tile]
+        if (lake < 0 || !lakeWetMask[tile]) return 0.0
+        val actual = min(requested, lakeStorageMmTiles[lake])
+        lakeStorageMmTiles[lake] -= actual
+        if (actual > 0.0) lakeEvaporationChanged = true
+        return actual
+    }
+
+    /** Refresh geometry once after a batch, rather than once for every surface fragment. */
+    fun finishSurfaceExchange(weather: WeatherModel) {
+        if (!lakeEvaporationChanged) return
+        for (lake in candidates.indices) lakeWaterSurfaceElevation[lake] = waterSurfaceElevation(lake)
+        updateLakeWetMask(weather)
+        routedPeriodRevision++
+        lakeEvaporationChanged = false
+    }
 
     init {
         for (candidate in candidates) {
@@ -64,7 +91,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     }
 
     /** Add exactly one outer weather step's runoff and lake surface fluxes. */
-    fun acceptWeatherStep(weather: WeatherSimulation, elapsedSimulatedSeconds: Double) {
+    fun acceptWeatherStep(weather: WeatherModel, elapsedSimulatedSeconds: Double) {
         require(weather.width == width && weather.height == height) {
             "Weather and hydrology dimensions must match"
         }
@@ -72,6 +99,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
             "Elapsed simulated time must be finite and non-negative"
         }
         if (elapsedSimulatedSeconds == 0.0) return
+        finishSurfaceExchange(weather)
 
         for (y in 0 until height) for (x in 0 until width) {
             val i = y * width + x
@@ -91,6 +119,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
 
         pendingElapsedSeconds += elapsedSimulatedSeconds
         if (pendingElapsedSeconds >= HYDROLOGY_CADENCE_SECONDS) routePendingPeriod(weather)
+        weather.hydrologyAccepted()
     }
 
     /** Latest routed throughput for this tile, in mm·tiles over the latest processed period. */
@@ -133,7 +162,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     fun isVirtualSpillLink(x: Int, y: Int): Boolean =
         topology.isVirtualSpillLink(index(x, y))
 
-    private fun routePendingPeriod(weather: WeatherSimulation) {
+    private fun routePendingPeriod(weather: WeatherModel) {
         val elapsedDays = pendingElapsedSeconds / SECONDS_PER_DAY
         routedMmTiles.fill(0.0)
         for (i in 0 until count) routedMmTiles[i] = pendingRunoffMmTiles[i]
@@ -187,7 +216,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         updateLakeWetMask(weather)
     }
 
-    private fun updateLake(lakeId: Int, weather: WeatherSimulation): Double {
+    private fun updateLake(lakeId: Int, weather: WeatherModel): Double {
         val inflow = lakeInflowMmTiles[lakeId]
         val directRain = lakeDirectRainMmTiles[lakeId]
         val potentialEvaporation = lakePotentialEvaporationMmTiles[lakeId]
@@ -207,7 +236,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     }
 
     private fun returnLakeEvaporation(
-        weather: WeatherSimulation,
+        weather: WeatherModel,
         lakeId: Int,
         actualEvaporation: Double,
         potentialEvaporation: Double
@@ -237,7 +266,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         return returned
     }
 
-    private fun updateLakeWetMask(weather: WeatherSimulation) {
+    private fun updateLakeWetMask(weather: WeatherModel) {
         lakeWetMask.fill(false)
         for (lakeId in candidates.indices) {
             if (lakeStorageMmTiles[lakeId] <= 0.0) continue

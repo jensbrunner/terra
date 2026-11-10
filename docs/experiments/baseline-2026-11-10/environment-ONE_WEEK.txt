@@ -1,0 +1,98 @@
+revision=41138a59b70bcdc3f552bb6032b6745718e4ad20
+
+working_tree=D HYDRO_UPDATE.md
+ M build.gradle.kts
+ M src/commonMain/kotlin/terra/ui/AtlasScene.kt
+ M src/jvmMain/kotlin/terra/DesktopMain.kt
+?? ADR_CLIMATE.md
+?? ATMOSPHERE_EXPERIMENT_PLAN.md
+?? PHASE_0A_PLAN.md
+?? VISION.md
+?? docs/
+?? src/jvmMain/kotlin/terra/experiments/
+?? src/jvmTest/
+
+source_sha256=19a342a610d165d81a0e81b8ec850ad3f8599fb950c149fa417984a126cdd9a8
+
+os=Mac OS X 27.2 aarch64
+
+cpu=Apple M5 Pro
+
+machine=Mac17,9
+
+ram_bytes=25769803776
+
+logical_processors=15
+
+power=Battery Power:
+ Sleep On Power Button 1
+ powermode            0
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         5
+ womp                 0
+ networkoversleep     0
+ sleep                1
+ lessbright           1
+ tcpkeepalive         1
+ disksleep            10
+AC Power:
+ Sleep On Power Button 1
+ powermode            0
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         0
+ womp                 1
+ networkoversleep     0
+ sleep                0
+ tcpkeepalive         1
+ disksleep            10
+
+java=Homebrew 27.0.1.0.3
+
+gradle=9.8.2
+
+jvm_resource_arguments=[--enable-native-access=ALL-UNNAMED]
+
+max_heap_bytes=6442450944
+
+power_source=Now drawing from 'Battery Power'
+ -InternalBattery-0 (id=49152099)	92%; discharging; 1:53 remaining present: true
+
+gc=[G1 Young Generation, G1 Concurrent GC, G1 Old Generation]
+
+allocation_scope=calling thread only; excludes other renderer/GC/compiler threads
+
+memory_scope=heap sampled at <=1Hz plus endpoints; RSS sampled only at trial endpoints; neither is an OS peak
+
+units=seconds, bytes, mm*tiles; no physical air-mass or energy budget
+
+kind=live desktop
+
+seed=31742
+
+world=283x212
+
+viewport=1440x960 logical; maximized desktop window
+
+overlays=CLOUDS
+
+warmup_per_trial_seconds=15.0
+
+trial_seconds=30.0
+
+trials=3
+
+speeds=[ONE_WEEK]
+
+phase_timing=true
+
+frame_metric=consecutive updater starts in monotonic wall time; KorGE dt also recorded
+
+phase_timing_false=frame-only comparator still observes frames and completed steps; not the observer-free game

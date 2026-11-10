@@ -1,0 +1,4 @@
+three_hour_lake_storage_mm_tiles=17086.74442214005
+month_batch_lake_storage_mm_tiles=17049.29969544325
+three_hour_outlet_mm_tiles=3739234.696486029
+month_batch_outlet_mm_tiles=3738989.5846165135

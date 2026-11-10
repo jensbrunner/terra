@@ -13,9 +13,9 @@ import terra.world.Terrain
 import terra.world.World
 
 /** A local water-cycle model with atmospheric and soil water stored as millimeters. */
-class WeatherSimulation(private val world: World) {
-    val width = world.width
-    val height = world.height
+class WeatherSimulation(private val world: World) : WeatherModel {
+    override val width = world.width
+    override val height = world.height
     private val count = width * height
 
     private val atmosphericWaterMm = DoubleArray(count)
@@ -75,24 +75,24 @@ class WeatherSimulation(private val world: World) {
         }
     }
 
-    fun relativeHumidity(x: Int, y: Int) = relativeHumidityAt(index(x, y))
-    fun cloudCover(x: Int, y: Int) = cloudCoverAt(index(x, y))
-    fun precipitationMmPerHour(x: Int, y: Int) = precipitationMmPerHour[index(x, y)]
-    fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) =
+    override fun relativeHumidity(x: Int, y: Int) = relativeHumidityAt(index(x, y))
+    override fun cloudCover(x: Int, y: Int) = cloudCoverAt(index(x, y))
+    override fun precipitationMmPerHour(x: Int, y: Int) = precipitationMmPerHour[index(x, y)]
+    override fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) =
         peakSubstepPrecipitationMmPerHour[index(x, y)]
-    fun rainMmThisUpdate(x: Int, y: Int) = outerRainMm[index(x, y)]
+    override fun rainMmThisUpdate(x: Int, y: Int) = outerRainMm[index(x, y)]
     /** Soil drainage removed during the latest outer step(), in mm per tile (not mm/h). */
-    fun drainageMmThisUpdate(x: Int, y: Int) = drainageMmThisUpdate[index(x, y)]
+    override fun drainageMmThisUpdate(x: Int, y: Int) = drainageMmThisUpdate[index(x, y)]
     /** Soil-capacity overflow removed during the latest outer step(), in mm per tile (not mm/h). */
-    fun overflowMmThisUpdate(x: Int, y: Int) = overflowMmThisUpdate[index(x, y)]
+    override fun overflowMmThisUpdate(x: Int, y: Int) = overflowMmThisUpdate[index(x, y)]
     /** Rain transferred directly to a wet lake during the latest outer step(), in mm per tile. */
-    fun lakeDirectRainMmThisUpdate(x: Int, y: Int) = lakeDirectRainMm[index(x, y)]
+    override fun lakeDirectRainMmThisUpdate(x: Int, y: Int) = lakeDirectRainMm[index(x, y)]
     /** Potential open-water evaporation during the latest outer step(), in mm per tile. */
-    fun lakePotentialEvaporationMmThisUpdate(x: Int, y: Int) = lakePotentialEvaporationMm[index(x, y)]
+    override fun lakePotentialEvaporationMmThisUpdate(x: Int, y: Int) = lakePotentialEvaporationMm[index(x, y)]
     /** Exponentially smoothed rain rate with a 30-day response time, in mm/h. */
-    fun thirtyDayRainMmPerHour(x: Int, y: Int) = climateRainMmPerHour[index(x, y)]
+    override fun thirtyDayRainMmPerHour(x: Int, y: Int) = climateRainMmPerHour[index(x, y)]
     /** Annualized estimate derived from the 30-day rain-rate EMA, not an observed annual total. */
-    fun annualizedRainMmPerYear(x: Int, y: Int) =
+    override fun annualizedRainMmPerYear(x: Int, y: Int) =
         climateRainMmPerHour[index(x, y)] * HOURS_PER_YEAR
     /** Clear previous observations and start collecting climate from subsequent weather substeps. */
     fun beginClimateSampling() {
@@ -115,24 +115,24 @@ class WeatherSimulation(private val world: World) {
             temperatureTimeIntegral = climateTemperatureTimeIntegral.copyOf()
         )
     }
-    fun solarInputFactor(x: Int, y: Int) = solarInputFactor[index(x, y)]
-    fun surfaceTemperatureC(x: Int, y: Int) = surfaceTemperatureC[index(x, y)]
-    fun airTemperatureC(x: Int, y: Int) = airTemperatureC[index(x, y)]
-    fun windUTilesPerDay(x: Int, y: Int) = windUTilesPerDay[index(x, y)]
-    fun windVTilesPerDay(x: Int, y: Int) = windVTilesPerDay[index(x, y)]
-    fun nightOpacity(x: Int): Double {
+    override fun solarInputFactor(x: Int, y: Int) = solarInputFactor[index(x, y)]
+    override fun surfaceTemperatureC(x: Int, y: Int) = surfaceTemperatureC[index(x, y)]
+    override fun airTemperatureC(x: Int, y: Int) = airTemperatureC[index(x, y)]
+    override fun windUTilesPerDay(x: Int, y: Int) = windUTilesPerDay[index(x, y)]
+    override fun windVTilesPerDay(x: Int, y: Int) = windVTilesPerDay[index(x, y)]
+    override fun nightOpacity(x: Int): Double {
         val sunHeight = cos(hourAngleAt(x, elapsedSeconds))
         return (1.0 - smoothstep(-TERMINATOR_TRANSITION, TERMINATOR_TRANSITION, sunHeight)) *
             MAX_NIGHT_OPACITY
     }
-    fun atmosphericWaterMm(x: Int, y: Int) = atmosphericWaterMm[index(x, y)]
-    fun cloudWaterMm(x: Int, y: Int) = cloudWaterMm[index(x, y)]
-    fun soilWaterMm(x: Int, y: Int) = soilWaterMm[index(x, y)]
-    fun soilMoisture(x: Int, y: Int) =
+    override fun atmosphericWaterMm(x: Int, y: Int) = atmosphericWaterMm[index(x, y)]
+    override fun cloudWaterMm(x: Int, y: Int) = cloudWaterMm[index(x, y)]
+    override fun soilWaterMm(x: Int, y: Int) = soilWaterMm[index(x, y)]
+    override fun soilMoisture(x: Int, y: Int) =
         (soilWaterMm[index(x, y)] / SOIL_WATER_CAPACITY_MM).coerceIn(0.0, 1.0)
 
     /** Process all elapsed simulated time in bounded internal steps. */
-    fun step(seconds: Double) {
+    override fun step(seconds: Double) {
         require(seconds >= 0.0) { "Simulation time cannot move backwards" }
         outerRainMm.fill(0.0)
         drainageMmThisUpdate.fill(0.0)
@@ -157,13 +157,13 @@ class WeatherSimulation(private val world: World) {
     }
 
     /** Replace the wet-lake surface mask consumed by subsequent weather substeps. */
-    fun updateLakeWaterMask(mask: BooleanArray) {
+    override fun updateLakeWaterMask(mask: BooleanArray) {
         require(mask.size == count) { "Lake-water mask dimensions must match the weather grid" }
         for (i in 0 until count) lakeWaterMask[i] = mask[i]
     }
 
     /** Return confirmed lake evaporation to atmospheric vapor exactly once. */
-    fun returnLakeEvaporationMm(x: Int, y: Int, amountMm: Double) {
+    override fun returnLakeEvaporationMm(x: Int, y: Int, amountMm: Double) {
         require(amountMm >= 0.0 && amountMm.isFinite()) { "Lake evaporation must be finite and non-negative" }
         atmosphericWaterMm[index(x, y)] += amountMm
     }
