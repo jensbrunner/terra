@@ -11,6 +11,23 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     private val count = width * height
     private val candidates = topology.lakeCandidates
     private val lakeCount = candidates.size
+    val oceanTileCount = (0 until count).count { !topology.isLandTile(it) }
+    /** One finite well-mixed reservoir; temperatures remain spatially varying in the atmosphere. */
+    var oceanWaterMmTiles: Double = oceanTileCount * 10_000.0
+        private set
+    val meanOceanDepthMm: Double get() = if (oceanTileCount > 0) oceanWaterMmTiles / oceanTileCount else 0.0
+
+    fun receiveOceanWaterMmTiles(amount: Double) {
+        require(amount.isFinite() && amount >= 0 && (amount == 0.0 || oceanTileCount > 0))
+        oceanWaterMmTiles += amount
+    }
+
+    fun evaporateOceanWaterMmTiles(requested: Double): Double {
+        require(requested.isFinite() && requested >= 0)
+        val actual = min(oceanWaterMmTiles, requested)
+        oceanWaterMmTiles -= actual
+        return actual
+    }
 
     private val pendingRunoffMmTiles = DoubleArray(count)
     private val pendingLakeRainMmTiles = DoubleArray(count)
@@ -29,11 +46,11 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     private val lakeWaterSurfaceElevation = DoubleArray(lakeCount)
     private val lakeWetMask = BooleanArray(count)
 
-    /** Outlet export from the most recently routed period, in mm·tiles. */
+    /** River-to-ocean transfer from the most recently routed period, in mm·tiles. */
     var outletMmTilesLastPeriod: Double = 0.0
         private set
 
-    /** Cumulative routed export, in mm·tiles. */
+    /** Cumulative river-to-ocean transfer, diagnostic only, not another reservoir. */
     var outletMmTilesTotal: Double = 0.0
         private set
 
@@ -45,9 +62,9 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     var routedPeriodRevision: Long = 0L
         private set
 
-    /** Water in lakes and in the unprocessed routing interval; excludes exported outlet water. */
+    /** Water in ocean, lakes, and the unprocessed routing interval. */
     val storedAndPendingWaterMmTiles: Double
-        get() = lakeStorageMmTiles.sum() + pendingRunoffMmTiles.sum() + pendingLakeRainMmTiles.sum()
+        get() = oceanWaterMmTiles + lakeStorageMmTiles.sum() + pendingRunoffMmTiles.sum() + pendingLakeRainMmTiles.sum()
 
     private var lakeEvaporationChanged = false
 
@@ -207,6 +224,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         for (i in 0 until count) dischargeMmTilesPerDay[i] = routedMmTiles[i] / elapsedDays
         outletMmTilesLastPeriod = outletAmount
         outletMmTilesTotal += outletAmount
+        receiveOceanWaterMmTiles(outletAmount)
         lastRoutedPeriodDays = elapsedDays
         routedPeriodRevision++
         pendingRunoffMmTiles.fill(0.0)

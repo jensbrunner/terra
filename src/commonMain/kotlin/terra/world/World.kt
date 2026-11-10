@@ -7,6 +7,7 @@ import kotlin.random.Random
 import terra.MAP_HEIGHT_TILES
 import terra.MAP_WIDTH_TILES
 import terra.weather.ClimateSnapshot
+import terra.weather.SeasonalClimateSnapshot
 
 class World(
     val seed: Int,
@@ -19,15 +20,19 @@ class World(
         Cell(0.0, 0.0, Terrain.OCEAN)
     }
     private var climateBiomesApplied = false
-    operator fun get(x: Int, y: Int): Cell = cells[y * width + x]
+    private val pendingBiome = arrayOfNulls<Terrain>(width * height)
+    private val pendingBiomeSeconds = DoubleArray(width * height)
+    val seaLevel: Double get() = settings.seaLevel
+    var biomeRevision: Long = 0
+        private set
+    operator fun get(x: Int, y: Int): Cell = cells[y * width + ((x % width) + width) % width]
 
     init {
         generate()
     }
 
     private fun generate() {
-        val salt = noiseSalt
-        val elevation = generateElevation(salt)
+        val elevation = generateElevation()
         val temperature = generateTemperature(elevation)
 
         for (i in cells.indices) {
@@ -60,24 +65,70 @@ class World(
             cells[i] = cell.copy(terrain = terrain)
         }
         climateBiomesApplied = true
+        biomeRevision++
     }
 
-    private fun generateElevation(salt: Int): DoubleArray {
-        val elevation = DoubleArray(width * height)
-
-        for (y in 0 until height) for (x in 0 until width) {
-            val i = index(x, y)
-            val continental = fbm(x, y, salt, settings.continentOctaves, settings.continentScale)
-            val regional = fbm(x, y, salt + 71, settings.regionalOctaves, settings.regionalScale)
-            val detail = fbm(x, y, salt + 191, settings.detailOctaves, settings.detailScale)
-            elevation[i] = (settings.baseElevation +
-                continental * settings.continentStrength +
-                regional * settings.regionalStrength +
-                detail * settings.detailStrength)
-                .coerceIn(0.0, 1.0)
+    /** Delayed categorical land-cover response, separate from weather and measured climate.
+     * Require two post-spin-up annual cycles, local stationarity, and a target robust
+     * to ±1°C/±10% rainfall. A persistent candidate needs two further model years.
+     */
+    fun advanceClimateBiomes(climate: SeasonalClimateSnapshot?, seconds: Double): Boolean {
+        require(seconds.isFinite() && seconds >= 0)
+        if (climate == null || !climate.hasAnnualCoverage || seconds == 0.0) return false
+        var changed = false
+        for (i in cells.indices) {
+            val cell = cells[i]
+            if (cell.terrain == Terrain.OCEAN || cell.terrain == Terrain.MOUNTAINS) continue
+            val x = i % width; val y = i / width
+            val temperature = climate.meanSurfaceTemperatureAtTile(x, y, width, height)
+            val rain = climate.annualPrecipitationAtTile(x, y, width, height)
+            fun classify(t: Double, r: Double) = ClimateBiomeClassifier.classifyBiome(
+                cell.terrain, cell.elevation, settings, r, t)
+            val target = classify(temperature, rain)
+            val robust = target != cell.terrain && climate.stableAtTile(x, y, width, height) &&
+                classify(temperature - 1, rain * 0.9) == target && classify(temperature - 1, rain * 1.1) == target &&
+                classify(temperature + 1, rain * 0.9) == target && classify(temperature + 1, rain * 1.1) == target
+            if (!robust) {
+                pendingBiome[i] = null
+                pendingBiomeSeconds[i] = 0.0
+                continue
+            }
+            if (pendingBiome[i] != target) {
+                pendingBiome[i] = target
+                pendingBiomeSeconds[i] = 0.0
+            }
+            pendingBiomeSeconds[i] += seconds
+            if (pendingBiomeSeconds[i] >= 2 * climate.yearSeconds) {
+                cells[i] = cell.copy(terrain = target)
+                pendingBiome[i] = null
+                pendingBiomeSeconds[i] = 0.0
+                changed = true
+            }
         }
+        if (changed) biomeRevision++
+        return changed
+    }
 
-        return elevation
+    private fun generateElevation(): DoubleArray = DoubleArray(width * height) { tile ->
+        sampleElevation(tile % width + 0.5, tile / width + 0.5)
+    }
+
+    /** Periodic continuous elevation, sampled at tile centers by generation. */
+    internal fun sampleElevation(x: Double, y: Double): Double {
+        val longitude = ((x % width) + width) % width
+        val continental = periodicFbm(longitude, y, noiseSalt, settings.continentOctaves, settings.continentScale)
+        val regional = periodicFbm(longitude, y, noiseSalt + 71, settings.regionalOctaves, settings.regionalScale)
+        val detail = periodicFbm(longitude, y, noiseSalt + 191, settings.detailOctaves, settings.detailScale)
+        return (settings.baseElevation + continental * settings.continentStrength +
+            regional * settings.regionalStrength + detail * settings.detailStrength).coerceIn(0.0, 1.0)
+    }
+
+    private fun periodicFbm(x: Double, y: Double, seed: Int, octaves: Int, scale: Double): Double {
+        val t = x / width
+        // Smooth derivatives at both ends; retain the existing 2D noise character.
+        val blend = t * t * t * (t * (t * 6 - 15) + 10)
+        return fbm(x, y, seed, octaves, scale) * (1 - blend) +
+            fbm(x - width, y, seed, octaves, scale) * blend
     }
 
     private fun generateTemperature(elevation: DoubleArray): DoubleArray {
@@ -121,7 +172,7 @@ class World(
 
     private fun index(x: Int, y: Int) = y * width + x
 
-    private fun fbm(x: Int, y: Int, seed: Int, octaves: Int, baseScale: Double): Double {
+    private fun fbm(x: Double, y: Double, seed: Int, octaves: Int, baseScale: Double): Double {
         var total = 0.0
         var weight = 0.0
         var amplitude = 1.0

@@ -32,7 +32,6 @@ import terra.world.World
 
 /** Coordinates world generation, simulation, input, and the map UI. */
 class AtlasScene(
-    private val experiment: AtlasExperiment? = null,
     private var dynamicalAtmosphere: Boolean = false
 ) : Scene() {
     private var terrainSettings = TerrainGenerationSettings()
@@ -43,7 +42,7 @@ class AtlasScene(
     private var climateBootstrap = createBootstrap()
     private var observedClimate: ClimateSnapshot? = null
     private var nextClimateSampleSeconds = 3600.0
-    private var nextBiomeSampleSeconds = 30 * 86400.0
+    private var lastEcologyUpdateSeconds = 0.0
     private val climateReady get() = climateBootstrap?.isComplete != false
     val climateSnapshot: ClimateSnapshot?
         get() = climateBootstrap?.snapshot ?: observedClimate
@@ -102,14 +101,9 @@ class AtlasScene(
         }
 
         mapViewport.addUpdater { dt ->
-            experiment?.beforeFrame(dt.seconds, pendingWeatherSimulationSeconds, !climateReady)?.let { speed ->
-                if (speed != simulationSpeed) selectSpeed(speed)
-            }
             updateFrameTimeCounter(dt.seconds)
             if (!climateReady) {
-                experiment?.beginWork(AtlasWork.WEATHER)
                 climateBootstrap!!.advanceBatch()
-                experiment?.endWork(AtlasWork.WEATHER)
                 selectionLabel.text = climateBootstrap!!.status
                 if (climateReady) {
                     world.applyClimateBiomes(climateSnapshot!!)
@@ -124,10 +118,8 @@ class AtlasScene(
                 overlayRefreshElapsedRealSeconds += dt.seconds
                 pendingWeatherSimulationSeconds += dt.seconds * simulationSpeed.simulatedSecondsPerRealSecond
                 if (dynamicalAtmosphere || weatherTickElapsedRealSeconds >= WEATHER_TICK_SECONDS) {
-                    experiment?.beginWork(AtlasWork.WEATHER)
                     val elapsedSimulatedSeconds = (weather as? DynamicalWeather)?.advanceBudgeted(pendingWeatherSimulationSeconds)
                         ?: pendingWeatherSimulationSeconds.also { weather.step(it) }
-                    experiment?.endWork(AtlasWork.WEATHER, elapsedSimulatedSeconds)
                     if (elapsedSimulatedSeconds > 0.0) handoffWeatherStep(elapsedSimulatedSeconds)
                     pendingWeatherSimulationSeconds = maxOf(0.0, pendingWeatherSimulationSeconds - elapsedSimulatedSeconds)
                     updateObservedClimate()
@@ -136,7 +128,7 @@ class AtlasScene(
                 }
                 if (overlayRefreshElapsedRealSeconds >= OVERLAY_REFRESH_SECONDS) {
                     overlayRefreshElapsedRealSeconds %= OVERLAY_REFRESH_SECONDS
-                    refreshOverlays()
+                    refreshOverlays(OVERLAY_REFRESH_SECONDS)
                 }
             }
             updateAtmosphereStatus()
@@ -186,7 +178,9 @@ class AtlasScene(
         val dynamic = weather as? DynamicalWeather
         atmosphereLabel.text = if (dynamic == null) "Weather: prescribed · M / click to switch (restarts world)"
         else "Weather: dynamical 96×72 · ${formatNumber(dynamic.elapsedSeconds / 86400.0, 2)} days · " +
-            "pending ${formatNumber(pendingWeatherSimulationSeconds / 3600.0, 1)}h · M / click restarts mode"
+            "pending ${formatNumber(pendingWeatherSimulationSeconds / 3600.0, 1)}h · " +
+            (if (dynamic.elapsedSeconds < dynamic.physics.solar.yearSeconds) "climate spin-up" else
+                "climate ${dynamic.observedClimateYears} full observed years") + " · M / click restarts mode"
     }
 
     private fun updateObservedClimate() {
@@ -194,12 +188,12 @@ class AtlasScene(
         if (dynamic.elapsedSeconds < nextClimateSampleSeconds) return
         observedClimate = dynamic.observedClimate()
         nextClimateSampleSeconds = dynamic.elapsedSeconds + 3600.0
-        if (dynamic.elapsedSeconds >= nextBiomeSampleSeconds) {
-            world.applyClimateBiomes(observedClimate!!)
+        val ecologySeconds = dynamic.elapsedSeconds - lastEcologyUpdateSeconds
+        lastEcologyUpdateSeconds = dynamic.elapsedSeconds
+        if (world.advanceClimateBiomes(dynamic.seasonalClimate, ecologySeconds)) {
             mapView.updateWorld(world)
             refreshSurfaceWater()
             settingsPanel.updateBiomeSummary(world.landBiomeSummary())
-            nextBiomeSampleSeconds = Double.POSITIVE_INFINITY
         }
     }
 
@@ -240,7 +234,7 @@ class AtlasScene(
         climateBootstrap = createBootstrap()
         observedClimate = null
         nextClimateSampleSeconds = 3600.0
-        nextBiomeSampleSeconds = 30 * 86400.0
+        lastEcologyUpdateSeconds = 0.0
         weatherTickElapsedRealSeconds = 0.0
         overlayRefreshElapsedRealSeconds = 0.0
         pendingWeatherSimulationSeconds = 0.0
@@ -279,6 +273,11 @@ class AtlasScene(
         val climate = climateSnapshot
         val observedRain = climate?.let { formatNumber(it.precipitationTotalMm(x, y), 1) } ?: "0"
         val observedDays = climate?.let { formatNumber(it.sampledDays, 2) } ?: "0"
+        val seasonal = (weather as? DynamicalWeather)?.seasonalClimate
+        val climateInfo = seasonal?.let {
+            "Annual window ${it.windowYears}y · surface proxy ${formatNumber(it.meanSurfaceTemperatureAtTile(x, y, world.width, world.height), 1)}°C · " +
+                "${formatNumber(it.annualPrecipitationAtTile(x, y, world.width, world.height), 0)} mm/year"
+        } ?: "Annual climate pending; land cover provisional"
         val upstreamArea = hydrology.upstreamLandTileCount(x, y)
         val discharge = formatNumber(hydrology.dischargeMmTilesPerDay(x, y), 2)
         val soilDrainage = formatNumber(weather.drainageMmThisUpdate(x, y), 2)
@@ -294,8 +293,8 @@ class AtlasScene(
         selectionLabel.text = "Tile ($x, $y) · ${cell.terrain.label} · Elevation ${(cell.elevation * 100).toInt()}%\n" +
             "Air ${formatNumber(weather.airTemperatureC(x, y), 1)}°C · " +
             "Surface ${formatNumber(weather.surfaceTemperatureC(x, y), 1)}°C · " +
-            "Rain estimate $annualizedRain mm/year (30-day EMA) · " +
-            "Observed $observedDays-day total $observedRain mm\n" +
+            (if (weather is DynamicalWeather) "$climateInfo\n" else
+                "Rain estimate $annualizedRain mm/year (30-day EMA) · Observed $observedDays-day total $observedRain mm\n") +
             "Humidity ${(weather.relativeHumidity(x, y) * 100).toInt()}% · " +
             "Clouds ${(weather.cloudCover(x, y) * 100).toInt()}% · " +
             "Cloud water ${formatNumber(weather.cloudWaterMm(x, y), 2)} mm\n" +
@@ -312,9 +311,7 @@ class AtlasScene(
 
     private fun handoffWeatherStep(elapsedSimulatedSeconds: Double) {
         val previousRevision = hydrology.routedPeriodRevision
-        experiment?.beginWork(AtlasWork.HYDROLOGY)
         hydrology.acceptWeatherStep(weather, elapsedSimulatedSeconds)
-        experiment?.endWork(AtlasWork.HYDROLOGY)
         if (hydrology.routedPeriodRevision != previousRevision &&
             climateReady && this::mapView.isInitialized
         ) {
@@ -328,16 +325,12 @@ class AtlasScene(
         refreshOverlays()
     }
 
-    private fun refreshOverlays() {
-        experiment?.beginWork(AtlasWork.OVERLAYS)
-        mapView.updateOverlays(weather, activeOverlays)
-        experiment?.endWork(AtlasWork.OVERLAYS)
+    private fun refreshOverlays(elapsedRealSeconds: Double = 0.1) {
+        mapView.updateOverlays(weather, activeOverlays, elapsedRealSeconds)
     }
 
     private fun refreshSurfaceWater() {
-        experiment?.beginWork(AtlasWork.SURFACE_WATER)
         mapView.updateSurfaceWater(hydrology)
-        experiment?.endWork(AtlasWork.SURFACE_WATER)
     }
 
     private fun SContainer.drawControls() {
@@ -427,12 +420,3 @@ class AtlasScene(
 
 private const val WEATHER_TICK_SECONDS = 0.05
 private const val OVERLAY_REFRESH_SECONDS = 0.05
-
-/** Optional desktop measurement seam; an ordinary AtlasScene has no observer. */
-enum class AtlasWork { WEATHER, HYDROLOGY, OVERLAYS, SURFACE_WATER }
-
-interface AtlasExperiment {
-    fun beforeFrame(reportedSeconds: Double, pendingSeconds: Double, bootstrapping: Boolean): SimulationSpeed?
-    fun beginWork(work: AtlasWork)
-    fun endWork(work: AtlasWork, completedSeconds: Double = 0.0)
-}

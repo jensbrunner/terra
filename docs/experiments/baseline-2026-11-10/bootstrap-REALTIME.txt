@@ -1,2 +1,0 @@
-ui_bootstrap_wall_seconds=30.423215709
-excludes=world construction, scene and asset loading

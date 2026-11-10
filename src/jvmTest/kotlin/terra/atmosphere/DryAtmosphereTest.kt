@@ -12,7 +12,7 @@ import kotlin.test.assertTrue
 class DryAtmosphereTest {
     @Test
     fun aStationaryShearFlowIsNotDiffusedByGravityWaveSpeed() {
-        val config = DryAtmosphereConfig(width = 16, height = 12, coriolisPerSecond = 0.0)
+        val config = DryAtmosphereConfig(geometry = AtmosphereGeometry.PERIODIC_F_PLANE, width = 16, height = 12, coriolisPerSecond = 0.0)
         val model = DryAtmosphere(config) { _, y ->
             DryCell(config.meanHeightMeters, 20 * sin(2 * PI * y / config.domainHeightMeters), 0.0)
         }
@@ -27,13 +27,13 @@ class DryAtmosphereTest {
 
     @Test
     fun restAndRejectedStepLeaveStateUnchanged() {
-        val model = DryAtmosphere(DryAtmosphereConfig(width = 8, height = 6))
+        val model = DryAtmosphere(DryAtmosphereConfig(geometry = AtmosphereGeometry.PERIODIC_F_PLANE, width = 8, height = 6))
         repeat(100) { model.step() }
         val state = model.snapshot()
         assertEquals(10_000.0, state.heightAt(3, 2))
         assertEquals(0.0, state.eastWindAt(3, 2))
         assertEquals(0.0, state.northWindAt(3, 2))
-        val unstable = DryAtmosphere(DryAtmosphereConfig(width = 8, height = 6, stepSeconds = 20_000.0))
+        val unstable = DryAtmosphere(DryAtmosphereConfig(geometry = AtmosphereGeometry.PERIODIC_F_PLANE, width = 8, height = 6, stepSeconds = 20_000.0))
         assertFailsWith<IllegalStateException> { unstable.step() }
         assertEquals(0L, unstable.completedSteps)
         assertEquals(10_000.0, unstable.snapshot().heightAt(3, 2))
@@ -42,7 +42,7 @@ class DryAtmosphereTest {
     @Test
     fun inertialFlowMatchesAnalyticRotationAndReversesWithHemisphere() {
         for (f in listOf(1e-4, -1e-4)) {
-            val config = DryAtmosphereConfig(width = 8, height = 6, coriolisPerSecond = f)
+            val config = DryAtmosphereConfig(geometry = AtmosphereGeometry.PERIODIC_F_PLANE, width = 8, height = 6, coriolisPerSecond = f)
             val model = DryAtmosphere(config) { _, _ -> DryCell(10_000.0, 10.0, 0.0) }
             repeat(500) { model.step() }
             val state = model.snapshot()
@@ -55,7 +55,7 @@ class DryAtmosphereTest {
     @Test
     fun pressurePulseAcceleratesAwayFromHighHeight() {
         val model = DryScenarios.create(DryScenario.PULSE,
-            DryAtmosphereConfig(width = 24, height = 18, coriolisPerSecond = 0.0))
+            DryAtmosphereConfig(geometry = AtmosphereGeometry.PERIODIC_F_PLANE, width = 24, height = 18, coriolisPerSecond = 0.0))
         model.step()
         val state = model.snapshot()
         assertTrue(state.eastWindAt(13, 9) > 0)
@@ -66,7 +66,7 @@ class DryAtmosphereTest {
 
     @Test
     fun periodicTransportConservesVolumeAndSnapshotCadenceDoesNotAlterEvolution() {
-        val config = DryAtmosphereConfig(width = 24, height = 18)
+        val config = DryAtmosphereConfig(geometry = AtmosphereGeometry.PERIODIC_F_PLANE, width = 24, height = 18)
         val observed = DryScenarios.create(config = config)
         val direct = DryScenarios.create(config = config)
         val initial = observed.snapshot()

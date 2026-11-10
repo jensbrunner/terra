@@ -47,7 +47,8 @@ class WeatherSimulation(private val world: World) : WeatherModel {
     private val zonalWindTilesPerDay = DoubleArray(height)
     private val windUTilesPerDay = DoubleArray(count)
     private val windVTilesPerDay = DoubleArray(count)
-    private var elapsedSeconds = 0.0
+    override var elapsedSeconds = 0.0
+        private set
     private var climateSamplingEnabled = false
     private var climateSampledDays = 0.0
 
@@ -120,7 +121,7 @@ class WeatherSimulation(private val world: World) : WeatherModel {
     override fun airTemperatureC(x: Int, y: Int) = airTemperatureC[index(x, y)]
     override fun windUTilesPerDay(x: Int, y: Int) = windUTilesPerDay[index(x, y)]
     override fun windVTilesPerDay(x: Int, y: Int) = windVTilesPerDay[index(x, y)]
-    override fun nightOpacity(x: Int): Double {
+    override fun nightOpacity(x: Int, y: Int): Double {
         val sunHeight = cos(hourAngleAt(x, elapsedSeconds))
         return (1.0 - smoothstep(-TERMINATOR_TRANSITION, TERMINATOR_TRANSITION, sunHeight)) *
             MAX_NIGHT_OPACITY

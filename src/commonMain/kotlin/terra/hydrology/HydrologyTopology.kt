@@ -4,15 +4,21 @@ import terra.world.Terrain
 import terra.world.World
 import kotlin.math.max
 
-/** Immutable, bounded D8 drainage geography for one generated world. */
-class HydrologyTopology(world: World) {
-    val width: Int = world.width
-    val height: Int = world.height
+/** Immutable D8 drainage geography: periodic longitude, impermeable polar land edges. */
+class HydrologyTopology internal constructor(
+    val width: Int,
+    val height: Int,
+    elevation: DoubleArray,
+    ocean: BooleanArray
+) {
+    constructor(world: World) : this(world.width, world.height,
+        DoubleArray(world.width * world.height) { world[it % world.width, it / world.width].elevation },
+        BooleanArray(world.width * world.height) { world[it % world.width, it / world.width].terrain == Terrain.OCEAN })
     private val count = width * height
     /** Original immutable terrain elevation in row-major order. */
-    val terrainElevation = DoubleArray(count)
+    val terrainElevation = elevation.copyOf()
 
-    /** Downstream row-major tile index, or -1 for an ocean/perimeter terminal outlet. */
+    /** Downstream row-major tile index, or -1 for ocean or the explicit closed-world terminal basin. */
     val downstreamIndex = IntArray(count) { -1 }
 
     /** Priority-Flood filled elevation used to identify spill levels; world elevations stay unchanged. */
@@ -26,16 +32,11 @@ class HydrologyTopology(world: World) {
 
     /** Meaningful potential depressions; no water is stored or rendered by this topology. */
     val lakeCandidates: List<LakeCandidate>
-    private val oceanByTile = BooleanArray(count)
+    private val oceanByTile = ocean.copyOf()
 
     init {
-        for (y in 0 until height) for (x in 0 until width) {
-            val i = y * width + x
-            val cell = world[x, y]
-            terrainElevation[i] = cell.elevation
-            oceanByTile[i] = cell.terrain == Terrain.OCEAN
-        }
-
+        require(width >= 3 && height >= 1 && width.toLong() * height <= Int.MAX_VALUE)
+        require(elevation.size == count && ocean.size == count && elevation.all { it.isFinite() })
         val visited = BooleanArray(count)
         var floodOrderSize = 0
         val floodHeap = IntHeap(count) { a, b ->
@@ -43,11 +44,11 @@ class HydrologyTopology(world: World) {
             elevationOrder < 0 || (elevationOrder == 0 && a < b)
         }
 
-        // Every ocean tile and every bounded-map edge tile is a terminal sink.
+        // Oceans are legitimate sinks; no map edge exports water.
+        val hasOcean = oceanByTile.any { it }
+        val closedRoot = if (hasOcean) -1 else terrainElevation.indices.minBy { terrainElevation[it] }
         for (i in 0 until count) {
-            val x = i % width
-            val y = i / width
-            if (oceanByTile[i] || x == 0 || x == width - 1 || y == 0 || y == height - 1) {
+            if (oceanByTile[i] || i == closedRoot) {
                 visited[i] = true
                 filledElevation[i] = terrainElevation[i]
                 floodHeap.add(i)
@@ -61,9 +62,9 @@ class HydrologyTopology(world: World) {
             val y = current / width
             for (dy in -1..1) for (dx in -1..1) {
                 if (dx == 0 && dy == 0) continue
-                val nx = x + dx
+                val nx = (x + dx + width) % width
                 val ny = y + dy
-                if (nx !in 0 until width || ny !in 0 until height) continue
+                if (ny !in 0 until height) continue
                 val next = ny * width + nx
                 if (visited[next]) continue
                 visited[next] = true
@@ -72,9 +73,13 @@ class HydrologyTopology(world: World) {
                 floodHeap.add(next)
             }
         }
-        check(floodOrderSize == count) { "Bounded map perimeter must reach every tile" }
+        check(floodOrderSize == count) { "Ocean or closed basin must reach every tile" }
 
-        lakeCandidates = findLakeCandidates(terrainElevation)
+        lakeCandidates = if (hasOcean) findLakeCandidates(terrainElevation) else listOf(
+            // All-land fallback: one nonspilling basin whose wet footprint grows
+            // from the global minimum. Its storage is finite; capacity is unbounded.
+            LakeCandidate(0, IntArray(count) { it }, Double.POSITIVE_INFINITY, closedRoot, -1, IntArray(0))
+        )
         processingOrder = buildProcessingOrder()
         buildUpstreamLandArea()
         verifyProcessingOrder()
@@ -122,9 +127,9 @@ class HydrologyTopology(world: World) {
                 val y = current / width
                 for (dy in -1..1) for (dx in -1..1) {
                     if (dx == 0 && dy == 0) continue
-                    val nx = x + dx
+                    val nx = (x + dx + width) % width
                     val ny = y + dy
-                    if (nx !in 0 until width || ny !in 0 until height) continue
+                    if (ny !in 0 until height) continue
                     val next = ny * width + nx
                     if (grouped[next] >= 0 || filledElevation[next] != spillLevel ||
                         filledElevation[next] <= elevation[next]
@@ -145,9 +150,9 @@ class HydrologyTopology(world: World) {
                     val y = tile / width
                     for (dy in -1..1) for (dx in -1..1) {
                         if (dx == 0 && dy == 0) continue
-                        val nx = x + dx
+                        val nx = (x + dx + width) % width
                         val ny = y + dy
-                        if (nx !in 0 until width || ny !in 0 until height) continue
+                        if (ny !in 0 until height) continue
                         val next = ny * width + nx
                         if (grouped[next] == group) continue
                         var cursor = next
@@ -222,9 +227,9 @@ class HydrologyTopology(world: World) {
             var lowerNeighbor = -1
             for (dy in -1..1) for (dx in -1..1) {
                 if (dx == 0 && dy == 0) continue
-                val nx = x + dx
+                val nx = (x + dx + width) % width
                 val ny = y + dy
-                if (nx !in 0 until width || ny !in 0 until height) continue
+                if (ny !in 0 until height) continue
                 val neighbor = ny * width + nx
                 if (grouped[neighbor] != group) continue
                 val lower = elevation[neighbor] < elevation[tile] ||
@@ -267,9 +272,9 @@ class HydrologyTopology(world: World) {
             for (dy in -1..1) for (dx in -1..1) {
                 if (dy < 0 || (dy == 0 && dx <= 0)) continue
                 if (dx == 0 && dy == 0) continue
-                val nx = x + dx
+                val nx = (x + dx + width) % width
                 val ny = y + dy
-                if (nx !in 0 until width || ny !in 0 until height) continue
+                if (ny !in 0 until height) continue
                 val neighbor = ny * width + nx
                 if (grouped[neighbor] != group) continue
                 val from = basinOwner[tile]
@@ -380,9 +385,9 @@ class HydrologyTopology(world: World) {
                 val y = current / width
                 for (dy in -1..1) for (dx in -1..1) {
                     if (dx == 0 && dy == 0) continue
-                    val nx = x + dx
+                    val nx = (x + dx + width) % width
                     val ny = y + dy
-                    if (nx !in 0 until width || ny !in 0 until height) continue
+                    if (ny !in 0 until height) continue
                     val next = ny * width + nx
                     if (grouped[next] != group || basinOwner[next] != basin || distances[next] >= 0) continue
                     distances[next] = distances[current] + 1
@@ -397,9 +402,9 @@ class HydrologyTopology(world: World) {
                     var parent = -1
                     for (dy in -1..1) for (dx in -1..1) {
                         if (dx == 0 && dy == 0) continue
-                        val nx = x + dx
+                        val nx = (x + dx + width) % width
                         val ny = y + dy
-                        if (nx !in 0 until width || ny !in 0 until height) continue
+                        if (ny !in 0 until height) continue
                         val next = ny * width + nx
                         if (grouped[next] == group && basinOwner[next] == basin &&
                             distances[next] == distances[tile] - 1 && (parent < 0 || next < parent)
@@ -434,9 +439,9 @@ class HydrologyTopology(world: World) {
                 val y = tile / width
                 for (dy in -1..1) for (dx in -1..1) {
                     if (dx == 0 && dy == 0) continue
-                    val nx = x + dx
+                    val nx = (x + dx + width) % width
                     val ny = y + dy
-                    if (nx !in 0 until width || ny !in 0 until height) continue
+                    if (ny !in 0 until height) continue
                     val upstream = ny * width + nx
                     if (downstreamIndex[upstream] == tile &&
                         (grouped[upstream] != group || basinOwner[upstream] != basin)
@@ -466,9 +471,9 @@ class HydrologyTopology(world: World) {
         var result = 0
         for (dy in -1..1) for (dx in -1..1) {
             if (dx == 0 && dy == 0) continue
-            val nx = x + dx
+            val nx = (x + dx + width) % width
             val ny = y + dy
-            if (nx !in 0 until width || ny !in 0 until height) continue
+            if (ny !in 0 until height) continue
             val upstream = ny * width + nx
             if (downstreamIndex[upstream] == tile &&
                 (grouped[upstream] != group || basinOwner[upstream] != basin)

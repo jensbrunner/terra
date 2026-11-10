@@ -30,26 +30,10 @@ kotlin {
 tasks.withType<JavaExec>().configureEach {
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     systemProperty("terra.weatherModel", providers.gradleProperty("weatherModel").orElse("prescribed").get())
-    // Explicitly opt in; the normal desktop entrypoint has no experiment observer.
-    systemProperty("terra.baseline", providers.gradleProperty("baseline").orElse("false").get())
-    systemProperty("terra.baseline.output", providers.gradleProperty("baselineOutput").orElse("build/experiments/live").get())
-    systemProperty("terra.baseline.warmup", providers.gradleProperty("baselineWarmup").orElse("15").get())
-    systemProperty("terra.baseline.seconds", providers.gradleProperty("baselineSeconds").orElse("30").get())
-    systemProperty("terra.baseline.trials", providers.gradleProperty("baselineTrials").orElse("3").get())
-    systemProperty("terra.baseline.phases", providers.gradleProperty("baselinePhases").orElse("true").get())
-    systemProperty("terra.baseline.speeds", providers.gradleProperty("baselineSpeeds").orElse("").get())
-    systemProperty("terra.baseline.gradle", gradle.gradleVersion)
+    systemProperty("terra.atmosphereGeometry", providers.gradleProperty("atmosphereGeometry").orElse("LATITUDE_CHANNEL").get())
 }
 
 val experimentCompilation = kotlin.targets.getByName<KotlinJvmTarget>("jvm").compilations.getByName("main")
-tasks.register<JavaExec>("baselineExperiment") {
-    group = "verification"
-    description = "Measure existing weather/hydrology without a game window. Pass -PbaselineArgs='--help'."
-    mainClass.set("terra.experiments.BaselineExperimentKt")
-    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
-    args(providers.gradleProperty("baselineArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
-}
-
 tasks.register<JavaExec>("dryAtmospherePreview") {
     group = "application"
     description = "Open the dry rotating atmosphere's interactive 2D preview."

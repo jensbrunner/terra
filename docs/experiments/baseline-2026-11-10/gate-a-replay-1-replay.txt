@@ -1,4 +1,0 @@
-calls=2702
-simulated_seconds=486367.20000000036
-wall_seconds=20.926857375
-observable_hash=d1fb3635c249c1a8d0b3cf23f09e65c91e7bc28ef3adcf3a95d4866764e3f774

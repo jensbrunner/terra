@@ -6,6 +6,8 @@ package terra.weather
 interface WeatherModel {
     val width: Int
     val height: Int
+    /** Completed simulation time; presentation never advances the model clock. */
+    val elapsedSeconds: Double
     fun step(seconds: Double)
     fun relativeHumidity(x: Int, y: Int): Double
     fun cloudCover(x: Int, y: Int): Double
@@ -23,7 +25,7 @@ interface WeatherModel {
     fun airTemperatureC(x: Int, y: Int): Double
     fun windUTilesPerDay(x: Int, y: Int): Double
     fun windVTilesPerDay(x: Int, y: Int): Double
-    fun nightOpacity(x: Int): Double
+    fun nightOpacity(x: Int, y: Int): Double
     fun atmosphericWaterMm(x: Int, y: Int): Double
     fun cloudWaterMm(x: Int, y: Int): Double
     fun soilWaterMm(x: Int, y: Int): Double

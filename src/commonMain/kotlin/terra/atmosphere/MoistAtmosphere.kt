@@ -18,7 +18,11 @@ data class MoistPhysicsConfig(
     val surfaceHeatCapacityJm2K: Double = 41_800_000.0,
     val airHeatCapacityJkgK: Double = 1004.0,
     val latentHeatJkg: Double = 2_500_000.0,
-    val solarPeakWm2: Double = 1000.0,
+    /** Incoming normal-beam flux before model albedo/cloud reflection, not surface noon irradiance. */
+    val solarPeakWm2: Double = 1360.0,
+    val solar: SolarConfig = SolarConfig(),
+    /** Weak column-integrated drag, a 30-day e-folding time; dissipated kinetic energy becomes heat. */
+    val momentumDragPerSecond: Double = 1.0 / (30 * 86400.0),
     val surfaceAlbedo: Double = 0.18,
     val atmosphericEmissivity: Double = 0.8,
     val cloudSolarReflection: Double = 0.45,
@@ -28,16 +32,24 @@ data class MoistPhysicsConfig(
     val cloudEvaporationSeconds: Double = 900.0,
     val rainoutSeconds: Double = 3600.0,
     val rainCloudThresholdKgM2: Double = 0.1,
+    /** Diagnostic parcel residence/ascent; no extra atmospheric layer or cloud inventory. */
+    val liftResidenceSeconds: Double = 600.0,
+    val maximumParcelLiftMeters: Double = 1500.0,
+    val convectiveMixingDepthMeters: Double = 1500.0,
+    val convectiveVelocityCoefficient: Double = 0.02,
+    val maximumConvectiveVelocityMetersPerSecond: Double = 1.0,
     val radiationEnabled: Boolean = true,
     val surfaceExchangeEnabled: Boolean = true
 ) {
     init {
         require(listOf(referenceTemperatureKelvin, referenceDryColumnKgM2, surfaceHeatCapacityJm2K,
-            airHeatCapacityJkgK, latentHeatJkg, condensationSeconds, cloudEvaporationSeconds, rainoutSeconds)
+            airHeatCapacityJkgK, latentHeatJkg, condensationSeconds, cloudEvaporationSeconds, rainoutSeconds,
+            liftResidenceSeconds, convectiveMixingDepthMeters)
             .all { it.isFinite() && it > 0 })
         require(humidColumnFraction > 0 && humidColumnFraction <= 1 && cloudPressureFraction > 0 && cloudPressureFraction <= 1)
         require(listOf(surfaceAlbedo, atmosphericEmissivity, cloudSolarReflection).all { it.isFinite() && it in 0.0..1.0 })
-        require(listOf(solarPeakWm2, bulkExchangeCoefficient, unresolvedGustMetersPerSecond, rainCloudThresholdKgM2)
+        require(listOf(solarPeakWm2, momentumDragPerSecond, bulkExchangeCoefficient, unresolvedGustMetersPerSecond, rainCloudThresholdKgM2,
+            maximumParcelLiftMeters, convectiveVelocityCoefficient, maximumConvectiveVelocityMetersPerSecond)
             .all { it.isFinite() && it >= 0 })
     }
 }
@@ -64,7 +76,9 @@ data class MoistAtmosphereDiagnostics(
     val netRadiationJoules: Double,
     /** Includes numerical transport/mechanical-energy error, not an unreported physical heat source. */
     val energyResidualJoules: Double,
-    val exportedWaterKg: Double = 0.0
+    val exportedWaterKg: Double = 0.0,
+    /** Internal kinetic-to-thermal transfer, already included in total energy; not an external source. */
+    val frictionHeatingJoules: Double = 0.0
 )
 
 class MoistAtmosphereSnapshot internal constructor(
@@ -117,6 +131,8 @@ class MoistAtmosphere(
     private var initialWater = 0.0
     private var initialEnergy = 0.0
     private var radiationEnergy = 0.0
+    private var frictionHeating = 0.0
+    private val sunlight = PlanetarySunlight(config.width, config.height, physics.solar)
     private var evaporationTotal = 0.0
     private var precipitationTotal = 0.0
     private val condensationResponse = 1 - exp(-config.stepSeconds / physics.condensationSeconds)
@@ -125,6 +141,8 @@ class MoistAtmosphere(
     val completedSteps: Long get() = flow.completedSteps
     val elapsedSeconds: Double get() = flow.elapsedSeconds
     fun temperatureKelvinAt(cell: Int): Double = columns.temperatureAt(cell, flow.depthAt(cell))
+    fun surfaceTemperatureKelvinAt(cell: Int): Double = surfaceTemperature[cell]
+    fun rainMmThisStepAt(cell: Int): Double = rainRate[cell] * config.stepSeconds / 3600.0
 
     init {
         val phase = Random(seed + 1).nextDouble() * 2 * PI
@@ -194,7 +212,7 @@ class MoistAtmosphere(
             vapor.value / config.cellCount, cloud.value / config.cellCount,
             precipitationTotal / (config.cellCount * config.cellArea), peakRain, temperature.value / config.cellCount,
             evaporationTotal, precipitationTotal, energy.value, radiationEnergy,
-            if (initialEnergy > 0) energy.value - initialEnergy - radiationEnergy else 0.0, exported
+            if (initialEnergy > 0) energy.value - initialEnergy - radiationEnergy else 0.0, exported, frictionHeating
         )
     }
 
@@ -206,20 +224,26 @@ class MoistAtmosphere(
 
     private fun exchangeHeatAndWater() {
         val dt = config.stepSeconds
+        sunlight.update(elapsedSeconds - 0.5 * dt)
         for (y in 0 until config.height) for (x in 0 until config.width) {
             val i = y * config.width + x
             val surfaceCapacity = surfaceCapacity(i)
             val depth = flow.depthAt(i)
             val mass = density * depth
             val capacity = airHeatCapacity(depth)
-            var temperature = columns.temperatureAt(i, depth)
+            val roughness = this.surface?.momentumDragMultiplier(i) ?: 1.0
+            check(roughness.isFinite() && roughness >= 0) { "Invalid surface drag at cell $i" }
+            val retention = exp(-physics.momentumDragPerSecond * roughness * dt)
+            val dissipated = density * flow.dampMomentumAt(i, retention)
+            var temperature = columns.temperatureAt(i, depth) + dissipated / capacity
+            frictionHeating += dissipated * config.cellArea
             var surface = surfaceTemperature[i]
             var vapor = density * columns.values[1][i]
             var cloud = density * columns.values[2][i]
             var surfaceHeat = 0.0
             var airHeat = 0.0
             if (physics.radiationEnabled) {
-                val sun = max(0.0, cos(2 * PI * (elapsedSeconds / 86400 + (x + 0.5) / config.width - 0.5)))
+                val sun = sunlight.inputFactor(x, y)
                 val cover = 1 - exp(-cloud / 0.15)
                 val albedo = this.surface?.albedo(i) ?: physics.surfaceAlbedo
                 val solar = physics.solarPeakWm2 * sun * (1 - albedo) * (1 - physics.cloudSolarReflection * cover)
@@ -255,7 +279,20 @@ class MoistAtmosphere(
                 vapor += evaporated
             }
             val pressure = mass * config.gravity * physics.cloudPressureFraction
-            val transfer = phaseTransfer(vapor, cloud, temperature, pressure, mass, capacity)
+            val orographic = this.surface?.orographicUpliftMetersPerSecond(i, flow.eastWindAt(i), flow.northWindAt(i)) ?: 0.0
+            check(orographic.isFinite() && orographic >= 0) { "Invalid terrain ascent at cell $i" }
+            val lapse = config.gravity / physics.airHeatCapacityJkgK
+            // Instability relative to a dry-adiabatic mixed column, not simply any warm surface.
+            val excess = max(0.0, surface - temperature - lapse * physics.convectiveMixingDepthMeters)
+            val convective = min(physics.maximumConvectiveVelocityMetersPerSecond,
+                physics.convectiveVelocityCoefficient * sqrt(config.gravity * physics.convectiveMixingDepthMeters * excess / temperature))
+            val lift = min(physics.maximumParcelLiftMeters, (orographic + convective) * physics.liftResidenceSeconds)
+            val parcelTemperature = temperature - lapse * lift
+            val parcelPressure = pressure * exp(-config.gravity * lift / (287.0 * temperature))
+            check(parcelTemperature > 0 && parcelPressure > 0) { "Invalid lifted parcel at cell $i" }
+            // One parcel state for BOTH condensation and evaporation. Its adiabatic
+            // temperature is diagnostic; only actual latent transfer changes bulk heat.
+            val transfer = phaseTransfer(vapor, cloud, parcelTemperature, parcelPressure, mass, capacity)
             vapor -= transfer
             cloud += transfer
             temperature += physics.latentHeatJkg * transfer / capacity

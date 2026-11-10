@@ -1,5 +1,6 @@
 package terra.atmosphere
 
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
@@ -7,7 +8,16 @@ import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** Physical Cartesian, doubly periodic f-plane. Array Y increases northward. */
+enum class AtmosphereGeometry { LATITUDE_CHANNEL, PERIODIC_F_PLANE }
+
+/** Cell-centered pseudo-latitude on an equal-area Cartesian map, with no pole crossing. */
+object PlanetLatitude {
+    fun radians(northwardFraction: Double): Double = (northwardFraction - 0.5) * 170.0 * PI / 180.0
+    fun atmosphereRowRadians(y: Int, height: Int): Double = radians((y + 0.5) / height)
+    fun terrainRowRadians(y: Int, height: Int): Double = radians(1.0 - (y + 0.5) / height)
+}
+
+/** Periodic X; free-slip polar walls by default. Array Y increases northward. */
 data class DryAtmosphereConfig(
     val width: Int = 96,
     val height: Int = 72,
@@ -15,18 +25,26 @@ data class DryAtmosphereConfig(
     val domainHeightMeters: Double = 9_000_000.0,
     val meanHeightMeters: Double = 10_000.0,
     val gravity: Double = 9.81,
+    /** Used only by PERIODIC_F_PLANE. */
     val coriolisPerSecond: Double = 1e-4,
     val stepSeconds: Double = 20.0,
-    val courantLimit: Double = 0.4
+    val courantLimit: Double = 0.4,
+    val geometry: AtmosphereGeometry = AtmosphereGeometry.LATITUDE_CHANNEL,
+    val rotationRateRadiansPerSecond: Double = 7.2921159e-5
 ) {
     init {
         require(width >= 4 && height >= 4 && width.toLong() * height <= Int.MAX_VALUE)
         require(listOf(domainWidthMeters, domainHeightMeters, meanHeightMeters, gravity, stepSeconds)
             .all { it.isFinite() && it > 0 })
-        require(coriolisPerSecond.isFinite())
+        require(coriolisPerSecond.isFinite() && rotationRateRadiansPerSecond.isFinite())
         require(courantLimit.isFinite() && courantLimit > 0 && courantLimit <= 0.4)
     }
 
+    val periodicY: Boolean get() = geometry == AtmosphereGeometry.PERIODIC_F_PLANE
+    fun coriolisAtRow(y: Int): Double = if (periodicY) coriolisPerSecond else
+        2 * rotationRateRadiansPerSecond * sin(PlanetLatitude.atmosphereRowRadians(y, height))
+    internal fun southRow(y: Int): Int = if (y > 0) y - 1 else if (periodicY) height - 1 else 0
+    internal fun northRow(y: Int): Int = if (y + 1 < height) y + 1 else if (periodicY) 0 else height - 1
     val cellCount: Int get() = width * height
     val dx: Double get() = domainWidthMeters / width
     val dy: Double get() = domainHeightMeters / height
@@ -61,8 +79,8 @@ class DryAtmosphereSnapshot internal constructor(
     fun vorticityAt(x: Int, y: Int): Double {
         val west = if (x == 0) config.width - 1 else x - 1
         val east = if (x + 1 == config.width) 0 else x + 1
-        val south = if (y == 0) config.height - 1 else y - 1
-        val north = if (y + 1 == config.height) 0 else y + 1
+        val south = config.southRow(y)
+        val north = config.northRow(y)
         return (northWindAt(east, y) - northWindAt(west, y)) / (2 * config.dx) -
             (eastWindAt(x, north) - eastWindAt(x, south)) / (2 * config.dy)
     }
@@ -97,8 +115,9 @@ class DryAtmosphere internal constructor(
     private val slopeY = Array(3) { DoubleArray(count) }
     private val maximumXWave = DoubleArray(count)
     private val maximumYWave = DoubleArray(count)
-    private val rotationCos = cos(config.coriolisPerSecond * config.stepSeconds * 0.5)
-    private val rotationSin = sin(config.coriolisPerSecond * config.stepSeconds * 0.5)
+    private val coriolis = DoubleArray(config.height) { config.coriolisAtRow(it) }
+    private val rotationCos = DoubleArray(config.height) { cos(coriolis[it] * config.stepSeconds * 0.5) }
+    private val rotationSin = DoubleArray(config.height) { sin(coriolis[it] * config.stepSeconds * 0.5) }
     var completedSteps: Long = 0L
         private set
     var maximumCourant: Double = 0.0
@@ -123,11 +142,8 @@ class DryAtmosphere internal constructor(
     fun step() {
         val dt = config.stepSeconds
         columns?.beginStep()
-        for (i in 0 until count) {
-            base[0][i] = h[i]
-            base[1][i] = rotationCos * mx[i] + rotationSin * my[i]
-            base[2][i] = -rotationSin * mx[i] + rotationCos * my[i]
-        }
+        h.copyInto(base[0]); mx.copyInto(base[1]); my.copyInto(base[2])
+        rotateHalfStep(base[1], base[2])
         val firstCourant = tendencies(base[0], base[1], base[2], columns?.base)
         for (field in 0..2) for (i in 0 until count) stage[field][i] = base[field][i] + dt * rhs[field][i]
         columns?.makeStage(dt)
@@ -136,9 +152,10 @@ class DryAtmosphere internal constructor(
             nextH[i] = 0.5 * (base[0][i] + stage[0][i] + dt * rhs[0][i])
             val east = 0.5 * (base[1][i] + stage[1][i] + dt * rhs[1][i])
             val north = 0.5 * (base[2][i] + stage[2][i] + dt * rhs[2][i])
-            nextMx[i] = rotationCos * east + rotationSin * north
-            nextMy[i] = -rotationSin * east + rotationCos * north
+            nextMx[i] = east
+            nextMy[i] = north
         }
+        rotateHalfStep(nextMx, nextMy)
         validate(nextH, nextMx, nextMy)
         columns?.finishStep(dt)
         val oldH = h; h = nextH; nextH = oldH
@@ -148,6 +165,31 @@ class DryAtmosphere internal constructor(
         completedSteps++
     }
 
+    /** Exact local rotation; separate from transport so its kinetic-energy invariant is checkable. */
+    internal fun rotateHalfStep(east: DoubleArray, north: DoubleArray) {
+        for (y in 0 until config.height) {
+            val c = rotationCos[y]
+            val s = rotationSin[y]
+            for (x in 0 until config.width) {
+                val i = y * config.width + x
+                val u = east[i]
+                val v = north[i]
+                east[i] = c * u + s * v
+                north[i] = -s * u + c * v
+            }
+        }
+    }
+
+    /** Returns the dissipated kinetic energy per unit density and cell area. */
+    internal fun dampMomentumAt(i: Int, retention: Double): Double {
+        val before = kineticEnergyAt(i)
+        mx[i] *= retention
+        my[i] *= retention
+        return before * (1 - retention * retention)
+    }
+
+    internal fun eastWindAt(i: Int): Double = mx[i] / h[i]
+    internal fun northWindAt(i: Int): Double = my[i] / h[i]
     internal fun depthAt(i: Int): Double = h[i]
     internal fun speedAt(i: Int): Double = sqrt(mx[i] * mx[i] + my[i] * my[i]) / h[i]
     internal fun kineticEnergyAt(i: Int): Double = 0.5 * (mx[i] * mx[i] + my[i] * my[i]) / h[i]
@@ -166,14 +208,14 @@ class DryAtmosphere internal constructor(
             val i = y * config.width + x
             val west = y * config.width + if (x == 0) config.width - 1 else x - 1
             val east = y * config.width + if (x + 1 == config.width) 0 else x + 1
-            val south = (if (y == 0) config.height - 1 else y - 1) * config.width + x
-            val north = (if (y + 1 == config.height) 0 else y + 1) * config.width + x
+            val south = config.southRow(y) * config.width + x
+            val north = config.northRow(y) * config.width + x
             val u = mx[i] / h[i]
             val v = my[i] / h[i]
             val anomaly = h[i] - config.meanHeightMeters
             val curl = (my[east] / h[east] - my[west] / h[west]) / (2 * config.dx) -
                 (mx[north] / h[north] - mx[south] / h[south]) / (2 * config.dy)
-            val pv = (curl + config.coriolisPerSecond) / h[i]
+            val pv = (curl + coriolis[y]) / h[i]
             volume.add(h[i] * config.cellArea)
             val potential = if (columns == null) 0.5 * config.gravity * anomaly * anomaly else
                 0.5 * config.gravity * columns.temperatureAt(i, h[i]) / columns.physics.referenceTemperatureKelvin * h[i] * h[i]
@@ -202,7 +244,13 @@ class DryAtmosphere internal constructor(
         for (y in 0 until height) for (x in 0 until width) {
             val i = y * width + x
             faceFlux(i, y * width + if (x + 1 == width) 0 else x + 1, depth, east, north, true, scalars)
-            faceFlux(i, (if (y + 1 == height) 0 else y + 1) * width + x, depth, east, north, false, scalars)
+            if (y + 1 < height || config.periodicY) {
+                faceFlux(i, config.northRow(y) * width + x, depth, east, north, false, scalars)
+            }
+            if (!config.periodicY) {
+                if (y == 0) wallFlux(i, -1.0, depth, north, scalars)
+                if (y + 1 == height) wallFlux(i, 1.0, depth, north, scalars)
+            }
         }
         var courant = 0.0
         for (i in 0 until count) courant = max(courant,
@@ -221,11 +269,33 @@ class DryAtmosphere internal constructor(
             val i = y * width + x
             val west = y * width + if (x == 0) width - 1 else x - 1
             val east = y * width + if (x + 1 == width) 0 else x + 1
-            val south = (if (y == 0) height - 1 else y - 1) * width + x
-            val north = (if (y + 1 == height) 0 else y + 1) * width + x
+            val south = config.southRow(y) * width + x
+            val north = config.northRow(y) * width + x
             slopeX[component][i] = limitedSlope(field[i] - field[west], field[east] - field[i])
-            slopeY[component][i] = limitedSlope(field[i] - field[south], field[north] - field[i])
+            // Reflect normal momentum, extend depth and tangential momentum evenly.
+            val southValue = if (!config.periodicY && y == 0 && component == 2) -field[i] else field[south]
+            val northValue = if (!config.periodicY && y + 1 == height && component == 2) -field[i] else field[north]
+            slopeY[component][i] = limitedSlope(field[i] - southValue, northValue - field[i])
         }
+    }
+
+    /** HLL flux against a reflected ghost: zero mass/tracers/shear, finite normal pressure.
+     * outward is -1 at the south wall, +1 at the north wall. The symmetric HLL
+     * wave bounds are ±(|v|+c), giving F_hv = p + h*v_out*(v_out+|v_out|+c).
+     */
+    private fun wallFlux(cell: Int, outward: Double, depth: DoubleArray, north: DoubleArray, scalars: Array<DoubleArray>?) {
+        val hWall = depth[cell] + outward * 0.5 * slopeY[0][cell]
+        check(hWall > 0) { "Nonpositive reconstructed wall layer; no flux clamp was applied" }
+        val v = outward * (north[cell] + outward * 0.5 * slopeY[2][cell]) / hWall
+        val gravity = if (scalars == null) config.gravity else
+            config.gravity * scalars[0][cell] / depth[cell] / columns!!.physics.referenceTemperatureKelvin
+        val sound = sqrt(gravity * hWall)
+        val wave = abs(v) + sound
+        // h*v² + p + (|v|+c)*h*v is the reflected-state HLL momentum flux.
+        val pressureFlux = 0.5 * gravity * hWall * hWall + hWall * v * (v + wave)
+        rhs[2][cell] -= outward * pressureFlux / config.dy
+        maximumYWave[cell] = max(maximumYWave[cell], wave)
+        // No call to tracer transport: the wall's mass flux is identically zero.
     }
 
     private fun faceFlux(left: Int, right: Int, depth: DoubleArray, east: DoubleArray, north: DoubleArray, alongX: Boolean, scalars: Array<DoubleArray>?) {

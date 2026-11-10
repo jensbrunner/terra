@@ -1,6 +1,0 @@
-world_seconds=0.046085458
-weather_seconds=0.014992459
-topology_seconds=0.067618542
-hydrology_seconds=0.002060583
-bootstrap_seconds=22.478333791
-observable_hash=a9c4580f0bbee6c5c149a7c88cd64c755df99c7d29432f92ebc092221a96c8eb

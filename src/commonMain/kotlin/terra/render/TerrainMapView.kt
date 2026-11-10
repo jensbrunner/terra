@@ -29,8 +29,10 @@ class TerrainMapView(
     private var world = initialWorld
     private val terrainTileSet = createTerrainTileSet()
     private val terrainTileMapData = TileMapData(world.width, world.height, terrainTileSet)
+    private val cloudRenderer = CloudRenderer(world.width, world.height, world.seed)
+    private var cloudRefreshElapsedSeconds = 0.0
     private val overlayBitmaps = WeatherLayer.entries.associateWith { layer ->
-        Bitmap32(world.width, world.height)
+        if (layer == WeatherLayer.CLOUDS) cloudRenderer.bitmap else Bitmap32(world.width, world.height)
     }
     private val surfaceWaterBitmap = Bitmap32(
         world.width * SURFACE_WATER_PIXELS_PER_TILE,
@@ -68,9 +70,10 @@ class TerrainMapView(
             parent.container {
                 visible = false
                 image(overlayBitmaps.getValue(layer)) {
-                    scaleX = 1.0
-                    scaleY = 1.0
-                    smoothing = layer == WeatherLayer.DAY_NIGHT
+                    val pixelsPerTile = if (layer == WeatherLayer.CLOUDS) CloudRenderer.PIXELS_PER_TILE else 1
+                    scaleX = 1.0 / pixelsPerTile
+                    scaleY = 1.0 / pixelsPerTile
+                    smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS
                 }
             }
         }
@@ -90,6 +93,7 @@ class TerrainMapView(
         require(newWorld.width == world.width && newWorld.height == world.height) {
             "Terrain map dimensions cannot change after the view is created"
         }
+        if (newWorld !== world) cloudRenderer.reset(newWorld.seed)
         world = newWorld
         updateTerrainTileMapData()
     }
@@ -128,13 +132,13 @@ class TerrainMapView(
             if (y == 0 || !hydrology.isLakeTileWet(x, y - 1)) {
                 for (px in 0 until scale) surfaceWaterBitmap[left + px, top] = lakeBankColor
             }
-            if (x == world.width - 1 || !hydrology.isLakeTileWet(x + 1, y)) {
+            if (!hydrology.isLakeTileWet((x + 1) % world.width, y)) {
                 for (py in 0 until scale) surfaceWaterBitmap[left + scale - 1, top + py] = lakeBankColor
             }
             if (y == world.height - 1 || !hydrology.isLakeTileWet(x, y + 1)) {
                 for (px in 0 until scale) surfaceWaterBitmap[left + px, top + scale - 1] = lakeBankColor
             }
-            if (x == 0 || !hydrology.isLakeTileWet(x - 1, y)) {
+            if (!hydrology.isLakeTileWet((x + world.width - 1) % world.width, y)) {
                 for (py in 0 until scale) surfaceWaterBitmap[left, top + py] = lakeBankColor
             }
         }
@@ -153,7 +157,10 @@ class TerrainMapView(
                 if (!hydrology.isVirtualSpillLink(x, y)) {
                     val nextX = downstream % world.width
                     val nextY = downstream / world.width
-                    val deltaX = nextX - x
+                    var deltaX = nextX - x
+                    if (deltaX > world.width / 2) deltaX -= world.width
+                    if (deltaX < -world.width / 2) deltaX += world.width
+                    val drawnNextX = x + deltaX
                     val deltaY = nextY - y
                     if (abs(deltaX) <= 1 && abs(deltaY) <= 1) {
                         val downstreamIsLake = hydrology.isLakeCandidateTile(nextX, nextY)
@@ -162,9 +169,9 @@ class TerrainMapView(
                             hydrology.isStreamTile(nextX, nextY) || downstreamIsWetLake
                         if (downstreamIsVisible) {
                             val endX = if (downstreamIsLake && !downstreamIsWetLake) {
-                                nextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
+                                drawnNextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
                             } else {
-                                nextX * scale + scale / 2
+                                drawnNextX * scale + scale / 2
                             }
                             val endY = if (downstreamIsLake && !downstreamIsWetLake) {
                                 nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
@@ -173,25 +180,11 @@ class TerrainMapView(
                             }
                             drawRiverSegment(centerX, centerY, endX, endY, width)
                         } else if (downstreamIsLake) {
-                            val edgeX = nextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
+                            val edgeX = drawnNextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
                             val edgeY = nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
                             drawRiverSegment(centerX, centerY, edgeX, edgeY, width)
                         }
                     }
-                }
-            } else {
-                val edgeX = when (x) {
-                    0 -> 0
-                    world.width - 1 -> x * scale + scale - 1
-                    else -> centerX
-                }
-                val edgeY = when (y) {
-                    0 -> 0
-                    world.height - 1 -> y * scale + scale - 1
-                    else -> centerY
-                }
-                if (edgeX != centerX || edgeY != centerY) {
-                    drawRiverSegment(centerX, centerY, edgeX, edgeY, width)
                 }
             }
             drawRiverBrush(centerX, centerY, width + RIVER_BANK_EXTRA_PIXELS, riverBankColor)
@@ -243,42 +236,43 @@ class TerrainMapView(
     private fun drawRiverBrush(centerX: Int, centerY: Int, width: Int, color: korlibs.image.color.RGBA) {
         val offset = width / 2
         for (dy in 0 until width) for (dx in 0 until width) {
-            val x = centerX + dx - offset
+            val x = ((centerX + dx - offset) % surfaceWaterBitmap.width + surfaceWaterBitmap.width) % surfaceWaterBitmap.width
             val y = centerY + dy - offset
-            if (x in 0 until surfaceWaterBitmap.width && y in 0 until surfaceWaterBitmap.height) {
+            if (y in 0 until surfaceWaterBitmap.height) {
                 surfaceWaterBitmap[x, y] = color
             }
         }
     }
 
-    fun updateOverlays(weather: WeatherModel, activeLayers: Set<WeatherLayer>) {
+    fun updateOverlays(weather: WeatherModel, activeLayers: Set<WeatherLayer>, elapsedRealSeconds: Double = CloudRenderer.REFRESH_SECONDS) {
+        cloudRefreshElapsedSeconds += elapsedRealSeconds
         for (layer in WeatherLayer.entries) {
             val container = overlayContainers.getValue(layer)
             container.visible = layer in activeLayers
             if (!container.visible) continue
 
             val bitmap = overlayBitmaps.getValue(layer)
+            if (layer == WeatherLayer.CLOUDS) {
+                if (cloudRefreshElapsedSeconds >= CloudRenderer.REFRESH_SECONDS) {
+                    cloudRenderer.update(weather)
+                    cloudRefreshElapsedSeconds %= CloudRenderer.REFRESH_SECONDS
+                }
+                continue
+            }
             if (layer == WeatherLayer.WIND) {
                 updateWindOverlay(bitmap, weather)
                 continue
-            }
-            val nightOpacityByColumn = if (layer == WeatherLayer.DAY_NIGHT) {
-                DoubleArray(world.width) { x -> weather.nightOpacity(x) }
-            } else {
-                null
             }
             bitmap.lock {
                 for (y in 0 until world.height) {
                     for (x in 0 until world.width) {
                         val color = when (layer) {
-                            WeatherLayer.CLOUDS -> Colors["#f1f4f2"]
                             WeatherLayer.DAY_NIGHT -> Colors["#071321"]
                             WeatherLayer.WIND -> windArrowStroke
                             else -> tileColor(layer, weather, x, y)
                         }
                         val opacity = when (layer) {
-                            WeatherLayer.CLOUDS -> weather.cloudCover(x, y)
-                            WeatherLayer.DAY_NIGHT -> nightOpacityByColumn!![x]
+                            WeatherLayer.DAY_NIGHT -> weather.nightOpacity(x, y)
                             WeatherLayer.WIND -> 0.0
                             else -> 0.42
                         }

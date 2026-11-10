@@ -24,6 +24,7 @@ import javax.swing.Timer
 import javax.swing.JTabbedPane
 import javax.swing.WindowConstants
 import kotlin.concurrent.thread
+import terra.atmosphere.AtmosphereGeometry
 import terra.atmosphere.DryAtmosphereConfig
 import terra.atmosphere.DryAtmosphereSnapshot
 import terra.atmosphere.DryScenario
@@ -53,8 +54,10 @@ private class DryPreviewController(private val moist: Boolean) : AutoCloseable {
     val scenario = AtomicReference(DryScenario.JET)
     private val resetRequest = AtomicReference<DryScenario?>(null)
     @Volatile private var running = true
-    private var wetModel: MoistAtmosphere? = if (moist) MoistAtmosphere() else null
-    private var dryModel: DryAtmosphere? = if (moist) null else DryScenarios.create()
+    private val config = DryAtmosphereConfig(geometry = AtmosphereGeometry.valueOf(
+        System.getProperty("terra.atmosphereGeometry", "LATITUDE_CHANNEL")))
+    private var wetModel: MoistAtmosphere? = if (moist) MoistAtmosphere(config) else null
+    private var dryModel: DryAtmosphere? = if (moist) null else DryScenarios.create(config = config)
     private val elapsedSeconds: Double get() = wetModel?.elapsedSeconds ?: dryModel!!.elapsedSeconds
     private fun capture(): PreviewFrame {
         val wet = wetModel?.snapshot()
@@ -82,8 +85,8 @@ private class DryPreviewController(private val moist: Boolean) : AutoCloseable {
             val elapsed = (now - previous) / 1e9
             previous = now
             resetRequest.getAndSet(null)?.let { requested ->
-                wetModel = if (moist) MoistAtmosphere(scenario = requested) else null
-                dryModel = if (moist) null else DryScenarios.create(requested)
+                wetModel = if (moist) MoistAtmosphere(config, scenario = requested) else null
+                dryModel = if (moist) null else DryScenarios.create(requested, config)
                 initialVolume = capture().initialVolume
                 pending = 0.0
                 achieved = 0.0

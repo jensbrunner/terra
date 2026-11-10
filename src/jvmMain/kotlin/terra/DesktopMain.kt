@@ -6,7 +6,6 @@ import korlibs.korge.scene.sceneContainer
 import korlibs.math.geom.Size
 import korlibs.render.awt.AwtGameWindow
 import terra.ui.AtlasScene
-import terra.experiments.DesktopBaselineExperiment
 import java.awt.EventQueue
 import javax.swing.JFrame
 
@@ -22,7 +21,8 @@ suspend fun main() {
                 awtWindow.frame.extendedState = JFrame.MAXIMIZED_BOTH
             }
         }
-        sceneContainer().changeTo { AtlasScene(DesktopBaselineExperiment.fromProperties(),
-            dynamicalAtmosphere = System.getProperty("terra.weatherModel") == "dynamical") }
+        sceneContainer().changeTo {
+            AtlasScene(dynamicalAtmosphere = System.getProperty("terra.weatherModel") == "dynamical")
+        }
     }
 }
