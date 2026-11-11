@@ -41,7 +41,8 @@ class TerrainMapView(
     private val overlayBitmaps = WeatherLayer.entries.associateWith { layer ->
         if (layer == WeatherLayer.CLOUDS) Bitmap32(world.width * CloudRenderer.PIXELS_PER_TILE, world.height * CloudRenderer.PIXELS_PER_TILE) else Bitmap32(world.width, world.height)
     }
-    private val overlayFades = overlayBitmaps.mapValues { (_, bitmap) -> LayerFade(Bitmap32(bitmap.width, bitmap.height)) }
+    private val overlayFades = overlayBitmaps.mapValues { (layer, bitmap) -> LayerFade(Bitmap32(bitmap.width, bitmap.height),
+        if (layer == WeatherLayer.CLOUDS) CloudRenderer.REFRESH_SECONDS else 0.18) }
     private var lightingWeather: WeatherModel? = null
     private var seasonalLighting: SeasonalLighting? = null
     private val surfaceWaterBitmap = Bitmap32(
@@ -67,12 +68,7 @@ class TerrainMapView(
         terrainContainer.scaleY = 1.0 / terrainTileSet.height.toDouble()
 
         surfaceWaterContainer = parent.container {
-            waterFade.previousImage = image(waterFade.previous) {
-                scaleX = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
-                scaleY = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
-                smoothing = false; alpha = 0.0
-            }
-            waterFade.currentImage = image(surfaceWaterBitmap) {
+            waterFade.image = RasterBlendImage(waterFade.previous, surfaceWaterBitmap).addTo(this) {
                 scaleX = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
                 scaleY = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
                 smoothing = false; alpha = 0.0
@@ -83,21 +79,13 @@ class TerrainMapView(
             parent.container {
                 visible = false
                 val fade = overlayFades.getValue(layer)
-                fade.previousImage = image(fade.previous) {
+                fade.image = RasterBlendImage(fade.previous, overlayBitmaps.getValue(layer)).addTo(this) {
                     val pixelsPerTile = if (layer == WeatherLayer.CLOUDS) CloudRenderer.PIXELS_PER_TILE else 1
                     scaleX = 1.0 / pixelsPerTile
                     scaleY = 1.0 / pixelsPerTile
                     smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS
                     alpha = 0.0
                 }
-                val overlayImage = image(overlayBitmaps.getValue(layer)) {
-                    val pixelsPerTile = if (layer == WeatherLayer.CLOUDS) CloudRenderer.PIXELS_PER_TILE else 1
-                    scaleX = 1.0 / pixelsPerTile
-                    scaleY = 1.0 / pixelsPerTile
-                    smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS
-                }
-                fade.currentImage = overlayImage
-                overlayImage.alpha = 0.0
             }
         }
 
@@ -362,25 +350,53 @@ class TerrainMapView(
 }
 
 /** Render-thread blend buffers. Hidden layers retain data, and generation reset hides obsolete rasters. */
-private class LayerFade(val previous: Bitmap32) {
-    var previousImage: Image? = null
-    var currentImage: Image? = null
+internal class LayerFade(val previous: Bitmap32, private val duration: Double = 0.18) {
+    init { require(duration.isFinite() && duration > 0) }
+    var image: RasterBlendImage? = null
     private var age = 0.0
     private var hasData = false
     fun begin(current: Bitmap32) {
-        previous.lock { if (hasData) current.ints.copyInto(previous.ints) else previous.ints.fill(0) }
+        previous.lock {
+            when {
+                !hasData -> previous.ints.fill(0)
+                age >= duration -> current.ints.copyInto(previous.ints)
+                else -> {
+                    // A command/early publication can interrupt the fade. Start
+                    // from the image on screen, not the old unfinished target.
+                    val fraction = age / duration
+                    for (i in previous.ints.indices) {
+                        val a = previous.ints[i]
+                        val b = current.ints[i]
+                        var result = 0
+                        for (shift in 0..24 step 8) {
+                            val first = (a ushr shift) and 255
+                            val second = (b ushr shift) and 255
+                            val channel = (first + (second - first) * fraction).roundToInt()
+                            result = result or (channel shl shift)
+                        }
+                        previous.ints[i] = result
+                    }
+                }
+            }
+        }
         hasData = true
         age = 0.0
         advance(0.0)
     }
     fun complete(current: Bitmap32) {
-        if (previous.ints.contentEquals(current.ints)) { age = 0.18; advance(0.0) }
+        // Producers write straight RGBA. Convert once per publication, before GPU
+        // filtering/blending; opacity interpolation must never see straight RGB.
+        current.lock {
+            current.premultiplied = false
+            current.premultiplyInplaceIfRequired()
+        }
+        if (previous.ints.contentEquals(current.ints)) { age = duration; advance(0.0) }
     }
     fun advance(seconds: Double) {
-        age = minOf(0.18, age + seconds)
-        val fraction = if (hasData) age / 0.18 else 0.0
-        previousImage?.alpha = if (hasData) 1.0 - fraction else 0.0
-        currentImage?.alpha = fraction
+        age = minOf(duration, age + seconds)
+        val fraction = if (hasData) age / duration else 0.0
+        image?.fraction = fraction
+        image?.alpha = if (hasData) 1.0 else 0.0
     }
     fun reset() { hasData = false; advance(0.0) }
 }

@@ -22,7 +22,7 @@ class TerrainAtmosphereTest {
         assertEquals(0.65, weather.nightOpacity(0, 23))
         assertTrue(weather.solarInputFactor(0, 0) > 0)
         assertEquals(0.0, weather.solarInputFactor(0, 23))
-        val initial = DryScenarios.create(config = config, seed = world.seed).snapshot()
+        val initial = weather.atmosphereSnapshot.dynamics
         val factor = -86400.0 * world.height / config.domainHeightMeters
         assertEquals(initial.northWindAt(3, 7) * factor, weather.windVTilesPerDay(3, 0), 1e-12)
         assertEquals(initial.northWindAt(3, 0) * factor, weather.windVTilesPerDay(3, 23), 1e-12)

@@ -133,10 +133,11 @@ class MoistAtmosphere(
     scenario: DryScenario = DryScenario.JET,
     seed: Int = 31742,
     private val surface: MoistSurface? = null,
+    initializeFlow: ((Double, Double) -> DryCell)? = null,
     initializeColumns: ((Double, Double) -> MoistCell)? = null
 ) {
     private val columns = MoistColumnTransport(config.cellCount, physics)
-    private val flow = DryAtmosphere(config, columns, DryScenarios.initializer(scenario, config, seed))
+    private val flow = DryAtmosphere(config, columns, initializeFlow ?: DryScenarios.initializer(scenario, config, seed))
     private val density = physics.referenceDryColumnKgM2 / config.meanHeightMeters
     val surfaceThermalState = SurfaceThermalState(config.cellCount)
     private val surfaceTemperature = surfaceThermalState.kelvin

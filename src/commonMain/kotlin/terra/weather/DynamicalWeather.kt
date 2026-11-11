@@ -32,10 +32,15 @@ class DynamicalWeather(
     internal val surfaceThermalState get() = model.surfaceThermalState
     override val pendingWaterFluxBatch get() = surface.pendingFluxBatch
     private val surface = TerrainMoistSurface(world, mapping, hydrology)
-    private val model = MoistAtmosphere(config, physics, seed = world.seed, surface = surface, initializeColumns = { x, y ->
+    private val initialWeather = InitialWeather(world.seed, config)
+    private val model = MoistAtmosphere(config, physics, seed = world.seed, surface = surface, initializeFlow = initialWeather::flow, initializeColumns = { x, y ->
         val c = min(config.height - 1, (y / config.dy).toInt()) * config.width +
             min(config.width - 1, (x / config.dx).toInt())
-        MoistCell(temperatureKelvin = 280.0, relativeHumidity = 0.75,
+        val moist = initialWeather.moistFraction(x / config.domainWidthMeters, y / config.domainHeightMeters)
+        // Start with air masses, including saturated cloudy cores, rather than an
+        // everywhere-clear column that reaches condensation almost in synchrony.
+        MoistCell(temperatureKelvin = 280.0, relativeHumidity = initialWeather.relativeHumidity(x / config.domainWidthMeters, y / config.domainHeightMeters, moist),
+            cloudWaterKgM2 = 0.30 * moist * moist * moist,
             surfaceTemperatureKelvin = 288.0 - 4.0 * surface.landFraction[c], surfaceWaterKgM2 = 0.0)
     })
     private val sunlight = PlanetarySunlight(width, height, physics.solar, northUp = false)

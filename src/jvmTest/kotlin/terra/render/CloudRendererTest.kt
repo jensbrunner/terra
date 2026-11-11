@@ -85,7 +85,10 @@ class CloudRendererTest {
             if (long.frame[x, y] != frozen[x, y]) moved = true
         }
         assertTrue(moved)
-        assertFalse(long.update(b, visualElapsedSeconds = 0.2)) // Paused state does no synthesis.
+        assertFalse(long.update(b)) // A paused caller supplies no visual elapsed time.
+        val beforeMotion = long.frame
+        assertTrue(long.update(b, visualElapsedSeconds = 0.2)) // Climate animation continues between physical commits.
+        assertTrue(beforeMotion !== long.frame)
         assertEquals(20 * 365 * 86400.0, b.elapsedSeconds)
     }
 

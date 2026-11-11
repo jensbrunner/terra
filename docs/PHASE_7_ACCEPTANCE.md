@@ -1,5 +1,11 @@
 # Phase 7, Step 10 — bounded acceptance review
 
+**Historical measurements:** Subsequent user feedback exposed cloud appearance
+defects. [CLOUD_REPAIR.md](CLOUD_REPAIR.md) records the investigation and fixes,
+including changed initial weather and representative cloud rendering. Numerical
+trajectories/performance below refer to the pre-repair source and do not establish
+visual acceptance of the current game.
+
 Phase 7 implementation and its bounded acceptance review are complete. The worker,
 shared-water ownership, calendar continuity, fidelity transitions and evolving
 coarse world have evidence below. **A strict 100 FPS target at every speed is not

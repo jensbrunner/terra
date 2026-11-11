@@ -1,5 +1,11 @@
 # Phase 7, Step 9 — fast presentation and clear periods
 
+**Subsequent correction:** [CLOUD_REPAIR.md](CLOUD_REPAIR.md) supersedes the cloud
+startup, opacity and animation behavior described here. Climate clouds now animate
+at the existing publication cadence between physical commits, with rate-based
+representative cloud amount and seeded frontal texture. Step 9 did not establish
+user visual acceptance.
+
 Climate mode now uses day-averaged seasonal light and bounded illustrative cloud
 motion, with crossfades for weather and water rasters. The status and inspector
 identify completed dates, represented periods and approximate fields. These

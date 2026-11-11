@@ -54,12 +54,12 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
             val downstream = hydrology.downstreamTileIndex(x, y)
             val centerX = x * scale + scale / 2
             val centerY = y * scale + scale / 2
-            val width = riverPixelWidth(hydrology.dischargeMmTilesPerDay(x, y))
+            val brushWidth = riverPixelWidth(hydrology.dischargeMmTilesPerDay(x, y))
 
             if (downstream >= 0) {
                 if (!hydrology.isVirtualSpillLink(x, y)) {
-                    val nextX = downstream % width
-                    val nextY = downstream / width
+                    val nextX = downstream % this.width
+                    val nextY = downstream / this.width
                     var deltaX = nextX - x
                     if (deltaX > width / 2) deltaX -= width
                     if (deltaX < -width / 2) deltaX += width
@@ -81,17 +81,17 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
                             } else {
                                 nextY * scale + scale / 2
                             }
-                            drawRiverSegment(centerX, centerY, endX, endY, width)
+                            drawRiverSegment(centerX, centerY, endX, endY, brushWidth)
                         } else if (downstreamIsLake) {
                             val edgeX = drawnNextX * scale + if (deltaX < 0) scale - 1 else if (deltaX > 0) 0 else scale / 2
                             val edgeY = nextY * scale + if (deltaY < 0) scale - 1 else if (deltaY > 0) 0 else scale / 2
-                            drawRiverSegment(centerX, centerY, edgeX, edgeY, width)
+                            drawRiverSegment(centerX, centerY, edgeX, edgeY, brushWidth)
                         }
                     }
                 }
             }
-            drawRiverBrush(centerX, centerY, width + RIVER_BANK_EXTRA_PIXELS, riverBankColor)
-            drawRiverBrush(centerX, centerY, width, riverColor)
+            drawRiverBrush(centerX, centerY, brushWidth + RIVER_BANK_EXTRA_PIXELS, riverBankColor)
+            drawRiverBrush(centerX, centerY, brushWidth, riverColor)
         }
     }
 

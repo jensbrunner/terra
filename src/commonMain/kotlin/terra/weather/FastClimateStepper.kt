@@ -162,7 +162,12 @@ internal class FastClimateStepper(
                     DoubleArray(count) { max(oldTemperature[it], newTemperature[it]) },
                     DoubleArray(count) { actualRain[it] * 3600 / (phaseSeconds * wetFractions[it]) }))
             }
-            for (c in 0 until count) representativeCloud[c] += min(0.8, actualRain[c] * 0.15) * (phaseSeconds / seconds)
+            // A representative column depends on rain RATE, not accumulated rain
+            // depth: the latter turned longer quanta into near-uniform overcast.
+            for (c in 0 until count) {
+                val hourlyRain = actualRain[c] * 3600 / phaseSeconds
+                representativeCloud[c] += min(0.6, hourlyRain * 1.5) * (phaseSeconds / seconds)
+            }
             phaseClock += phaseSeconds
         }
         if (plan.aggregate) {

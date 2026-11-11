@@ -79,3 +79,14 @@ tasks.register<JavaExec>("moistAtmosphereExperiment") {
     systemProperty("terra.moistExperiment", "true")
     args(providers.gradleProperty("moistAtmosphereArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
 }
+
+// Opt-in GPU regression for transparent raster interpolation; no numerical simulation.
+tasks.register<JavaExec>("rasterBlendCheck") {
+    group = "verification"
+    description = "Check cloud crossfade brightness and interruption with 16 tiny native-GPU samples."
+    jvmArgs((tasks.named("runJvm").get() as JavaExec).jvmArgs)
+    mainClass.set("terra.experiments.RasterBlendCheckKt")
+    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    systemProperty("java.awt.headless", "false")
+}

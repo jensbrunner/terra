@@ -68,6 +68,7 @@ class AtlasScene(
     private var simulationSpeed = if (dynamicalAtmosphere) SimulationSpeed.ONE_HOUR else SimulationSpeed.REALTIME
     private var smoothedFrameTimeSeconds = 1.0 / 60.0
     private var frameTimeDisplayElapsed = 0.0
+    private var statusDisplayElapsed = 0.1
     private var previousFrameTime = TimeSource.Monotonic.markNow()
     private var zoom = minOf(
         WINDOW_WIDTH / MAP_WIDTH_TILES,
@@ -139,7 +140,13 @@ class AtlasScene(
                 mapView.advanceVisuals(realSeconds)
                 refreshOverlays()
             }
-            updateAtmosphereStatus()
+            // Status strings only change with publications/controls, not at the
+            // display refresh rate. Keep formatting off the animation hot path.
+            statusDisplayElapsed += realSeconds
+            if (statusDisplayElapsed >= 0.1) {
+                statusDisplayElapsed %= 0.1
+                updateAtmosphereStatus()
+            }
             performanceProbe?.timings?.end(SimulationWork.FRAME_UPDATE)
             performanceProbe?.afterFrame(if (climateReady && !paused) realSeconds * simulationSpeed.simulatedSecondsPerRealSecond else 0.0)
         }

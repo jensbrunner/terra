@@ -85,6 +85,26 @@ class FastClimateStepperTest {
     }
 
     @Test
+    fun representativeCloudColumnDoesNotGrowWithTheRainAccumulationWindow() {
+        fun meanCloud(seconds: Double): Double {
+            val world = World(request.seed, request.width, request.height)
+            val hydrology = HydrologySimulation(HydrologyTopology(world))
+            val weather = DynamicalWeather(world, hydrology, config)
+            val result = weather.advanceClimateInterval(seconds)
+            assertTrue(abs(result.relativeWaterResidual) < 1e-12)
+            return (0 until request.height).sumOf { y ->
+                (0 until request.width).sumOf { x -> weather.cloudWaterMm(x, y) }
+            } / (request.width * request.height)
+        }
+        val hour = meanCloud(3600.0)
+        val fullDay = meanCloud(day)
+        assertTrue(hour > 0.0)
+        assertTrue(fullDay / hour in 0.5..2.0,
+            "Changing the rain accumulation window must not multiply cloudiness by its duration: $hour -> $fullDay")
+        println("CLOUD_PERIOD hour_mean_mm=$hour day_mean_mm=$fullDay ratio=${fullDay / hour}")
+    }
+
+    @Test
     fun rainDemandCannotCreateWaterInAnExhaustedWorld() {
         val settings = TerrainGenerationSettings(baseElevation = 0.1, continentStrength = 0.0, regionalStrength = 0.0, detailStrength = 0.0)
         val world = World(31742, 15, 11, settings)

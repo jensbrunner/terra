@@ -1,40 +1,43 @@
 package terra.simulation
 
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import terra.render.CloudRenderer
 
 actual class SimulationWorker actual constructor(request: WorldRequest) {
     private data class Controls(val revision: Long, val speed: SimulationSpeed, val paused: Boolean, val resetPending: Boolean = false, val fidelity: SimulationFidelity = SimulationFidelity.DETAILED, val automatic: Boolean = true)
+    private data class WorkerFailure(val generation: Long, val message: String)
     private val running = AtomicBoolean(true)
     private val desiredWorld = AtomicReference(request)
-    private val controlsRevision = AtomicLong()
     private val desiredControls = AtomicReference(Controls(0, if (request.dynamical) SimulationSpeed.ONE_HOUR else SimulationSpeed.REALTIME, false))
     private val cloudsVisible = AtomicBoolean(false)
     private val mailbox = AtomicReference<WorldPresentationSnapshot?>()
-    private val error = AtomicReference<String?>()
+    private val error = AtomicReference<WorkerFailure?>()
     private val wake = Object()
     private val worker = thread(name = "terra-simulation", isDaemon = true) { runSimulation() }
 
-    actual val failure: String? get() = error.get()
+    actual val failure: String? get() = error.get()?.takeIf { it.generation == desiredWorld.get().generation }?.message
     actual val isRunning: Boolean get() = worker.isAlive
     actual fun latestSnapshot(): WorldPresentationSnapshot? = mailbox.get()
     actual fun updateControls(speed: SimulationSpeed, paused: Boolean, resetPending: Boolean): Long {
-        val revision = controlsRevision.incrementAndGet()
-        desiredControls.updateAndGet { it.copy(revision = revision, speed = speed, paused = paused, resetPending = resetPending) }
+        val revision = desiredControls.updateAndGet {
+            it.copy(revision = it.revision + 1, speed = speed, paused = paused, resetPending = resetPending)
+        }.revision
         signal()
         return revision
     }
     actual fun setFidelity(fidelity: SimulationFidelity): Long {
-        val revision = controlsRevision.incrementAndGet()
-        desiredControls.updateAndGet { it.copy(revision = revision, fidelity = fidelity, resetPending = false, automatic = false) }
+        val revision = desiredControls.updateAndGet {
+            it.copy(revision = it.revision + 1, fidelity = fidelity, resetPending = false, automatic = false)
+        }.revision
         signal()
         return revision
     }
     actual fun useAutomaticFidelity(): Long {
-        val revision = controlsRevision.incrementAndGet()
-        desiredControls.updateAndGet { it.copy(revision = revision, automatic = true, resetPending = false) }
+        val revision = desiredControls.updateAndGet {
+            it.copy(revision = it.revision + 1, automatic = true, resetPending = false)
+        }.revision
         signal()
         return revision
     }
@@ -42,8 +45,11 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
         if (cloudsVisible.getAndSet(visible) != visible) signal()
     }
     actual fun regenerate(request: WorldRequest) {
-        require(request.generation > desiredWorld.get().generation)
-        desiredWorld.set(request)
+        while (true) {
+            val current = desiredWorld.get()
+            require(request.generation > current.generation)
+            if (desiredWorld.compareAndSet(current, request)) break
+        }
         error.set(null)
         signal()
     }
@@ -145,7 +151,9 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                         (simulation.completedSeconds - rateStartSim) / ((finished - rateStarted) / 1e9)
                     rateStarted = finished; rateStartSim = simulation.completedSeconds
                 }
-                if (running.get() && (forcePublish || finished - publishedAt >= 200_000_000L) && desiredWorld.get().generation == requested.generation) {
+                val publicationPeriod = if (showClouds && !active.paused)
+                    (CloudRenderer.REFRESH_SECONDS * 1e9).toLong() else 200_000_000L
+                if (running.get() && (forcePublish || finished - publishedAt >= publicationPeriod) && desiredWorld.get().generation == requested.generation) {
                     val progress = SimulationProgress(requested.generation, ++revision, active.revision,
                         simulation.completedSeconds, active.speed, if (active.paused) 0.0 else achieved,
                         demand.pendingSeconds, demand.unservedSeconds, demand.limitSeconds, active.paused,
@@ -156,7 +164,8 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     val refreshWater = hydrologyPublishedAt == 0L || finished - hydrologyPublishedAt >= 500_000_000L
                     val snapshot = if (previous?.progress?.generation == requested.generation &&
                         previous.progress.completedSeconds == simulation.completedSeconds && previous.fidelityRevision == simulation.fidelityRevision && showClouds == publishedClouds &&
-                        !(refreshWater && previous.hydrologyCompletedSeconds != simulation.completedSeconds))
+                        !(refreshWater && previous.hydrologyCompletedSeconds != simulation.completedSeconds) &&
+                        !(showClouds && !active.paused && simulation.fidelity == SimulationFidelity.CLIMATE))
                         previous.copy(progress = progress)
                     else {
                         simulation.snapshot(progress, refreshHydrology = refreshWater, cloudsVisible = showClouds,
@@ -167,12 +176,13 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     publishedClouds = showClouds
                     publicationNanos += System.nanoTime() - started
                     if (running.get() && desiredWorld.get().generation == requested.generation) mailbox.set(snapshot.copy(progress = progress.copy(publicationWallSeconds = publicationNanos / 1e9)))
-                    publishedAt = System.nanoTime()
+                    // Count synthesis time in the cadence and visual elapsed time.
+                    publishedAt = finished
                 }
                 idle(if (work == 0 || active.paused) 5 else 1)
             } catch (failure: Throwable) {
                 // Never retry a partly failed physical transaction or publish its mutable state.
-                error.set(failure.message ?: failure.toString())
+                error.set(WorkerFailure(requested.generation, failure.message ?: failure.toString()))
                 failedGeneration = requested.generation
             }
         }

@@ -18,8 +18,8 @@ gradle moistAtmosphereExperiment -PmoistAtmosphereArgs='--days=8 --frames=25'
 Output is `build/experiments/moist-atmosphere/{initial.png,final.png,atmosphere.gif,state.txt}`.
 Options also include `--scenario=JET|PULSE|VORTEX|REST`, `--width`, `--height`,
 `--step` and `--seed`. Dry commands remain available. Playback requests additional
-fixed 20-second steps; it does not skip them. Coarse years/s climate advancement
-remains later implementation work.
+fixed physical steps; the standalone experiment remains on the detailed solver.
+The main game has a separate approximate climate mode for high-speed evolution.
 
 ## Main game integration
 
@@ -73,9 +73,12 @@ orographic uplift; precipitation still comes from the atmosphere's existing wate
 
 Fixed physical steps now run on a dedicated worker, with bounded work slices and
 explicit requested/achieved/pending/unmet time reporting. No physical advancement
-runs on the render thread. High speed buttons still cannot deliver years/s;
-approximate climate advancement remains to implement. Only uncommitted rate
-demand is throttled; physical fluxes and slow reservoirs are retained.
+runs on the render thread. In dynamical mode, adaptive fidelity can switch from
+fixed-step weather to approximate climate intervals, including seasonal and
+multi-year aggregation. Water stays in the existing finite stores and is audited;
+climate energy and atmospheric fields are approximate. Only uncommitted rate
+demand is throttled; physical fluxes and slow reservoirs are retained. See
+[Phase 7 acceptance](PHASE_7_ACCEPTANCE.md) for measured performance and limits.
 
 ## Physics implemented
 
@@ -511,3 +514,23 @@ climate/detailed rain difference is large and is explicitly not a calibration
 result. GC pressure at the highest rate, manual interaction, mature climate skill
 and long-run memory behavior remain open limits. No exhaustive suite or runtime
 gate was introduced.
+
+
+Subsequent cloud-appearance investigation found a uniform clear startup, jet-only
+initial circulation, an interval-depth/rate error in representative cloud amount,
+and visually frozen/blanketing cloud rendering. [CLOUD_REPAIR.md](CLOUD_REPAIR.md)
+records the corrected seeded frontal lows, bounded fractional cloud rendering,
+wind-following detailed texture and continuously animated representative texture.
+The world now supplies an optional initial flow to `MoistAtmosphere`; laboratory
+scenario defaults remain intact. New-world initial water/energy inventories and
+trajectories differ from earlier Phase 7 records. The final focused checks and
+short two-speed desktop smoke pass; user aesthetic acceptance is still open.
+
+
+[Cloud smoothness](CLOUD_SMOOTHNESS.md) records the 11 November rendering update:
+active cloud publications now target 10 Hz, optimized raster sampling preserves
+the existing trajectory preview exactly, and interrupted fades retain the current
+visible mixture. Short hour/month desktop observations reduce mean publication
+work from about 19–21 ms to 7–8 ms. Seven focused checks and 16 GPU samples pass;
+manual native-window inspection remains open because desktop automation could
+not attach to the Java process.
