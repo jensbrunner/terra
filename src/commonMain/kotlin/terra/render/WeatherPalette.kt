@@ -1,22 +1,22 @@
 package terra.render
 
 import korlibs.image.color.Colors
-import kotlin.math.sqrt
 import kotlin.math.abs
 import kotlin.math.ln1p
+import kotlin.math.sqrt
 import kotlin.math.sign
 import kotlin.math.roundToInt
 import korlibs.image.color.RGBA
 import terra.weather.WeatherLayer
 import terra.weather.WeatherModel
 
-private val humidityPalette = listOf("#c49b66", "#e4d7a1", "#8ec6a1", "#469ea5", "#194c82")
+private val humidityPalette = listOf("#a34d36", "#d7a84e", "#e9e0a1", "#91c889", "#269d91", "#205a92")
 private val cloudPalette = listOf("#101c2b", "#34475c", "#798796", "#c4c8ca", "#f6f6ef")
-private val precipitationPalette = listOf("#182a45", "#2a78b7", "#42c4b2", "#d7d563", "#ee8a3b", "#db3636")
+private val precipitationPalette = listOf("#3155b7", "#238fd0", "#24c4c0", "#62d17f", "#e6df4b", "#f39435", "#df3f45", "#a92770")
 private val annualPrecipitationPalette =
-    listOf("#d6c58f", "#c2d286", "#74b78a", "#3e9b9d", "#326a9a", "#594b91")
-private val climateRainPalette = listOf("#bb9d67", "#d8cc8b", "#72ae82", "#388f9e", "#294f91")
-private val temperaturePalette = listOf("#344f9a", "#73aeb5", "#d8d5a3", "#e6a04f", "#b84b3f")
+    listOf("#9d582f", "#d9ae55", "#e9df91", "#8fc57f", "#27a899", "#3279a5", "#494b9a")
+private val climateRainPalette = listOf("#9d582f", "#d9ae55", "#e9df91", "#8fc57f", "#27a899", "#3279a5", "#494b9a")
+private val temperaturePalette = listOf("#334fba", "#299bc4", "#a8d4c0", "#f0dfa0", "#f29a45", "#d84a3c", "#8d3158")
 private val dynamicsPalette = listOf("#285c9d", "#73afd0", "#edf1e8", "#df9b81", "#ad423e")
 
 internal data class WeatherLegend(val title: String, val colors: List<String>, val low: String, val middle: String, val high: String,
@@ -25,14 +25,17 @@ internal data class WeatherLegend(val title: String, val colors: List<String>, v
         Colors[colors[(fraction.coerceIn(0.0, 1.0) * (colors.size - 1)).toInt()]]
 }
 
-/** Uses exactly the same palette and scale as the map, including rain's square-root scale. */
-internal fun weatherLegend(layer: WeatherLayer): WeatherLegend? = when (layer) {
-    WeatherLayer.HUMIDITY -> WeatherLegend("Relative humidity", humidityPalette, "0%", "50%", "100%")
-    WeatherLayer.PRECIPITATION -> WeatherLegend("Rain · mm/h", precipitationPalette, "0", "0.75", "3+")
-    WeatherLayer.CLIMATE_RAIN -> WeatherLegend("30-day rain EMA · mm/h", climateRainPalette, "0", "6", "12+")
-    WeatherLayer.AIR_TEMPERATURE -> WeatherLegend("Air temperature · °C", temperaturePalette, "−20", "7.5", "35+")
-    WeatherLayer.SURFACE_TEMPERATURE -> WeatherLegend("Surface temperature · °C", temperaturePalette, "−20", "7.5", "35+")
-    WeatherLayer.ANNUAL_PRECIPITATION -> WeatherLegend("Rain EMA · mm/year", annualPrecipitationPalette, "0", "1250", "2500+")
+/** Uses the same continuous palette and fixed scale as the map. */
+internal fun weatherLegend(layer: WeatherLayer, representative: Boolean = false): WeatherLegend? = when (layer) {
+    WeatherLayer.HUMIDITY -> WeatherLegend("Relative humidity · %", humidityPalette, "0", "50", "100", smooth = true)
+    WeatherLayer.PRECIPITATION -> WeatherLegend(
+        if (representative) "Rain rate · wet-phase peak estimate · mm/h" else "Rain rate · substep peak · mm/h",
+        precipitationPalette, "0", "3", "12+", smooth = true
+    )
+    WeatherLayer.CLIMATE_RAIN -> WeatherLegend("30-day mean rainfall · mm/h", climateRainPalette, "0", "6", "12+", smooth = true)
+    WeatherLayer.AIR_TEMPERATURE -> WeatherLegend("Air temperature · °C", temperaturePalette, "−20", "7.5", "35+", smooth = true)
+    WeatherLayer.SURFACE_TEMPERATURE -> WeatherLegend("Surface temperature · °C", temperaturePalette, "−20", "7.5", "35+", smooth = true)
+    WeatherLayer.ANNUAL_PRECIPITATION -> WeatherLegend("Annual rainfall EMA · mm/year", annualPrecipitationPalette, "0", "1250", "2500+", smooth = true)
     WeatherLayer.PRESSURE_ANOMALY -> WeatherLegend("Model pressure anomaly · %", dynamicsPalette, "−5", "0", "+5", smooth = true)
     WeatherLayer.RELATIVE_VORTICITY -> WeatherLegend("Relative curl · 10⁻⁵ s⁻¹ · log", dynamicsPalette, "−10", "0", "+10", smooth = true)
     else -> null
@@ -42,10 +45,7 @@ internal fun tileColor(layer: WeatherLayer, weather: WeatherModel, x: Int, y: In
     when (layer) {
         WeatherLayer.HUMIDITY -> ramp(weather.relativeHumidity(x, y), humidityPalette)
         WeatherLayer.CLOUDS -> ramp(weather.cloudCover(x, y), cloudPalette)
-        WeatherLayer.PRECIPITATION -> ramp(
-            precipitationDisplayValue(weather.precipitationMmPerHour(x, y)),
-            precipitationPalette
-        )
+        WeatherLayer.PRECIPITATION -> precipitationColor(weather.peakSubstepPrecipitationMmPerHour(x, y))
         WeatherLayer.CLIMATE_RAIN -> ramp(weather.thirtyDayRainMmPerHour(x, y) / 12.0, climateRainPalette)
         WeatherLayer.AIR_TEMPERATURE -> ramp((weather.airTemperatureC(x, y) + 20.0) / 55.0, temperaturePalette)
         WeatherLayer.SURFACE_TEMPERATURE -> ramp((weather.surfaceTemperatureC(x, y) + 20.0) / 55.0, temperaturePalette)
@@ -70,10 +70,27 @@ private fun interpolatePalette(value: Double, colors: List<String>): RGBA {
         (a.g + (b.g - a.g) * fraction).roundToInt(), (a.b + (b.b - a.b) * fraction).roundToInt(), 255)
 }
 
-/** Display-only mapping: sqrt makes light rain visible; 3 mm/h fills the color ramp. */
-private fun precipitationDisplayValue(rainMmPerHour: Double) =
-    sqrt((rainMmPerHour / 3.0).coerceIn(0.0, 1.0))
+/** Display-only mapping: sqrt makes light rain visible while retaining room for heavy rates. */
+internal fun precipitationColor(rainMmPerHour: Double) =
+    ramp(sqrt((rainMmPerHour / MAX_RAIN_DISPLAY_MM_PER_HOUR).coerceIn(0.0, 1.0)), precipitationPalette)
 
-private fun ramp(value: Double, palette: List<String>) = Colors[
-    palette[(value.coerceIn(0.0, 1.0) * (palette.size - 1)).toInt()]
-]
+internal fun precipitationOpacity(rainMmPerHour: Double): Double =
+    if (rainMmPerHour <= 0.0) 0.0 else 0.62 + 0.32 * smoothstep(0.05, 3.0, rainMmPerHour)
+
+internal fun weatherOverlayOpacity(layer: WeatherLayer, weather: WeatherModel, x: Int, y: Int): Double = when (layer) {
+    WeatherLayer.PRECIPITATION -> {
+        val rain = weather.peakSubstepPrecipitationMmPerHour(x, y)
+        precipitationOpacity(rain)
+    }
+    WeatherLayer.PRESSURE_ANOMALY, WeatherLayer.RELATIVE_VORTICITY -> 0.78
+    else -> 0.68
+}
+
+private fun smoothstep(edge0: Double, edge1: Double, value: Double): Double {
+    val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+}
+
+private const val MAX_RAIN_DISPLAY_MM_PER_HOUR = 12.0
+
+private fun ramp(value: Double, palette: List<String>) = interpolatePalette(value, palette)

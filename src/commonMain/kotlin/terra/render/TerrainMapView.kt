@@ -198,7 +198,9 @@ class TerrainMapView(
             bitmap.lock {
                 for (y in 0 until world.height) {
                     for (x in 0 until world.width) {
-                        bitmap[x, y] = tileColor(layer, weather, x, y).withA(((if (layer.resolvedDynamicsOnly) 0.65 else 0.42) * 255).toInt())
+                        bitmap[x, y] = tileColor(layer, weather, x, y).withA(
+                            (weatherOverlayOpacity(layer, weather, x, y) * 255).toInt()
+                        )
                     }
                 }
             }

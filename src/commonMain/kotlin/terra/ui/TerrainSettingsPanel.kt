@@ -132,7 +132,7 @@ class TerrainSettingsPanel(
             val value = content.atlasText(font, formatNumber(setting.value, setting.decimals), x + 300, y, 14.0)
             val control = content.uiSlider(value = setting.value, min = setting.minimum,
                 max = setting.maximum, step = setting.step, decimalPlaces = setting.decimals,
-                size = Size(376.0, 24.0)) { showTooltip = true }.xy(x, y + 28)
+                size = Size(376.0, 24.0)) { showTooltip = null }.xy(x, y + 28)
             control.onChange.add { next ->
                 value.text = formatNumber(next, setting.decimals); setting.update(next)
             }
