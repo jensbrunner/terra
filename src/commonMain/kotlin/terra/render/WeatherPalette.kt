@@ -10,13 +10,13 @@ import korlibs.image.color.RGBA
 import terra.weather.WeatherLayer
 import terra.weather.WeatherModel
 
-private val humidityPalette = listOf("#a34d36", "#d7a84e", "#e9e0a1", "#91c889", "#269d91", "#205a92")
+private val humidityPalette = listOf("#a34d36", "#d7a84e", "#e9e0a1", "#91c889", "#269d91", "#4dc6df")
 private val cloudPalette = listOf("#101c2b", "#34475c", "#798796", "#c4c8ca", "#f6f6ef")
 private val precipitationPalette = listOf("#3155b7", "#238fd0", "#24c4c0", "#62d17f", "#e6df4b", "#f39435", "#df3f45", "#a92770")
 private val annualPrecipitationPalette =
-    listOf("#9d582f", "#d9ae55", "#e9df91", "#8fc57f", "#27a899", "#3279a5", "#494b9a")
-private val climateRainPalette = listOf("#9d582f", "#d9ae55", "#e9df91", "#8fc57f", "#27a899", "#3279a5", "#494b9a")
-private val temperaturePalette = listOf("#334fba", "#299bc4", "#a8d4c0", "#f0dfa0", "#f29a45", "#d84a3c", "#8d3158")
+    listOf("#9d582f", "#d9ae55", "#e9df91", "#8fc57f", "#27a899", "#3279a5", "#806bdd")
+private val climateRainPalette = listOf("#9d582f", "#d9ae55", "#e9df91", "#8fc57f", "#27a899", "#3279a5", "#806bdd")
+private val temperaturePalette = listOf("#536eeb", "#299bc4", "#a8d4c0", "#f0dfa0", "#f29a45", "#d84a3c", "#a93359")
 private val dynamicsPalette = listOf("#285c9d", "#73afd0", "#edf1e8", "#df9b81", "#ad423e")
 
 internal data class WeatherLegend(val title: String, val colors: List<String>, val low: String, val middle: String, val high: String,

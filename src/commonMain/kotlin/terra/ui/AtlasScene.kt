@@ -345,12 +345,23 @@ class AtlasScene(
             legendPanel.atlasText(uiFont, "Dynamics unavailable", 0.0, 0.0, 12.0)
             legendPanel.atlasText(uiFont, "Needs a completed detailed-weather step.", 0.0, 24.0, 11.0, muted = true)
         } else if (legend == null) {
-            if (WeatherLayer.CLOUDS in activeOverlays) {
-                legendPanel.atlasText(uiFont, "Terrain + clouds", 0.0, 0.0, 12.0)
-                legendPanel.atlasText(uiFont, "Texture shows cover and cloud-water depth.", 0.0, 24.0, 11.0, muted = true)
-            } else {
-                legendPanel.atlasText(uiFont, "Terrain view", 0.0, 0.0, 12.0)
-                legendPanel.atlasText(uiFont, "Click a tile for weather and water.", 0.0, 24.0, 11.0, muted = true)
+            when {
+                WeatherLayer.CLOUDS in activeOverlays -> {
+                    legendPanel.atlasText(uiFont, "Terrain + clouds", 0.0, 0.0, 12.0)
+                    legendPanel.atlasText(uiFont, "Texture shows cover and cloud-water depth.", 0.0, 24.0, 11.0, muted = true)
+                }
+                WeatherLayer.WIND in activeOverlays -> {
+                    legendPanel.atlasText(uiFont, "Wind · tiles/day", 0.0, 0.0, 12.0)
+                    legendPanel.atlasText(uiFont, "Arrow points downwind; longer means faster.", 0.0, 24.0, 11.0, muted = true)
+                }
+                WeatherLayer.DAY_NIGHT in activeOverlays -> {
+                    legendPanel.atlasText(uiFont, "Day and night", 0.0, 0.0, 12.0)
+                    legendPanel.atlasText(uiFont, "Dark shading marks night; edges show twilight.", 0.0, 24.0, 11.0, muted = true)
+                }
+                else -> {
+                    legendPanel.atlasText(uiFont, "Terrain view", 0.0, 0.0, 12.0)
+                    legendPanel.atlasText(uiFont, "Click a tile for weather and water.", 0.0, 24.0, 11.0, muted = true)
+                }
             }
         } else {
             legendPanel.atlasText(uiFont, legend.title, 0.0, 0.0, 12.0)
