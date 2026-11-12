@@ -22,19 +22,28 @@ class MoistAtmosphereTest {
         val after = model.snapshot()
         var volumeBefore = 0.0
         var volumeAfter = 0.0
-        val pressure = after.dynamics.heightAt(0, 0).let { it * it * after.temperatureKelvinAt(0, 0) }
         for (y in 0 until geometry.height) for (x in 0 until geometry.width) {
             assertEquals(before.vaporMmAt(x, y) + before.cloudWaterMmAt(x, y),
                 after.vaporMmAt(x, y) + after.cloudWaterMmAt(x, y), 1e-12)
             assertEquals(before.surfaceTemperatureKelvinAt(x, y) - 6.0,
                 after.temperatureKelvinAt(x, y), 1e-12)
             val depth = after.dynamics.heightAt(x, y)
-            assertEquals(pressure, depth * depth * after.temperatureKelvinAt(x, y), pressure * 1e-12)
+            if (abs(geometry.coriolisAtRow(y)) > 5e-5 && y in 1 until geometry.height - 1) {
+                fun pressure(row: Int): Double {
+                    val h = after.dynamics.heightAt(x, row)
+                    return geometry.gravity * h * h * after.temperatureKelvinAt(x, row) / (2 * closedPhysics.referenceTemperatureKelvin)
+                }
+                val force = (pressure(y + 1) - pressure(y - 1)) / (2 * geometry.dy * depth)
+                val coriolisForce = geometry.coriolisAtRow(y) * after.dynamics.eastWindAt(x, y)
+                assertTrue(abs(force + coriolisForce) <= abs(force) * 0.15 + 1e-12)
+            }
             volumeBefore += before.dynamics.heightAt(x, y)
             volumeAfter += depth
         }
         assertEquals(volumeBefore, volumeAfter, volumeBefore * 1e-12)
         assertTrue(handoff.maximumAirTemperatureKelvin > handoff.minimumAirTemperatureKelvin)
+        assertTrue(handoff.rootMeanSquareWindMetersPerSecond > 1)
+        assertTrue(handoff.maximumWindMetersPerSecond <= 35)
         assertEquals(0L, model.completedSteps)
         assertEquals(handoff.worldSeconds, model.worldSeconds)
         model.step()

@@ -99,6 +99,8 @@ class MoistAtmosphereSnapshot internal constructor(
     private val surfaceTemperature: DoubleArray,
     private val surfaceWater: DoubleArray, val worldSeconds: Double
 ) {
+    /** Computed once from this snapshot; publication eagerly requests it on the owner worker. */
+    val horizontalDynamics: AtmosphericDynamicsSnapshot by lazy { AtmosphericDynamicsSnapshot(this) }
     private fun index(x: Int, y: Int) = y * dynamics.config.width + x
     fun temperatureKelvinAt(x: Int, y: Int): Double = temperature[index(x, y)]
     fun vaporMmAt(x: Int, y: Int): Double = vapor[index(x, y)]
@@ -121,7 +123,10 @@ data class AtmosphereHandoff(
     val initializationEnergyChangeJoules: Double, val physicalStepsAtHandoff: Long,
     val spinInSteps: Int = 0, val vaporRelativeHumidityLimit: Double = 1.0,
     val minimumAirTemperatureKelvin: Double = airTemperatureKelvin,
-    val maximumAirTemperatureKelvin: Double = airTemperatureKelvin
+    val maximumAirTemperatureKelvin: Double = airTemperatureKelvin,
+    val maximumWindMetersPerSecond: Double = 0.0,
+    val rootMeanSquareWindMetersPerSecond: Double = 0.0,
+    val reconstructionPressureExponent: Double = 0.0
 )
 
 /**
@@ -142,7 +147,7 @@ class MoistAtmosphere(
         internal const val CLIMATE_AIR_SURFACE_OFFSET_K = 6.0
     }
 
-    private val columns = MoistColumnTransport(config.cellCount, physics)
+    private val columns = MoistColumnTransport(config, physics)
     private val flow = DryAtmosphere(config, columns, initializeFlow ?: DryScenarios.initializer(scenario, config, seed))
     private val density = physics.referenceDryColumnKgM2 / config.meanHeightMeters
     val surfaceThermalState = SurfaceThermalState(config.cellCount)
@@ -210,7 +215,7 @@ class MoistAtmosphere(
         val before = atmosphericWaterKg
         val energyBefore = diagnostics().totalModelEnergyJoules
         val temperature = DoubleArray(config.cellCount) { surfaceTemperature[it] - CLIMATE_AIR_SURFACE_OFFSET_K }
-        flow.initializeThermalRestState(temperature)
+        val circulation = flow.initializeClimateCirculation(temperature)
         val vaporTarget = 1.0
         var vaporTotal = 0.0
         var cloudTotal = 0.0
@@ -234,7 +239,9 @@ class MoistAtmosphere(
         return AtmosphereHandoff(atWorldSeconds, before, after, vaporTotal * config.cellArea,
             cloudTotal * config.cellArea, temperature.average(), energyChange, completedSteps,
             vaporRelativeHumidityLimit = vaporTarget, minimumAirTemperatureKelvin = temperature.min(),
-            maximumAirTemperatureKelvin = temperature.max())
+            maximumAirTemperatureKelvin = temperature.max(), maximumWindMetersPerSecond = circulation.maximumSpeed,
+            rootMeanSquareWindMetersPerSecond = circulation.rmsSpeed,
+            reconstructionPressureExponent = circulation.pressureExponent)
     }
 
     init {
@@ -386,7 +393,11 @@ class MoistAtmosphere(
             val excess = max(0.0, surface - temperature - lapse * physics.convectiveMixingDepthMeters)
             val convective = min(physics.maximumConvectiveVelocityMetersPerSecond,
                 physics.convectiveVelocityCoefficient * sqrt(config.gravity * physics.convectiveMixingDepthMeters * excess / temperature))
-            val lift = min(physics.maximumParcelLiftMeters, (orographic + convective) * physics.liftResidenceSeconds)
+            // Column continuity diagnoses unresolved ascent/subsidence, not another prognostic layer.
+            // Divergence warms the representative parcel and permits evaporation in descending air.
+            val resolvedAscent = -depth * physics.humidColumnFraction * flow.horizontalDivergenceAt(i)
+            val lift = ((orographic + convective + resolvedAscent) * physics.liftResidenceSeconds)
+                .coerceIn(-physics.maximumParcelLiftMeters, physics.maximumParcelLiftMeters)
             val parcelTemperature = temperature - lapse * lift
             val parcelPressure = pressure * exp(-config.gravity * lift / (287.0 * temperature))
             check(parcelTemperature > 0 && parcelPressure > 0) { "Invalid lifted parcel at cell $i" }

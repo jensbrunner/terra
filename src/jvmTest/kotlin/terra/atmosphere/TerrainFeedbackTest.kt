@@ -13,6 +13,21 @@ class TerrainFeedbackTest {
         momentumDragPerSecond = 0.0, convectiveVelocityCoefficient = 0.0)
 
     @Test
+    fun resolvedConvergenceFormsCloudWhileDivergenceEvaporatesWithClosedWaterAndHeat() {
+        val grid = config.copy(geometry = AtmosphereGeometry.PERIODIC_F_PLANE, coriolisPerSecond = 0.0)
+        val model = MoistAtmosphere(grid, closed, initializeFlow = { x, _ ->
+            DryCell(grid.meanHeightMeters, -15 * kotlin.math.sin(2 * kotlin.math.PI * x / grid.domainWidthMeters), 0.0)
+        }, initializeColumns = { _, _ -> MoistCell(relativeHumidity = 0.998, cloudWaterKgM2 = 0.05) })
+        val before = model.snapshot()
+        model.step()
+        val after = model.snapshot()
+        assertTrue(after.cloudWaterMmAt(0, 3) > before.cloudWaterMmAt(0, 3))
+        assertTrue(after.cloudWaterMmAt(grid.width / 2, 3) < before.cloudWaterMmAt(grid.width / 2, 3))
+        assertTrue(abs(after.diagnostics.relativeWaterResidual) < 1e-12)
+        assertTrue(abs(after.diagnostics.unexplainedEnergyResidualJoules / before.diagnostics.totalModelEnergyJoules) < 1e-10)
+    }
+
+    @Test
     fun terrainMappingPreservesUnresolvedRidgesWindDirectionAndNorthUpSlopes() {
         val grid = DryAtmosphereConfig(width = 8, height = 6)
         val mapping = AtmosphereTileMapping(32, 24, grid)

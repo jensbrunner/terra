@@ -19,6 +19,26 @@ import terra.world.World
 
 class CloudRendererTest {
     @Test
+    fun resolvedDecorativeMotionHasOneStepLeadAndDoesNotDoubleCountThePhysicalCommit() {
+        val weather = CloudFixture(uniform = true)
+        val renderer = CloudRenderer(weather.width, weather.height, 31742)
+        renderer.update(weather)
+        val initial = renderer.frame
+        assertTrue(renderer.update(weather, 0.1, detailedVisualSeconds = 20.0))
+        assertEquals(0.0, weather.elapsedSeconds)
+        val predicted = renderer.frame
+        var changed = false
+        for (y in 0 until predicted.height) for (x in 0 until predicted.width)
+            if (predicted[x, y] != initial[x, y]) changed = true
+        assertTrue(changed)
+        assertFalse(renderer.update(weather, 0.1, detailedVisualSeconds = 20.0)) // Lead is capped.
+        assertFalse(renderer.update(weather)) // Pause contributes no visual advancement.
+        weather.elapsedSeconds = 20.0
+        assertTrue(renderer.update(weather))
+        for (y in 0 until predicted.height) for (x in 0 until predicted.width)
+            assertEquals(predicted[x, y], renderer.frame[x, y]) // Commit catches up; no second advection.
+    }
+    @Test
     fun clearAirStaysClearAndRenderingDoesNotAdvanceWeather() {
         val weather = CloudFixture()
         val renderer = CloudRenderer(weather.width, weather.height, 31742)

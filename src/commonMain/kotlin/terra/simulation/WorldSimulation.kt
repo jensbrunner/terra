@@ -18,7 +18,8 @@ enum class SimulationFidelity { DETAILED, CLIMATE }
 data class WorldRequest(
     val generation: Long = 0, val seed: Int = 31742, val width: Int = 283, val height: Int = 212,
     val terrain: TerrainGenerationSettings = TerrainGenerationSettings(), val dynamical: Boolean = false,
-    val atmosphere: DryAtmosphereConfig = DryAtmosphereConfig()
+    // Native-grid six-hour comparison: 40 s retains accuracy with ample CFL margin at half the steps.
+    val atmosphere: DryAtmosphereConfig = DryAtmosphereConfig(stepSeconds = 40.0)
 )
 
 data class SimulationProgress(
@@ -83,6 +84,7 @@ internal class WorldSimulation(val request: WorldRequest) {
         if (selected == fidelity) return
         check(weather.pendingWaterFluxBatch?.consumed != false)
         if (selected == SimulationFidelity.DETAILED) dynamical.resumeDetailed()
+        dynamical.dynamicsSuppressedForClimate = selected == SimulationFidelity.CLIMATE
         fidelity = selected
         fidelityRevision++
         weatherView = null
@@ -147,7 +149,10 @@ internal class WorldSimulation(val request: WorldRequest) {
         }
         if (refreshHydrology) hydrologyViewSeconds = completedSeconds
         val cloudFrame = if (cloudsVisible) {
-            cloudRenderer.update(weatherView!!, if (progress.paused) 0.0 else visualElapsedSeconds)
+            cloudRenderer.update(weatherView!!, if (progress.paused) 0.0 else visualElapsedSeconds,
+                detailedVisualSeconds = if (progress.paused || fidelity != SimulationFidelity.DETAILED) 0.0 else
+                    visualElapsedSeconds * progress.selectedSpeed.simulatedSecondsPerRealSecond,
+                maximumDetailedLeadSeconds = request.atmosphere.stepSeconds)
             cloudRenderer.frame
         } else null
         return WorldPresentationSnapshot(progress, worldView!!,

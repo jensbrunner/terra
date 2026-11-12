@@ -139,22 +139,19 @@ class DryAtmosphere internal constructor(
         validate(h, mx, my)
     }
 
-    /** Reconstruct approximately balanced thermal pressure without reviving stale winds.
-     * h²*T is spatially constant and total carrier volume is preserved. The finite
-     * volume scheme can still diffuse thermal contacts; this is not a new equilibrium solver.
-     */
-    internal fun initializeThermalRestState(temperature: DoubleArray) {
+    /** Reconstruct pressure and compatible circulation from evolved thermal geography. */
+    internal fun initializeClimateCirculation(temperature: DoubleArray): ReconstructedCirculation {
         require(temperature.size == count)
         val reference = columns?.physics?.referenceTemperatureKelvin ?: error("Thermal rest needs moist columns")
-        val weights = DoubleArray(count) { i ->
-            require(temperature[i].isFinite() && temperature[i] > 0)
-            sqrt(reference / temperature[i])
+        require(temperature.all { it.isFinite() && it > 0 })
+        val state = ClimateCirculation.reconstruct(config, reference, temperature, h.sum())
+        for (i in h.indices) {
+            h[i] = state.depth[i]
+            mx[i] = h[i] * state.east[i]; my[i] = h[i] * state.north[i]
         }
-        val scale = h.sum() / weights.sum()
-        for (i in h.indices) h[i] = weights[i] * scale
-        mx.fill(0.0); my.fill(0.0)
         maximumCourant = 0.0
         validate(h, mx, my)
+        return state
     }
 
     fun step() {
@@ -212,6 +209,14 @@ class DryAtmosphere internal constructor(
     internal fun eastWindAt(i: Int): Double = mx[i] / h[i]
     internal fun northWindAt(i: Int): Double = my[i] / h[i]
     internal fun depthAt(i: Int): Double = h[i]
+    internal fun horizontalDivergenceAt(i: Int): Double {
+        val x = i % config.width; val y = i / config.width
+        val west = y * config.width + (x + config.width - 1) % config.width
+        val east = y * config.width + (x + 1) % config.width
+        val south = if (!config.periodicY && y == 0) -northWindAt(i) else northWindAt(config.southRow(y) * config.width + x)
+        val north = if (!config.periodicY && y == config.height - 1) -northWindAt(i) else northWindAt(config.northRow(y) * config.width + x)
+        return (eastWindAt(east) - eastWindAt(west)) / (2 * config.dx) + (north - south) / (2 * config.dy)
+    }
     internal fun speedAt(i: Int): Double = sqrt(mx[i] * mx[i] + my[i] * my[i]) / h[i]
     internal fun kineticEnergyAt(i: Int): Double = 0.5 * (mx[i] * mx[i] + my[i] * my[i]) / h[i]
 
@@ -256,7 +261,7 @@ class DryAtmosphere internal constructor(
 
     private fun tendencies(depth: DoubleArray, east: DoubleArray, north: DoubleArray, scalars: Array<DoubleArray>?): Double {
         validate(depth, east, north)
-        if (scalars != null) columns!!.prepareFluxes(scalars)
+        if (scalars != null) columns!!.prepareFluxes(scalars, depth)
         reconstruct(depth, 0); reconstruct(east, 1); reconstruct(north, 2)
         for (field in rhs) field.fill(0.0)
         maximumXWave.fill(0.0); maximumYWave.fill(0.0)
@@ -279,7 +284,7 @@ class DryAtmosphere internal constructor(
         check(courant.isFinite() && courant <= config.courantLimit) {
             "Dry atmosphere CFL $courant exceeds ${config.courantLimit}; use a smaller fixed timestep (currently ${config.stepSeconds}s)"
         }
-        columns?.checkOutflow(depth, config.stepSeconds)
+        columns?.completeFluxes(depth, config.stepSeconds)
         return courant
     }
 
@@ -309,7 +314,7 @@ class DryAtmosphere internal constructor(
         check(hWall > 0) { "Nonpositive reconstructed wall layer; no flux clamp was applied" }
         val v = outward * (north[cell] + outward * 0.5 * slopeY[2][cell]) / hWall
         val gravity = if (scalars == null) config.gravity else
-            config.gravity * scalars[0][cell] / depth[cell] / columns!!.physics.referenceTemperatureKelvin
+            config.gravity * columns!!.faceTemperature(cell, false, outward) / columns.physics.referenceTemperatureKelvin
         val sound = sqrt(gravity * hWall)
         val wave = abs(v) + sound
         // h*v² + p + (|v|+c)*h*v is the reflected-state HLL momentum flux.
@@ -333,9 +338,9 @@ class DryAtmosphere internal constructor(
         val normalLeft = momentumLeft / hLeft
         val normalRight = momentumRight / hRight
         val gravityLeft = if (scalars == null) config.gravity else
-            config.gravity * scalars[0][left] / depth[left] / columns!!.physics.referenceTemperatureKelvin
+            config.gravity * columns!!.faceTemperature(left, alongX, 1.0) / columns.physics.referenceTemperatureKelvin
         val gravityRight = if (scalars == null) config.gravity else
-            config.gravity * scalars[0][right] / depth[right] / columns!!.physics.referenceTemperatureKelvin
+            config.gravity * columns!!.faceTemperature(right, alongX, -1.0) / columns.physics.referenceTemperatureKelvin
         val soundLeft = sqrt(gravityLeft * hLeft)
         val soundRight = sqrt(gravityRight * hRight)
         val leftSpeed = min(normalLeft - soundLeft, normalRight - soundRight)
@@ -351,10 +356,30 @@ class DryAtmosphere internal constructor(
             rightSpeed <= 0 -> { mass = momentumRight; normalFlux = normalFluxRight }
             else -> {
                 val inverseWaveGap = 1.0 / (rightSpeed - leftSpeed)
-                mass = (rightSpeed * momentumLeft - leftSpeed * momentumRight +
+                val hllMass = (rightSpeed * momentumLeft - leftSpeed * momentumRight +
                     leftSpeed * rightSpeed * (hRight - hLeft)) * inverseWaveGap
-                normalFlux = (rightSpeed * normalFluxLeft - leftSpeed * normalFluxRight +
+                val hllNormal = (rightSpeed * normalFluxLeft - leftSpeed * normalFluxRight +
                     leftSpeed * rightSpeed * (momentumRight - momentumLeft)) * inverseWaveGap
+                // The thermal system has a material contact as well as gravity waves.
+                // Restore it: equal pressure/normal velocity must not diffuse h and T at c.
+                val denominator = hLeft * (leftSpeed - normalLeft) - hRight * (rightSpeed - normalRight)
+                val contact = (pressureRight - pressureLeft + momentumLeft * (leftSpeed - normalLeft) -
+                    momentumRight * (rightSpeed - normalRight)) / denominator
+                val useLeft = contact >= 0.0
+                val h = if (useLeft) hLeft else hRight
+                val speed = if (useLeft) leftSpeed else rightSpeed
+                val velocity = if (useLeft) normalLeft else normalRight
+                val pressure = if (useLeft) pressureLeft else pressureRight
+                val starDepth = h * (speed - velocity) / (speed - contact)
+                val starPressure = pressure + h * (speed - velocity) * (contact - velocity)
+                if (contact.isFinite() && contact > leftSpeed && contact < rightSpeed &&
+                    starDepth.isFinite() && starDepth > 0.0 && starPressure.isFinite() && starPressure > 0.0) {
+                    mass = starDepth * contact
+                    normalFlux = mass * contact + starPressure
+                } else {
+                    // Robust two-wave fallback only for inadmissible contact states.
+                    mass = hllMass; normalFlux = hllNormal
+                }
             }
         }
         // The transverse/shear characteristic travels with mass, not the gravity wave.
@@ -371,7 +396,7 @@ class DryAtmosphere internal constructor(
         rhs[0][left] -= massFlux; rhs[0][right] += massFlux
         rhs[1][left] -= eastFlux; rhs[1][right] += eastFlux
         rhs[2][left] -= northFlux; rhs[2][right] += northFlux
-        if (scalars != null) columns!!.faceFlux(left, right, massFlux, depth, scalars)
+        if (scalars != null) columns!!.faceFlux(left, right, massFlux, alongX)
         val waves = if (alongX) maximumXWave else maximumYWave
         val wave = max(abs(leftSpeed), abs(rightSpeed))
         waves[left] = max(waves[left], wave); waves[right] = max(waves[right], wave)

@@ -10,4 +10,9 @@ enum class WeatherLayer(val key: Char) {
     SURFACE_TEMPERATURE('7'),
     DAY_NIGHT('8'),
     WIND('9'),
+    PRESSURE_ANOMALY('P'),
+    RELATIVE_VORTICITY('V'),
+    ;
+
+    val resolvedDynamicsOnly get() = this == PRESSURE_ANOMALY || this == RELATIVE_VORTICITY
 }

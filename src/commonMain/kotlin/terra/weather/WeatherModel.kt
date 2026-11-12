@@ -18,6 +18,10 @@ data class WeatherFieldSemantics(
 
 /** Tile-space view; water fluxes belong to one completed update, and wind V points down-map. */
 interface WeatherModel : HydrologyExchange {
+    /** No resolved dynamics are fabricated for prescribed/fast climate or pending reentry. */
+    val hasResolvedDynamics: Boolean get() = false
+    fun pressureAnomalyPercent(x: Int, y: Int): Double? = null
+    fun relativeVorticityPerSecond(x: Int, y: Int): Double? = null
     /** Rain totals are integrated over the update; representative peaks describe subperiods. */
     val fieldSemantics: WeatherFieldSemantics get() = WeatherFieldSemantics.RESOLVED
     fun rainEventSummary(x: Int, y: Int): RainEventSummary? = null

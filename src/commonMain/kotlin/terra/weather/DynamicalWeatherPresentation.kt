@@ -9,8 +9,17 @@ internal class DynamicalWeatherPresentation(
     override val width: Int, override val height: Int, private val config: DryAtmosphereConfig,
     physics: MoistPhysicsConfig, private val view: MoistAtmosphereSnapshot,
     override val elapsedSeconds: Double, private val updateSeconds: Double,
-    private val fields: Array<DoubleArray>, private val climate: FastClimateResult? = null
+    private val fields: Array<DoubleArray>, private val climate: FastClimateResult? = null,
+    override val hasResolvedDynamics: Boolean = climate == null
 ) : WeatherModel {
+    // Eager on the publishing worker; tile rendering only interpolates immutable coarse values.
+    private val dynamics = if (hasResolvedDynamics) view.horizontalDynamics else null
+    override fun pressureAnomalyPercent(x: Int, y: Int): Double? = dynamics?.let {
+        sample(x, y, it::pressureAnomalyPercentAt)
+    }
+    override fun relativeVorticityPerSecond(x: Int, y: Int): Double? = dynamics?.let {
+        sample(x, y, it::relativeVorticityPerSecondAt)
+    }
     override fun rainEventSummary(x: Int, y: Int) = climate?.rainEvents(index(x, y))
     override val fieldSemantics get() = climate?.semantics ?: WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW, elapsedSeconds - updateSeconds, updateSeconds)
     private val sunlight = PlanetarySunlight(width, height, physics.solar, northUp = false)

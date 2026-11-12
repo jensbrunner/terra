@@ -87,7 +87,7 @@ class TerrainMapView(
                     val pixelsPerTile = if (layer == WeatherLayer.CLOUDS) CloudRenderer.PIXELS_PER_TILE else 1
                     scaleX = 1.0 / pixelsPerTile
                     scaleY = 1.0 / pixelsPerTile
-                    smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS
+                    smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS || layer.resolvedDynamicsOnly
                     alpha = 0.0
                 }
             }
@@ -134,7 +134,15 @@ class TerrainMapView(
     }
 
     fun updateOverlays(weather: WeatherModel, activeLayers: Set<WeatherLayer>, clouds: RasterFrame?, solar: SolarConfig) {
-        for (layer in WeatherLayer.entries) overlayContainers.getValue(layer).visible = layer in activeLayers
+        for (layer in WeatherLayer.entries) {
+            val unavailable = layer.resolvedDynamicsOnly && !weather.hasResolvedDynamics
+            overlayContainers.getValue(layer).visible = layer in activeLayers && !unavailable
+            if (unavailable && layerWeather.remove(layer) != null) {
+                // Do not retain an obsolete detailed field through a climate/reentry interval.
+                overlayFades.getValue(layer).reset()
+                overlayBitmaps.getValue(layer).fill(transparentPixel)
+            }
+        }
         // Round robin prevents later layers starving when publications arrive during a refresh.
         var renderedOverlay = false
         val firstOverlay = nextOverlay
@@ -142,6 +150,7 @@ class TerrainMapView(
             val index = (firstOverlay + offset) % WeatherLayer.entries.size
             val layer = WeatherLayer.entries[index]
             if (layer !in activeLayers) return@repeat
+            if (layer.resolvedDynamicsOnly && !weather.hasResolvedDynamics) return@repeat
             val bitmap = overlayBitmaps.getValue(layer)
             if (layer == WeatherLayer.CLOUDS) {
                 if (clouds != null && clouds !== cloudFrame) {
@@ -189,7 +198,7 @@ class TerrainMapView(
             bitmap.lock {
                 for (y in 0 until world.height) {
                     for (x in 0 until world.width) {
-                        bitmap[x, y] = tileColor(layer, weather, x, y).withA((0.42 * 255).toInt())
+                        bitmap[x, y] = tileColor(layer, weather, x, y).withA(((if (layer.resolvedDynamicsOnly) 0.65 else 0.42) * 255).toInt())
                     }
                 }
             }

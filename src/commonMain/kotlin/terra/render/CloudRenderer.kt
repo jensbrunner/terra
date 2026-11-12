@@ -40,6 +40,8 @@ internal class CloudRenderer(private val width: Int, private val height: Int, se
     private var previousWeather: WeatherModel? = null
     private var previousSeconds = Double.NaN
     private var previousIllustrative = false
+    private var detailedLeadSeconds = 0.0
+    private var previousTextureSeconds = Double.NaN
 
     init { reset(seed) }
 
@@ -86,25 +88,33 @@ internal class CloudRenderer(private val width: Int, private val height: Int, se
         fineSource.copyInto(fine)
         previousWeather = null
         previousSeconds = Double.NaN
+        previousTextureSeconds = Double.NaN
+        detailedLeadSeconds = 0.0
     }
 
     /** Caller caps the real-time refresh rate. Repeated observations of a paused model do no work. */
-    fun update(weather: WeatherModel, visualElapsedSeconds: Double = 0.0): Boolean {
+    fun update(weather: WeatherModel, visualElapsedSeconds: Double = 0.0,
+        detailedVisualSeconds: Double = 0.0, maximumDetailedLeadSeconds: Double = 20.0): Boolean {
         require(visualElapsedSeconds.isFinite() && visualElapsedSeconds >= 0)
+        require(detailedVisualSeconds.isFinite() && detailedVisualSeconds >= 0 && maximumDetailedLeadSeconds > 0)
         require(weather.width == width && weather.height == height)
         val seconds = weather.elapsedSeconds
         require(seconds.isFinite() && seconds >= 0)
         val illustrative = weather.fieldSemantics.quality == WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL
-        if (weather.presentationIdentity === previousWeather?.presentationIdentity && seconds == previousSeconds &&
-            (!illustrative || visualElapsedSeconds == 0.0)) return false
         val restart = weather.presentationIdentity !== previousWeather?.presentationIdentity || seconds < previousSeconds
+        if (restart || illustrative || previousIllustrative) detailedLeadSeconds = 0.0
+        else detailedLeadSeconds = max(0.0, detailedLeadSeconds - max(0.0, seconds - previousSeconds))
+        if (!restart && !illustrative) detailedLeadSeconds = minOf(maximumDetailedLeadSeconds, detailedLeadSeconds + detailedVisualSeconds)
+        val textureSeconds = seconds + detailedLeadSeconds
+        if (!restart && seconds == previousSeconds && (!illustrative || visualElapsedSeconds == 0.0) &&
+            textureSeconds == previousTextureSeconds) return false
         if (restart) {
             broadSource.copyInto(broad)
             fineSource.copyInto(fine)
         }
         val days = if (restart || previousSeconds.isNaN()) 0.0 else if (illustrative)
             minOf(0.25, visualElapsedSeconds) / 60.0 else
-            (if (previousIllustrative) weather.fieldSemantics.intervalDurationSeconds else seconds - previousSeconds).coerceIn(0.0, 21600.0) / 86400.0
+            (if (previousIllustrative) weather.fieldSemantics.intervalDurationSeconds else textureSeconds - previousTextureSeconds).coerceIn(0.0, 21600.0) / 86400.0
         val response = if (restart || visualElapsedSeconds == 0.0) 1.0 else 1 - exp(-minOf(0.25, visualElapsedSeconds) / 0.7)
         for (y in 0 until height) for (x in 0 until width) {
             val i = y * width + x
@@ -152,6 +162,7 @@ internal class CloudRenderer(private val width: Int, private val height: Int, se
         previousWeather = weather
         previousSeconds = seconds
         previousIllustrative = illustrative
+        previousTextureSeconds = textureSeconds
         return true
     }
 

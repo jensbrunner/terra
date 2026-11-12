@@ -165,7 +165,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     val snapshot = if (previous?.progress?.generation == requested.generation &&
                         previous.progress.completedSeconds == simulation.completedSeconds && previous.fidelityRevision == simulation.fidelityRevision && showClouds == publishedClouds &&
                         !(refreshWater && previous.hydrologyCompletedSeconds != simulation.completedSeconds) &&
-                        !(showClouds && !active.paused && simulation.fidelity == SimulationFidelity.CLIMATE))
+                        !(showClouds && !active.paused))
                         previous.copy(progress = progress)
                     else {
                         simulation.snapshot(progress, refreshHydrology = refreshWater, cloudsVisible = showClouds,

@@ -116,6 +116,8 @@ class FidelityTransitionTest {
         val pending = capture()
         record("handoff", pending)
         println("REENTRY_HANDOFF ${pending.lastHandoff}")
+        assertTrue(pending.lastHandoff!!.rootMeanSquareWindMetersPerSecond > 1.0)
+        assertTrue(pending.lastHandoff.maximumWindMetersPerSecond <= 35.0)
         for (hour in 1..20) {
             repeat(180) { owner.advance(20.0, SimulationSpeed.ONE_HOUR) }
             if (hour in listOf(1, 6, 20)) record("detailed$hour", capture())

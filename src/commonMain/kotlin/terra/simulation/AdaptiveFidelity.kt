@@ -32,10 +32,16 @@ internal class AdaptiveFidelity(private val detailedStep: Double, private val ye
         val safeRate = if (measured) detailedStep / max(1e-6, detailedMean) * 0.6 else 3600.0
         val rate = speed.simulatedSecondsPerRealSecond
         fun select(next: SimulationFidelity) {
-            if (next != mode) { mode = next; switchedAt = now; overloadedAt = null; underloadedAt = null }
+            if (next != mode) {
+                mode = next; switchedAt = now; overloadedAt = null; underloadedAt = null
+                if (next == SimulationFidelity.DETAILED) {
+                    // Old startup/decades-old costs must not veto trying the evolved detailed atmosphere.
+                    detailedSamples = 0; detailedMean = 0.0; measuredSince = Double.NaN
+                }
+            }
         }
         if (manual != null) select(manual)
-        else if (explicitSpeedChange && rate <= 3600 && (!measured || rate <= safeRate * 0.8)) select(SimulationFidelity.DETAILED)
+        else if (explicitSpeedChange && rate <= 3600) select(SimulationFidelity.DETAILED)
         else {
             val expensive = rate > 3600 || measured && rate > safeRate * 0.9
             val cheap = rate <= 3600 && rate < safeRate * 0.65

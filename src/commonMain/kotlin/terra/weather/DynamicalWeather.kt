@@ -70,6 +70,12 @@ class DynamicalWeather(
     override val fieldSemantics get() = climateResult?.semantics ?: WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW, elapsedSeconds - updateSeconds, updateSeconds)
     internal val detailedCompletedSteps get() = model.completedSteps
     private var updateSeconds = 0.0
+    internal var dynamicsSuppressedForClimate = false
+    override val hasResolvedDynamics get() = !dynamicsSuppressedForClimate && !isClimateMode && !detailedReentryPending
+    override fun pressureAnomalyPercent(x: Int, y: Int): Double? = if (!hasResolvedDynamics) null else
+        sample(x, y, view.horizontalDynamics::pressureAnomalyPercentAt)
+    override fun relativeVorticityPerSecond(x: Int, y: Int): Double? = if (!hasResolvedDynamics) null else
+        sample(x, y, view.horizontalDynamics::relativeVorticityPerSecondAt)
     override val elapsedSeconds get() = fastClimate?.completedSeconds ?: model.worldSeconds
     val diagnostics get() = view.diagnostics
 
@@ -138,7 +144,7 @@ class DynamicalWeather(
         width, height, config, physics, view, elapsedSeconds, updateSeconds,
         climateResult?.captureFields(surface) ?: arrayOf(surface.peakRainRate.copyOf(), surface.rain.copyOf(), surface.drainage.copyOf(),
             surface.overflow.copyOf(), surface.lakeRain.copyOf(), surface.climateRainRate.copyOf(),
-            surface.soil.copyOf()), climateResult)
+            surface.soil.copyOf()), climateResult, hasResolvedDynamics)
 
     override fun step(seconds: Double) {
         require(seconds.isFinite() && seconds >= 0)

@@ -6,6 +6,15 @@ import kotlin.test.assertTrue
 
 class AdaptiveFidelityTest {
     @Test
+    fun returningToHourSpeedRetriesDetailedWithFreshCostsInsteadOfRemainingLockedInClimate() {
+        val policy = AdaptiveFidelity(40.0)
+        repeat(8) { policy.observe(SimulationFidelity.DETAILED, 0.1, it * 0.05) }
+        policy.decide(SimulationSpeed.ONE_HOUR, null, 0.5)
+        assertEquals(SimulationFidelity.CLIMATE, policy.decide(SimulationSpeed.ONE_HOUR, null, 0.8).mode)
+        assertEquals(SimulationFidelity.DETAILED, policy.decide(SimulationSpeed.ONE_HOUR, null, 100.0, true).mode)
+        assertEquals(SimulationFidelity.DETAILED, policy.decide(SimulationSpeed.ONE_HOUR, null, 100.1).mode)
+    }
+    @Test
     fun measuredCostHysteresisManualOverrideAndOverloadCoarseningAreBounded() {
         val policy = AdaptiveFidelity(20.0)
         assertEquals(SimulationFidelity.DETAILED, policy.decide(SimulationSpeed.ONE_HOUR, null, 0.0).mode)

@@ -41,6 +41,22 @@ tasks.withType<JavaExec>().configureEach {
 }
 
 val experimentCompilation = kotlin.targets.getByName<KotlinJvmTarget>("jvm").compilations.getByName("main")
+tasks.register<JavaExec>("atmosphericEvolution") {
+    group = "application"
+    description = "Export one terrestrial atmosphere trajectory and circulation metrics; --native uses the game grid."
+    mainClass.set("terra.experiments.AtmosphericEvolutionReviewKt")
+    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
+    args(providers.gradleProperty("atmosphereArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
+}
+tasks.register<JavaExec>("atlasUiPreview") {
+    group = "application"
+    description = "Export actual game UI views for a short visual review."
+    mainClass.set("terra.experiments.AtlasUiPreviewKt")
+    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
+    jvmArgs((tasks.named("runJvm").get() as JavaExec).jvmArgs)
+    systemProperty("terra.uiReviewStates", providers.gradleProperty("uiReviewStates")
+        .orElse("overview,inspection,details,speed,settings,climate-settings,advanced-settings,settings-edited,help").get())
+}
 tasks.register<JavaExec>("dryAtmospherePreview") {
     group = "application"
     description = "Open the dry rotating atmosphere's interactive 2D preview."

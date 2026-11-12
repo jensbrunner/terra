@@ -1,77 +1,66 @@
 # Exploring Terra
 
-[Terrain generation](TERRAIN_GENERATION.md) describes the new crust regions,
-mountain belts, build-time erosion, relief shading and extra Elevation controls.
-
-Start the atmospheric simulation with:
-
 ```sh
 gradle runJvm -PweatherModel=dynamical
 ```
 
-Without this option, the existing prescribed weather model is still the default.
-The Model button opens help with a clearly labeled switch-and-rebuild action.
-Switching model resets the world and its clock; switching detailed/fast fidelity
-does not.
+The existing default without this option remains prescribed weather. The top bar
+names the current mode; Help shows the model and its explicit rebuild action.
 
-## Controls
+## Screen
 
-| Action | Control |
+- **Top:** committed calendar, current mode/state, Pause/Resume, exact speed picker,
+  Home, Settings and Help. −/+ move one speed preset and stop at the limits.
+- **Map:** drag to pan, scroll to zoom about the pointer, click to inspect.
+  Home fits the unobstructed map. Empty margins cannot select edge tiles.
+- **Layers:** one colour overlay plus independent Clouds, Wind and Light toggles.
+  Clear removes the colour overlay. Its legend supplies units and range.
+- **Inspector:** Overview shows common conditions. Details contains rainfall
+  periods, moisture stores and routing diagnostics. Interval proxies and
+  prescribed weather retain distinct source labels.
+- **Footer:** Auto / Weather / Climate controls, Model help and actual progress.
+  Weather/Climate select fidelity manually; Auto restores automatic selection.
+  These controls are disabled for the prescribed model.
+
+The frame-time display is optional under Help; profiling enables it automatically.
+
+## Keys
+
+| Action | Key |
 |---|---|
-| Inspect weather, soil, rivers and climate | Click a tile |
-| Pan | Drag the map |
-| Zoom about the pointer | Scroll |
-| Fit the whole map | Home key or Home button |
-| Pause/resume | Space or Pause/Play |
-| Slower/faster | Left/Right or −/+ |
-| Help | H or Help button |
-| Close help/settings | Esc |
-| Detailed/fast climate | F, in dynamical mode |
-| Automatic fidelity | A |
-| Switch weather model and rebuild | M, or the action in Help |
+| Pause / resume | Space |
+| Slower / faster | Left / Right |
+| Fit map | Home |
+| Help / close panels | H / Esc |
+| Model help; no immediate reset | M |
+| Switch detailed / fast fidelity | F |
+| Restore automatic fidelity | A |
 
-The map has a dedicated viewport between the toolbar and inspector. Home fits
-that unobstructed area. Enlarged maps stop panning at their edges; smaller maps
-stay centered. Zoom is bounded. Empty margins do not select edge tiles, and a
-drag does not intentionally select its release position.
+Keys 1–9 retain their existing mapping; each layer button shows its number:
+1 humidity, 2 clouds, 3 rain, 4 30-day rain EMA, 5 air temperature,
+6 annual rain EMA, 7 surface temperature, 8 lighting, 9 wind.
 
-## Map layers
+Changing fidelity preserves the world and its calendar. Switching weather model
+uses the explicitly labeled action in Help and rebuilds the world/time.
 
-Keys 1–9 follow toolbar order: humidity, clouds, rain, 30-day rain EMA, air
-temperature, annual rain EMA, surface temperature, lighting, wind.
+## Settings
 
-One scalar colour overlay can be active at once. Choosing another replaces it;
-choosing it again turns it off. Clouds, wind and lighting remain independent.
-The legend uses the map's palette, including the square-root rain scale. Clouds
-and lighting can tint the result, so click a tile for actual numerical values.
-An EMA is a rolling exponential estimate, not the measured annual climate window.
+One dialog groups **Landforms**, **Climate** and **Advanced** controls. All tabs
+share a draft. Sliders never rebuild the world while dragged.
 
-Resolved weather and representative climate estimates remain labeled separately.
-Fast climate cloud motion is illustrative; wind is unresolved. Simulation time
-and requested/achieved speed come from completed publications, not visual blends.
+**Apply & rebuild world** commits a changed draft once and restarts time.
+**Discard edits** restores the last applied settings across all tabs. **Defaults**
+edits the draft; it does not apply automatically. Unchanged Apply/Discard buttons
+are disabled. Close/Esc retain unapplied edits for later. Rebuilding clears the
+old selection and marks the inspector as loading.
 
-## Settings without accidental restarts
+[Terrain generation](TERRAIN_GENERATION.md) explains the landform controls.
+[UI redesign](UI_REDESIGN.md) records the design, previews and focused validation.
 
-Elevation and Climate sliders now edit a shared draft. They no longer regenerate
-the world repeatedly while dragged. **Apply & rebuild world** commits the draft
-once and restarts the world/time using the chosen settings. An unchanged draft
-does nothing. Closing a settings panel retains unapplied edits; it does not
-apply them. Both menus indicate whether edits are pending.
+## Reading estimates
 
-Rebuilding clears the old tile selection and marks the inspector as rebuilding.
-Camera position and overlay preferences remain available. Help closes settings
-and appears above them, and its model action explicitly describes the reset.
-
-## Validation and limits of this pass
-
-`gradle compileKotlinJvm` passes, as do two small `terra.ui.MapCameraTest` checks
-covering outside-map picking, pan limits, anchored zoom, zoom bounds and Home.
-One native dynamical launch ran without a reported runtime exception; existing
-startup callback/texture warnings remain. Desktop automation reports the Java
-application but cannot attach to it (`Invalid app: net.java.openjdk.java`), so
-native visual inspection and interactive slider/help checks remain unverified.
-No new performance claim, full-suite run or exhaustive experiment was added.
-
-This is a controls and usability pass. Persistence, seed selection and richer
-game objectives remain future work. The simulation's transport, circulation and
-energy limitations are described in [CLOUD_REENTRY.md](CLOUD_REENTRY.md).
+An EMA is an exponential rolling estimate, separate from the observed annual
+climate window. Fast climate shows representative interval estimates; its cloud
+motion is illustrative and wind is unresolved. Map colour can be tinted by
+clouds and lighting: inspect a tile for numerical values. Display crossfades
+never advance the committed simulation clock.

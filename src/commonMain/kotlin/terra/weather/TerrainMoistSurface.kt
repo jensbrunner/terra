@@ -90,7 +90,9 @@ internal class TerrainMoistSurface(
                     Terrain.WOODS -> 4.0
                     Terrain.MOUNTAINS -> 6.0
                 }
-                roughness += multiplier * fraction
+                // Surface roughness acts through a shallow boundary layer, not the whole 8-tonne column.
+                // Keep ocean drag; apply one quarter of the extra land-cover drag to bulk circulation.
+                roughness += (1.0 + 0.25 * (multiplier - 1.0)) * fraction
             }
             dragMultiplier[cell] = roughness / mapping.tilesPerCell
         }

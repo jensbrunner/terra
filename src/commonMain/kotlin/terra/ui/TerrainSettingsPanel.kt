@@ -1,12 +1,8 @@
 package terra.ui
 
-import korlibs.korge.input.mouse
-import korlibs.korge.input.onMouseDrag
 import korlibs.korge.ui.uiSlider
 import korlibs.korge.view.*
-import korlibs.korge.view.Container
 import korlibs.math.geom.Size
-import korlibs.image.color.Colors
 import korlibs.image.font.SystemFont
 import kotlin.math.round
 import kotlin.math.pow
@@ -15,74 +11,75 @@ import terra.WINDOW_WIDTH
 import terra.world.TerrainGenerationSettings
 
 private data class SettingSlider(
-    val label: String,
-    val value: Double,
-    val minimum: Double,
-    val maximum: Double,
-    val step: Double,
-    val decimals: Int,
-    val update: (Double) -> Unit
+    val label: String, val value: Double, val minimum: Double, val maximum: Double,
+    val step: Double, val decimals: Int, val update: (Double) -> Unit
 )
 
-private enum class SettingsMenuKind {
-    ELEVATION,
-    CLIMATE
-}
-
-/** Builds the draggable terrain settings panels and reports edits to its owner. */
+/** One settings dialog with shared drafts, grouped controls and an explicit rebuild action. */
 class TerrainSettingsPanel(
-    parent: Container,
-    private val font: SystemFont,
-    initialSettings: TerrainGenerationSettings,
-    private val onSettingsChanged: (TerrainGenerationSettings) -> Unit
+    parent: Container, private val font: SystemFont, initialSettings: TerrainGenerationSettings,
+    private val onSettingsChanged: (TerrainGenerationSettings) -> Unit,
+    private val onOpen: () -> Unit = {}
 ) {
-    private var settings = initialSettings
-    private var appliedSettings = initialSettings
-    private val menus = mutableMapOf<SettingsMenuKind, Container>()
-    private var biomeSummaryLabel: Text? = null
-    private val pendingLabels = mutableListOf<Text>()
-    private val applyButtons = mutableListOf<SolidRect>()
+    private val draft = TerrainSettingsDraft(initialSettings)
+    private var settings: TerrainGenerationSettings
+        get() = draft.current
+        set(value) { draft.current = value }
+    private var tab = 0
+    private val tabs = mutableListOf<AtlasButton>()
+    private val overlay = parent.container { visible = false }
+    private val panel: Container
+    private val content: Container
+    private val pending: Text
+    private val summary: Text
+    private val apply: AtlasButton
+    private val discard: AtlasButton
 
     init {
-        drawMenuButtons(parent)
-        drawSettingsMenus(parent)
+        overlay.solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, AtlasUi.background.withA(225))
+        panel = overlay.container { }.xy(300.0, 120.0)
+        panel.atlasCard(840.0, 720.0)
+        panel.atlasText(font, "World settings", 28.0, 24.0, 25.0)
+        panel.atlasText(font, "Edit a draft, then rebuild when you’re ready.", 28.0, 60.0, muted = true)
+        AtlasButton(panel, font, "Close", 732.0, 24.0, 80.0) { closeMenus() }
+        listOf("Landforms", "Climate", "Advanced").forEachIndexed { index, name ->
+            tabs += AtlasButton(panel, font, name, 28 + index * 156.0, 104.0, 146.0) { tab = index; renderTab() }
+        }
+        content = panel.container { }.xy(28.0, 166.0)
+        panel.solidRect(784.0, 1.0, AtlasUi.line).xy(28.0, 546.0)
+        summary = panel.atlasText(font, "Generating world…", 28.0, 562.0, 12.0, muted = true)
+        pending = panel.atlasText(font, "", 28.0, 620.0, 13.0)
+        AtlasButton(panel, font, "Defaults", 28.0, 660.0, 100.0) {
+            settings = TerrainGenerationSettings(); renderTab(); refreshPendingChanges()
+        }
+        discard = AtlasButton(panel, font, "Discard edits", 140.0, 660.0, 140.0) {
+            draft.discard(); renderTab(); refreshPendingChanges()
+        }
+        apply = AtlasButton(panel, font, "Apply & rebuild world", 572.0, 656.0, 240.0, 40.0) {
+            draft.commit()?.let(onSettingsChanged)
+            refreshPendingChanges()
+            closeMenus()
+        }
+        renderTab()
+        refreshPendingChanges()
     }
 
-    fun hasOpenMenu(): Boolean = menus.values.any { it.visible }
-
-    fun closeMenus() { menus.values.forEach { it.visible = false } }
-
-    fun updateBiomeSummary(summary: String) {
-        biomeSummaryLabel?.text = summary
-    }
-
-    private fun drawMenuButtons(parent: Container) {
-        val y = 78.0
-        val width = 110.0
-        val gap = 8.0
-        var x = WINDOW_WIDTH - (width * 2.0 + gap) - 18.0
-        listOf(
-            SettingsMenuKind.ELEVATION to "Elevation",
-            SettingsMenuKind.CLIMATE to "Climate"
-        ).forEach { (kind, label) ->
-            val background = parent.solidRect(width, 38.0, Colors["#223538"]).xy(x, y)
-            val caption = parent.text(label, font = font, textSize = 15.0, color = Colors["#e3e8d7"])
-                .xy(x + 10.0, y + 10.0)
-            background.mouse { click { toggleMenu(kind) } }
-            caption.mouse { click { toggleMenu(kind) } }
-            x += width + gap
+    fun hasOpenMenu(): Boolean = overlay.visible
+    fun closeMenus() { overlay.visible = false }
+    fun toggle() {
+        if (overlay.visible) closeMenus() else {
+            onOpen()
+            overlay.parent?.sendChildToFront(overlay)
+            overlay.visible = true
         }
     }
+    fun updateBiomeSummary(value: String) { summary.text = value }
 
-    private fun drawSettingsMenus(parent: Container) {
-        createSettingsMenu(
-            parent, SettingsMenuKind.ELEVATION, "Elevation settings", 24.0, 108.0, 430.0, 842.0,
-            "Continents, ranges and erosion", elevationSliders(), showBiomeSummary = true
-        )
-        createSettingsMenu(
-            parent, SettingsMenuKind.CLIMATE, "Climate settings", 986.0, 138.0, 430.0, 310.0,
-            "Geographic temperature baseline", climateSliders()
-        )
+    internal fun prepareReview(index: Int, edited: Boolean = false) {
+        tab = index
+        if (edited) settings = settings.copy(erosionStrength = 0.65)
+        renderTab(); refreshPendingChanges()
+        if (!overlay.visible) toggle()
     }
 
     private fun elevationSliders() = listOf(
@@ -98,8 +95,8 @@ class TerrainSettingsPanel(
         slider("Detail scale", { it.detailScale }, 1.0, 50.0, 1.0, 0) { s, v -> s.copy(detailScale = v) },
         slider("Detail octaves", { it.detailOctaves.toDouble() }, 1.0, 8.0, 1.0, 0) { s, v -> s.copy(detailOctaves = v.toInt()) },
         slider("Detail strength", { it.detailStrength }, 0.0, 0.4, 0.01, 2) { s, v -> s.copy(detailStrength = v) },
-        slider("FBM persistence", { it.noisePersistence }, 0.1, 0.9, 0.01, 2) { s, v -> s.copy(noisePersistence = v) },
-        slider("FBM lacunarity", { it.noiseLacunarity }, 1.1, 4.0, 0.05, 2) { s, v -> s.copy(noiseLacunarity = v) },
+        slider("Detail persistence", { it.noisePersistence }, 0.1, 0.9, 0.01, 2) { s, v -> s.copy(noisePersistence = v) },
+        slider("Detail frequency step", { it.noiseLacunarity }, 1.1, 4.0, 0.05, 2) { s, v -> s.copy(noiseLacunarity = v) },
         slider("Mountain relief", { it.mountainRelief }, 0.0, 0.6, 0.01, 2) { s, v -> s.copy(mountainRelief = v) },
         slider("Erosion strength", { it.erosionStrength }, 0.0, 1.0, 0.05, 2) { s, v -> s.copy(erosionStrength = v) }
     )
@@ -110,157 +107,54 @@ class TerrainSettingsPanel(
         slider("Elevation cooling (°C/unit)", { it.elevationCoolingCOPerUnit }, 0.0, 80.0, 0.5, 1) { s, v -> s.copy(elevationCoolingCOPerUnit = v) }
     )
 
-    private fun slider(
-        label: String,
-        value: (TerrainGenerationSettings) -> Double,
-        minimum: Double,
-        maximum: Double,
-        step: Double,
-        decimals: Int,
+    private fun slider(label: String, value: (TerrainGenerationSettings) -> Double,
+        minimum: Double, maximum: Double, step: Double, decimals: Int,
         update: (TerrainGenerationSettings, Double) -> TerrainGenerationSettings
-    ) = SettingSlider(label, value(settings), minimum, maximum, step, decimals) { newValue ->
-        settings = update(settings, newValue)
-        refreshPendingChanges()
+    ) = SettingSlider(label, value(settings), minimum, maximum, step, decimals) { next ->
+        settings = update(settings, next); refreshPendingChanges()
     }
 
-    private fun createSettingsMenu(
-        parent: Container,
-        kind: SettingsMenuKind,
-        title: String,
-        x: Double,
-        y: Double,
-        width: Double,
-        height: Double,
-        sectionTitle: String,
-        sliders: List<SettingSlider>,
-        showBiomeSummary: Boolean = false
-    ) {
-        lateinit var panel: Container
-        lateinit var titleBar: SolidRect
-        lateinit var titleLabel: Text
-        var dragStartX = 0.0
-        var dragStartY = 0.0
-
-        panel = parent.container {
-            visible = false
-            solidRect(width, height, Colors["#101b20"])
-            titleBar = solidRect(width, 44.0, Colors["#1c2a2e"])
-            titleLabel = text(title, font = font, textSize = 18.0, color = Colors["#e3e8d7"])
-                .xy(14.0, 11.0)
-            settingsMenuButton("×", width - 44.0, 5.0, 32.0) { toggleMenu(kind) }
-
-            val sectionY = if (showBiomeSummary) 74.0 else 58.0
-            if (showBiomeSummary) {
-                biomeSummaryLabel = text(
-                    "", font = font, textSize = 13.0, color = Colors["#e5bd72"]
-                ).xy(16.0, 48.0)
-            }
-            settingsColumn(sectionTitle, 16.0, sectionY, width - 32.0, sliders)
-            pendingLabels += text("Changes rebuild the world and restart time.", font = font,
-                textSize = 12.0, color = Colors["#e5bd72"]).xy(16.0, height - 66.0)
-            val apply = solidRect(width - 32.0, 34.0, Colors["#223538"]).xy(16.0, height - 48.0)
-            applyButtons += apply
-            val caption = text("Apply & rebuild world", font = font, textSize = 14.0,
-                color = Colors["#e3e8d7"]).xy(26.0, height - 40.0)
-            fun applyChanges() {
-                if (settings == appliedSettings) return
-                appliedSettings = settings
-                onSettingsChanged(settings)
-                refreshPendingChanges()
-            }
-            apply.mouse { click { applyChanges() } }
-            caption.mouse { click { applyChanges() } }
-        }.xy(x, y)
-
-        val dragHandler: (Double, Double) -> Unit = { dx, dy ->
-            panel.xy(
-                (dragStartX + dx).coerceIn(0.0, WINDOW_WIDTH - width),
-                (dragStartY + dy).coerceIn(0.0, WINDOW_HEIGHT - height)
-            )
+    private fun renderTab() {
+        tabs.forEachIndexed { index, button -> button.selected = index == tab }
+        content.removeChildren()
+        val all = elevationSliders()
+        val basic = setOf("Base elevation", "Sea level", "Mountain cutoff", "Continent scale",
+            "Continent strength", "Regional strength", "Mountain relief", "Erosion strength")
+        val selected = when (tab) {
+            0 -> all.filter { it.label in basic }
+            1 -> climateSliders()
+            else -> all.filter { it.label !in basic }
         }
-        titleBar.onMouseDrag { drag ->
-            if (drag.start) {
-                dragStartX = panel.x
-                dragStartY = panel.y
+        selected.forEachIndexed { index, setting ->
+            val x = (index % 2) * 408.0
+            val y = (index / 2) * 86.0
+            content.atlasText(font, setting.label, x, y, 14.0)
+            val value = content.atlasText(font, formatNumber(setting.value, setting.decimals), x + 300, y, 14.0)
+            val control = content.uiSlider(value = setting.value, min = setting.minimum,
+                max = setting.maximum, step = setting.step, decimalPlaces = setting.decimals,
+                size = Size(376.0, 24.0)) { showTooltip = true }.xy(x, y + 28)
+            control.onChange.add { next ->
+                value.text = formatNumber(next, setting.decimals); setting.update(next)
             }
-            dragHandler(drag.dx, drag.dy)
         }
-        titleLabel.onMouseDrag { drag ->
-            if (drag.start) {
-                dragStartX = panel.x
-                dragStartY = panel.y
-            }
-            dragHandler(drag.dx, drag.dy)
-        }
-
-        menus[kind] = panel
+        if (tab == 1) content.atlasText(font,
+            "Sets the geographic temperature baseline.\nWeather and seasons evolve from this starting geography.",
+            0.0, 220.0, 14.0, muted = true)
     }
 
     private fun refreshPendingChanges() {
-        val pending = settings != appliedSettings
-        pendingLabels.forEach { it.text = if (pending) "Unapplied changes · rebuild restarts time" else "Changes rebuild the world and restart time." }
-        applyButtons.forEach { it.color = Colors[if (pending) "#49776b" else "#223538"] }
-    }
-
-    private fun Container.settingsColumn(
-        title: String,
-        x: Double,
-        y: Double,
-        width: Double,
-        sliders: List<SettingSlider>
-    ) {
-        text(title, font = font, textSize = 15.0, color = Colors["#e5bd72"]).xy(x, y)
-        val rowHeight = 41.0
-        sliders.forEachIndexed { index, setting ->
-            val rowY = y + 25.0 + index * rowHeight
-            val valueLabel = text(
-                "${setting.label}: ${formatNumber(setting.value, setting.decimals)}",
-                font = font,
-                textSize = 13.0,
-                color = Colors["#e3e8d7"]
-            ).xy(x, rowY)
-            val slider = uiSlider(
-                value = setting.value,
-                min = setting.minimum,
-                max = setting.maximum,
-                step = setting.step,
-                decimalPlaces = setting.decimals,
-                size = Size(width, 15.0)
-            ) {
-                showTooltip = true
-            }.xy(x, rowY + 17.0)
-            slider.onChange.add { newValue ->
-                valueLabel.text = "${setting.label}: ${formatNumber(newValue, setting.decimals)}"
-                setting.update(newValue)
-            }
-        }
-    }
-
-    private fun Container.settingsMenuButton(
-        label: String,
-        x: Double,
-        y: Double,
-        width: Double,
-        action: () -> Unit
-    ) {
-        val background = solidRect(width, 34.0, Colors["#223538"]).xy(x, y)
-        val caption = text(label, font = font, textSize = 14.0, color = Colors["#e3e8d7"])
-            .xy(x + 10.0, y + 8.0)
-        background.mouse { click { action() } }
-        caption.mouse { click { action() } }
-    }
-
-    private fun toggleMenu(kind: SettingsMenuKind) {
-        val menu = menus[kind] ?: return
-        val shouldOpen = !menu.visible
-        menus.values.forEach { it.visible = false }
-        menu.visible = shouldOpen
-        if (menu.visible) menu.parent?.sendChildToFront(menu)
+        pending.text = if (draft.dirty) "Unapplied changes · rebuilding restarts the world and its clock."
+            else "No changes · close this panel to keep exploring."
+        pending.color = if (draft.dirty) AtlasUi.warm else AtlasUi.muted
+        apply.enabled = draft.dirty; apply.selected = draft.dirty
+        discard.enabled = draft.dirty
     }
 }
 
 internal fun formatNumber(value: Double, decimalPlaces: Int): String {
-    if (decimalPlaces == 0) return value.toInt().toString()
+    if (!value.isFinite()) return "—"
+    if (decimalPlaces == 0) return round(value).toLong().toString()
     val scale = 10.0.pow(decimalPlaces)
-    return (round(value * scale) / scale).toString()
+    val rounded = round(value * scale) / scale
+    return (if (rounded == 0.0) 0.0 else rounded).toString()
 }
