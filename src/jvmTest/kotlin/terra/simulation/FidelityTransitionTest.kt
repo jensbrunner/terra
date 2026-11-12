@@ -15,6 +15,41 @@ class FidelityTransitionTest {
     private val day = 86400.0
 
     @Test
+    fun nativeWorldReturnsFromTwoHundredFiftyFiveYearsWithActiveResolvedDynamics() {
+        val owner = WorldSimulation(WorldRequest(dynamical = true))
+        fun capture() = owner.snapshot(SimulationProgress(0, 1, 0, owner.completedSeconds,
+            SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, day, false, 0.0, 0.0, 0))
+        owner.advance(owner.stepSeconds, SimulationSpeed.ONE_HOUR)
+        val water = capture().diagnostics!!.totalWaterKg
+        repeat(12) { owner.advanceClimateInterval(20 * 365 * day) }
+        owner.advanceClimateInterval(15 * 365 * day)
+        val coarse = capture()
+        owner.setFidelity(SimulationFidelity.DETAILED)
+        val pending = capture()
+        assertEquals(coarse.progress.completedSeconds, pending.progress.completedSeconds)
+        assertTrue(coarse.world === pending.world && coarse.hydrology === pending.hydrology)
+        assertTrue(coarse.seasonalClimate === pending.seasonalClimate)
+        assertTrue(pending.lastHandoff!!.rootMeanSquareWindMetersPerSecond > 1)
+        assertTrue(pending.lastHandoff.maximumWindMetersPerSecond <= 35)
+        assertEquals(1L, pending.lastHandoff.physicalStepsAtHandoff)
+        assertFalse(pending.weather.hasResolvedDynamics)
+        for (y in 0 until pending.world.height) for (x in 0 until pending.world.width) {
+            assertEquals(coarse.weather.soilWaterMm(x, y), pending.weather.soilWaterMm(x, y))
+            assertEquals(coarse.weather.surfaceTemperatureC(x, y), pending.weather.surfaceTemperatureC(x, y))
+            assertEquals(coarse.weather.atmosphericWaterMm(x, y), pending.weather.atmosphericWaterMm(x, y), 1e-10)
+        }
+        repeat(90) { owner.advance(40.0, SimulationSpeed.ONE_HOUR) }
+        val resolved = capture()
+        assertEquals(coarse.progress.completedSeconds + 3600, owner.completedSeconds)
+        assertTrue(resolved.weather.hasResolvedDynamics)
+        assertTrue(resolved.weather.pressureAnomalyPercent(160, 100)!!.isFinite())
+        assertTrue(resolved.weather.relativeVorticityPerSecond(160, 100)!!.isFinite())
+        assertEquals(water, resolved.diagnostics!!.totalWaterKg, water * 1e-10)
+        assertTrue(abs(resolved.diagnostics.relativeWaterResidual) < 1e-10)
+        println("NATIVE_REENTRY years=255 climate_transactions=13 rms_wind_ms=${pending.lastHandoff.rootMeanSquareWindMetersPerSecond} max_wind_ms=${pending.lastHandoff.maximumWindMetersPerSecond} water_residual=${resolved.diagnostics.relativeWaterResidual}")
+    }
+
+    @Test
     fun multiYearClimateReturnsToDetailedWithoutResettingSlowStateOrCalendar() {
         val owner = WorldSimulation(request)
         fun capture() = owner.snapshot(SimulationProgress(1, 1, 0, owner.completedSeconds,

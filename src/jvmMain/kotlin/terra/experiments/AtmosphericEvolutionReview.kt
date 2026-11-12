@@ -70,4 +70,4 @@ fun main(args: Array<String>) {
     metrics.appendLine("experiment_wall_seconds=${(System.nanoTime() - started) / 1e9}")
     File(output, if (native) "evolution-native.txt" else "evolution-current.txt").writeText(metrics.toString())
     ImageIO.write(image, "png", File(output, if (native) "evolution-native.png" else "evolution-current.png"))
-    }
+}
