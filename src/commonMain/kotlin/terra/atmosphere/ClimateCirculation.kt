@@ -7,12 +7,12 @@ internal data class ReconstructedCirculation(
     val maximumSpeed: Double, val rmsSpeed: Double, val pressureExponent: Double
 )
 
-/** Stateless reentry from the evolved thermal geography. No storm stamps or arbitrary velocities.
+/** Stateless reentry from the evolved thermal geography. Thermally conditioned wave disturbances and compatible balanced velocities.
  * Uses this model's force -(1/h) grad(g h² T / 2Tref), not the dry g grad(h) law.
  */
 internal object ClimateCirculation {
     fun reconstruct(config: DryAtmosphereConfig, referenceTemperature: Double,
-        temperature: DoubleArray, carrierDepthSum: Double): ReconstructedCirculation {
+        temperature: DoubleArray, carrierDepthSum: Double, weatherPhase: Double? = null): ReconstructedCirculation {
         val width = config.width; val height = config.height
         var smooth = temperature.copyOf()
         var scratch = DoubleArray(config.cellCount)
@@ -40,6 +40,19 @@ internal object ClimateCirculation {
             if (config.periodicY) rotationalWeight[y] * ln(smooth[i] / referenceTemperature) else {
                 val wallEnvelope = sin(PI * (y + 0.5) / height).pow(2)
                 zonal[y] + rotationalWeight[y] * wallEnvelope * ln(smooth[i] / mean[y])
+            }
+        }
+        if (weatherPhase != null) for (y in 1 until height - 1) {
+            // Baroclinic activity follows the thermal gradient. Perturb pressure shape
+            // first, then derive balanced winds with the actual thermal pressure law.
+            val gradient = abs(mean[minOf(height - 1, y + 1)] - mean[maxOf(0, y - 1)])
+            val activity = (gradient / 8).coerceIn(0.0, 1.0) * rotationalWeight[y]
+            val envelope = sin(PI * (y + 0.5) / height).pow(2)
+            for (x in 0 until width) {
+                val longitude = 2 * PI * (x + 0.5) / width
+                shape[y * width + x] += 0.035 * activity * envelope *
+                    (sin(5 * longitude + weatherPhase + 0.6 * y) +
+                        0.5 * cos(3 * longitude - weatherPhase + 0.4 * y))
             }
         }
         val depth = DoubleArray(config.cellCount)

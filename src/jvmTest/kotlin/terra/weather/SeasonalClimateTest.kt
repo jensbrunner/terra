@@ -109,21 +109,19 @@ class SeasonalClimateTest {
         val immature = SeasonalClimate(1, 1, 40.0)
         immature.observe(80.0, { 15.0 }, { 0.0 })
         assertFalse(land.advanceClimateBiomes(immature.snapshot, 400.0))
-        assertFalse(land.advanceClimateBiomes(dry, 40.0))
-        assertEquals(Terrain.PLAINS, land[3, 3].terrain)
-        assertTrue(land.advanceClimateBiomes(dry, 40.0))
+        land.advanceClimateBiomes(dry, 40.0)
+        assertTrue(land.grassCover(3, 3) > 0.3) // One dry year does not erase cover.
+        repeat(6) { land.advanceClimateBiomes(dry, 40.0) }
         assertEquals(Terrain.DESERT, land[3, 3].terrain)
-        assertFalse(land.advanceClimateBiomes(wet, 40.0))
-        assertFalse(land.advanceClimateBiomes(dry, 40.0))
-        assertFalse(land.advanceClimateBiomes(wet, 40.0))
-        assertEquals(Terrain.DESERT, land[3, 3].terrain)
-        assertTrue(land.advanceClimateBiomes(wet, 40.0))
+        land.advanceClimateBiomes(wet, 40.0)
+        assertTrue(land.treeCover(3, 3) < 0.1) // Establishment takes decades.
+        repeat(60) { land.advanceClimateBiomes(wet, 40.0) }
         assertEquals(Terrain.WOODS, land[3, 3].terrain)
-        val noisy = world()
-        assertFalse(noisy.advanceClimateBiomes(stableClimate(15.0, 1150.0), 400.0))
-        assertEquals(Terrain.PLAINS, noisy[3, 3].terrain)
+        val mature = land.treeCover(3, 3)
+        land.advanceClimateBiomes(dry, 40.0)
+        assertTrue(land.treeCover(3, 3) > mature * 0.8)
         val steppe = world()
-        assertTrue(steppe.advanceClimateBiomes(stableClimate(15.0, 400.0), 80.0))
+        repeat(5) { steppe.advanceClimateBiomes(stableClimate(15.0, 200.0), 40.0) }
         assertEquals(Terrain.STEPPE, steppe[3, 3].terrain)
         val cold = world()
         assertTrue(cold.advanceClimateBiomes(stableClimate(-15.0, 300.0), 80.0))

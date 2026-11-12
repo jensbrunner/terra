@@ -19,14 +19,14 @@ class AggregateClimateTest {
         val year = 365 * 86400.0
         val interval = owner.advanceClimateInterval(20 * year)
         val aggregate = capture()
-        assertEquals(8, interval.subperiods)
-        assertEquals(8L, interval.routingPasses)
+        assertTrue(interval.subperiods in 730..761)
+        assertEquals(interval.subperiods.toLong(), interval.routingPasses)
         assertEquals(1L, interval.detailedCompletedSteps)
-        assertTrue(interval.aggregateYears)
-        assertEquals(0.0, interval.ecologyEligibleSeconds)
+        assertTrue(!interval.aggregateYears)
+        assertEquals(20 * year, interval.ecologyEligibleSeconds)
         assertTrue(abs(interval.relativeWaterResidual) < 1e-12)
         assertEquals(20 + 20 * year, owner.completedSeconds, 1e-6)
-        assertTrue(aggregate.world === original.world) // No final-state biome condition applied to twenty years.
+        assertTrue(aggregate.world.biomeRevision > original.world.biomeRevision)
         assertTrue(aggregate.seasonalClimate!!.containsAggregateEstimates)
         assertTrue(aggregate.seasonalClimate.hasAnnualCoverage)
         assertTrue(!aggregate.seasonalClimate.stableAtTile(1, 1, 15, 11))
@@ -61,12 +61,12 @@ class AggregateClimateTest {
         val start = 12345.0
         val reference = (0 until 128).sumOf { field.wet(0.2, 0.7, start + (it + 0.5) * span / 128) } / 128
         assertEquals(reference, field.meanWet(0.2, 0.7, start, span), 0.002)
-        val annual = ClimatePhasePlan(20.0, year, year, 0.0)
-        assertTrue(annual.phases.size <= 12)
+        val annual = ClimatePhasePlan(20.0, year, year)
+        assertTrue(annual.phases.size <= 40)
         assertEquals(year, annual.phases.sumOf { it.seconds }, 1e-6)
-        val long = ClimatePhasePlan(20.0, span, year, 0.0)
-        assertEquals(8, ClimatePhasePlan(7.0, 800.0, 40.0, 0.125).phases.size)
-        assertEquals(8, long.phases.size)
+        val long = ClimatePhasePlan(20.0, span, year)
+        assertTrue(ClimatePhasePlan(7.0, 800.0, 40.0).phases.size in 720..761)
+        assertTrue(long.phases.size in 730..761)
         assertEquals(span, long.phases.sumOf { it.seconds }, 1e-6)
     }
 }

@@ -51,11 +51,11 @@ class SeasonalClimate(
     }
 
     /** Bulk ingestion keeps existing spin-up, seasonal splits and two-observed-year eligibility. */
-    fun observeInterval(summary: ClimateIntervalSummary) {
+    fun observeInterval(summary: ClimateIntervalSummary, modeled: Boolean = false) {
         require(summary.width == width && summary.height == height)
         require(summary.startSeconds == elapsedSeconds) { "Climate interval must follow the last committed observation" }
         accumulate(summary.durationSeconds, summary::meanTemperatureC, summary::precipitationMm,
-            summary::minimumTemperatureC, summary::maximumTemperatureC, summary::peakRainMmPerHour)
+            summary::minimumTemperatureC, summary::maximumTemperatureC, summary::peakRainMmPerHour, modeled)
     }
 
     /** Keep only the boundary fragments and last two annual estimates; skip middle years arithmetically.
@@ -100,11 +100,12 @@ class SeasonalClimate(
     private fun accumulate(
         seconds: Double, surfaceTemperatureC: (Int) -> Double, rainMm: (Int) -> Double,
         intervalMinimum: ((Int) -> Double)? = null, intervalMaximum: ((Int) -> Double)? = null,
-        intervalPeakRain: ((Int) -> Double)? = null
+        intervalPeakRain: ((Int) -> Double)? = null, modeled: Boolean = false
     ) {
         require(seconds.isFinite() && seconds > 0)
         var remaining = seconds
         while (remaining > 0.0) {
+            currentYearEstimated = currentYearEstimated || modeled
             val span = min(remaining, boundaries[segment + 1] - yearElapsed)
             val season = seasons[segment]
             durations[season] += span

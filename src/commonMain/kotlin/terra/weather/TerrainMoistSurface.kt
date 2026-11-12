@@ -103,15 +103,19 @@ internal class TerrainMoistSurface(
         check(!transferred && pendingFluxBatch == null)
         require(potentialMm.isFinite() && potentialMm >= 0.0)
         var actualMmTiles = 0.0
+        var oceanRequest = 0.0
         mapping.forCell(cell) { i, fraction ->
             val request = potentialMm * fraction
             val actual = when {
                 wetLake[i] -> hydrology.evaporateLakeWaterMmTiles(i % width, i / width, request)
-                land[i] -> min(soil[i], request).also { soil[i] -= it }
-                else -> hydrology.evaporateOceanWaterMmTiles(request)
+                // Integrate dS/dt = -PET S / field capacity exactly. Dry soil
+                // restricts actual ET rather than paying full demand until empty.
+                land[i] -> min(request, soil[i] * decayResponse(request / FIELD_CAPACITY_MM)).also { soil[i] -= it }
+                else -> { oceanRequest += request; 0.0 }
             }
             actualMmTiles += actual
         }
+        actualMmTiles += hydrology.evaporateOceanWaterMmTiles(oceanRequest)
         return actualMmTiles / mapping.tilesPerCell
     }
 
@@ -126,6 +130,7 @@ internal class TerrainMoistSurface(
         require(wetFraction.isFinite() && wetFraction > 0.0 && wetFraction <= 1.0)
         check(continuous || !climateRainQueued)
         if (continuous) climateRainQueued = true
+        var oceanRain = 0.0
         mapping.forCell(cell) { i, fraction ->
             val amount = amountMm * fraction
             if (continuous) wetFractionWeightedRain[i] += amount * wetFraction
@@ -141,9 +146,10 @@ internal class TerrainMoistSurface(
                     soil[i] -= excess
                     overflow[i] += excess
                 }
-                else -> hydrology.receiveOceanWaterMmTiles(amount)
+                else -> oceanRain += amount
             }
         }
+        hydrology.receiveOceanWaterMmTiles(oceanRain)
     }
 
     fun beginUpdate() {
@@ -174,7 +180,7 @@ internal class TerrainMoistSurface(
     }
 
     /** Exact rain-plus-drainage solution for each constant-forcing phase, including saturation time.
-     * Evaporation is an ordered finite withdrawal before this rain phase, not an annual net clamp.
+     * Fast mode surrounds this rain phase with two moisture-limited half exchanges.
      */
     fun finishClimateStep(seconds: Double) {
         check(!transferred && pendingFluxBatch == null)
@@ -210,7 +216,7 @@ internal class TerrainMoistSurface(
         val excess = store - FIELD_CAPACITY_MM
         val capacity = SOIL_CAPACITY_MM - FIELD_CAPACITY_MM
         val equilibrium = rate * DRAINAGE_SECONDS
-        val response = -expm1(-activeSeconds / DRAINAGE_SECONDS)
+        val response = decayResponse(activeSeconds / DRAINAGE_SECONDS)
         val endExcess = excess + (equilibrium - excess) * response
         if (equilibrium > capacity && endExcess > capacity) {
             val saturationSeconds = DRAINAGE_SECONDS * ln1p((capacity - excess) / (equilibrium - capacity))
@@ -265,6 +271,10 @@ internal class TerrainMoistSurface(
     fun transferredToHydrology() { check(!transferred); transferred = true }
 
     private companion object {
+        // exp is a JVM intrinsic; expm1 is expensive on every fine soil tile.
+        // The series retains precision at detailed-weather timestep scales.
+        fun decayResponse(x: Double): Double = if (x < 1e-3)
+            x * (1 - x * (0.5 - x * (1.0 / 6 - x / 24))) else 1 - exp(-x)
         const val SOIL_CAPACITY_MM = 250.0
         const val FIELD_CAPACITY_MM = 120.0
         const val DRAINAGE_SECONDS = 5 * 86400.0

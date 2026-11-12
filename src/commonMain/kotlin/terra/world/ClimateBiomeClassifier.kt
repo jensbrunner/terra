@@ -1,7 +1,5 @@
 package terra.world
 
-import kotlin.math.max
-
 /** Maps sampled long-term climate to the existing land-cover terrain types. */
 object ClimateBiomeClassifier {
     /**
@@ -24,10 +22,7 @@ object ClimateBiomeClassifier {
         require(annualPrecipitationMm.isFinite()) { "Annual precipitation must be finite" }
         require(meanAirTemperatureC.isFinite()) { "Mean air temperature must be finite" }
 
-        val potentialEvaporationMmPerYear =
-            (BASE_POTENTIAL_EVAPORATION_MM_PER_YEAR +
-                EVAPORATION_INCREASE_PER_WARM_DEGREE_MM_PER_YEAR * max(meanAirTemperatureC, 0.0))
-                .coerceIn(MIN_POTENTIAL_EVAPORATION_MM_PER_YEAR, MAX_POTENTIAL_EVAPORATION_MM_PER_YEAR)
+        val potentialEvaporationMmPerYear = potentialEvaporationMmPerYear(meanAirTemperatureC)
         val aridityRatio = annualPrecipitationMm.coerceAtLeast(0.0) /
             potentialEvaporationMmPerYear
 
@@ -60,13 +55,13 @@ object ClimateBiomeClassifier {
         }
     }
 
+    /** Same thermal PET proxy as the reduced surface exchange, annualized for classification. */
+    fun potentialEvaporationMmPerYear(temperatureC: Double): Double =
+        (365 * 3.0 * ((temperatureC + 5) / 35).coerceIn(0.0, 1.5)).coerceAtLeast(100.0)
+
     private enum class Aridity { VERY_DRY, SEMI_ARID, MODERATE, HUMID }
     private enum class ThermalZone { VERY_COLD, COOL, TEMPERATE, WARM }
 
-    private const val BASE_POTENTIAL_EVAPORATION_MM_PER_YEAR = 350.0
-    private const val EVAPORATION_INCREASE_PER_WARM_DEGREE_MM_PER_YEAR = 45.0
-    private const val MIN_POTENTIAL_EVAPORATION_MM_PER_YEAR = 250.0
-    private const val MAX_POTENTIAL_EVAPORATION_MM_PER_YEAR = 1800.0
     private const val VERY_DRY_ARIDITY_RATIO = 0.20
     private const val SEMI_ARID_ARIDITY_RATIO = 0.55
     private const val HUMID_ARIDITY_RATIO = 1.10

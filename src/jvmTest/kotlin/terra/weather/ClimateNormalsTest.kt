@@ -118,6 +118,15 @@ class ClimateNormalsTest {
             assertEquals(wet, same.wet(0.2, 0.65, time))
             assertEquals(field.wet(0.0, 0.65, time), field.wet(1.0, 0.65, time))
         }
+        val wetGrid = DoubleArray(96)
+        val warmGrid = DoubleArray(96)
+        field.fillGrid(wetGrid, warmGrid, 12, 8, t)
+        for (i in wetGrid.indices) {
+            val x = (i % 12 + 0.5) / 12
+            val y = (i / 12 + 0.5) / 8
+            assertEquals(field.wet(x, y, t), wetGrid[i], 1e-12)
+            assertEquals(field.warm(x, y, t), warmGrid[i], 1e-12)
+        }
         val saved = field.wet(0.2, 0.65, t)
         field.wet(0.2, 0.65, 1000 * year)
         assertEquals(saved, field.wet(0.2, 0.65, t))

@@ -2,6 +2,7 @@ package terra.world
 
 import kotlin.math.abs
 import kotlin.math.floor
+import kotlin.math.expm1
 import kotlin.math.max
 import terra.MAP_HEIGHT_TILES
 import terra.MAP_WIDTH_TILES
@@ -20,8 +21,10 @@ class World(
     }
     private val publishedTerrainChanges = BooleanArray(width * height)
     private var climateBiomesApplied = false
-    private val pendingBiome = arrayOfNulls<Terrain>(width * height)
-    private val pendingBiomeSeconds = DoubleArray(width * height)
+    private val trees = DoubleArray(width * height)
+    private val grasses = DoubleArray(width * height) { 0.65 }
+    fun treeCover(x: Int, y: Int): Double = trees[y * width + ((x % width) + width) % width]
+    fun grassCover(x: Int, y: Int): Double = grasses[y * width + ((x % width) + width) % width]
     val seaLevel: Double get() = settings.seaLevel
     var biomeRevision: Long = 0
         private set
@@ -74,17 +77,23 @@ class World(
             )
             cells[i] = cell.copy(terrain = terrain)
         }
+        for (i in cells.indices) {
+            trees[i] = if (cells[i].terrain == Terrain.WOODS) 0.8 else 0.05
+            grasses[i] = if (cells[i].terrain == Terrain.DESERT) 0.05 else (1 - trees[i]) * 0.7
+        }
         climateBiomesApplied = true
         biomeRevision++
     }
 
-    /** Delayed categorical land-cover response, separate from weather and measured climate.
-     * Require two post-spin-up annual cycles, local stationarity, and a target robust
-     * to ±1°C/±10% rainfall. A persistent candidate needs two further model years.
+    /** Persistent fractional cover; establishment is slower than drought mortality.
+     * Labels are derived with hysteresis. Annual calls follow the calendar in fast mode.
      */
-    fun advanceClimateBiomes(climate: SeasonalClimateSnapshot?, seconds: Double): Boolean {
+    fun advanceClimateBiomes(climate: SeasonalClimateSnapshot?, seconds: Double, soilAvailability: DoubleArray? = null): Boolean {
         require(seconds.isFinite() && seconds >= 0)
         if (climate == null || !climate.hasAnnualCoverage || seconds == 0.0) return false
+        require(soilAvailability == null || soilAvailability.size == cells.size)
+        val years = seconds / climate.yearSeconds
+        val previousTrees = trees.copyOf()
         var changed = false
         for (i in cells.indices) {
             val cell = cells[i]
@@ -92,26 +101,30 @@ class World(
             val x = i % width; val y = i / width
             val temperature = climate.meanSurfaceTemperatureAtTile(x, y, width, height)
             val rain = climate.annualPrecipitationAtTile(x, y, width, height)
-            fun classify(t: Double, r: Double) = ClimateBiomeClassifier.classifyBiome(
-                cell.terrain, cell.elevation, settings, r, t)
-            val target = classify(temperature, rain)
-            val robust = target != cell.terrain && climate.stableAtTile(x, y, width, height) &&
-                classify(temperature - 1, rain * 0.9) == target && classify(temperature - 1, rain * 1.1) == target &&
-                classify(temperature + 1, rain * 0.9) == target && classify(temperature + 1, rain * 1.1) == target
-            if (!robust) {
-                pendingBiome[i] = null
-                pendingBiomeSeconds[i] = 0.0
-                continue
+            val pet = ClimateBiomeClassifier.potentialEvaporationMmPerYear(temperature)
+            val moisture = rain / max(1.0, pet)
+            val thermal = ((temperature + 6) / 12).coerceIn(0.0, 1.0)
+            val droughtSurvival = soilAvailability?.let { 0.5 + 0.5 * (it[i] / 0.5).coerceIn(0.0, 1.0) } ?: 1.0
+            val treeTarget = ((moisture - 0.45) / 0.85).coerceIn(0.0, 1.0) * thermal * droughtSurvival
+            val grassTarget = minOf(1 - treeTarget, (moisture / 0.55).coerceIn(0.0, 1.0) * thermal)
+            val neighborTrees = (previousTrees[y * width + (x + width - 1) % width] +
+                previousTrees[y * width + (x + 1) % width] +
+                previousTrees[maxOf(0, y - 1) * width + x] +
+                previousTrees[minOf(height - 1, y + 1) * width + x]) / 4
+            val establishmentYears = 25.0 / (0.5 + neighborTrees)
+            val tau = if (treeTarget > trees[i]) establishmentYears else 6.0
+            trees[i] += (treeTarget - trees[i]) * -expm1(-years / tau)
+            grasses[i] += (grassTarget - grasses[i]) * -expm1(-years / 2.0)
+            grasses[i] = grasses[i].coerceIn(0.0, 1 - trees[i])
+            val next = when {
+                temperature < -6 -> Terrain.TUNDRA
+                trees[i] > if (cell.terrain == Terrain.WOODS) 0.40 else 0.55 -> Terrain.WOODS
+                trees[i] + grasses[i] < if (cell.terrain == Terrain.DESERT) 0.25 else 0.15 -> Terrain.DESERT
+                moisture < 0.55 -> Terrain.STEPPE
+                else -> Terrain.PLAINS
             }
-            if (pendingBiome[i] != target) {
-                pendingBiome[i] = target
-                pendingBiomeSeconds[i] = 0.0
-            }
-            pendingBiomeSeconds[i] += seconds
-            if (pendingBiomeSeconds[i] >= 2 * climate.yearSeconds) {
-                cells[i] = cell.copy(terrain = target)
-                pendingBiome[i] = null
-                pendingBiomeSeconds[i] = 0.0
+            if (next != cell.terrain) {
+                cells[i] = cell.copy(terrain = next)
                 changed = true
             }
         }

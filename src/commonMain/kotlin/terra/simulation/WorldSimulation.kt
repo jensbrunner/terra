@@ -128,7 +128,6 @@ internal class WorldSimulation(val request: WorldRequest) {
         check(detailed.elapsedSeconds == completedSeconds)
         val result = detailed.advanceClimateInterval(seconds)
         if (fidelity != SimulationFidelity.CLIMATE) { fidelity = SimulationFidelity.CLIMATE; fidelityRevision++ }
-        world.advanceClimateBiomes(detailed.seasonalClimate, result.ecologyEligibleSeconds)
         completedSeconds = detailed.elapsedSeconds
         lastEcologySeconds = completedSeconds
         nextClimateSeconds = completedSeconds + 3600.0

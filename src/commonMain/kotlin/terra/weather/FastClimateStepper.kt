@@ -31,18 +31,29 @@ internal class FastClimateResult(
         surface.climateRainRate.copyOf(), surface.soil.copyOf())
 }
 
-/** Calendar-aligned phases through one year; grouped seasonal summaries beyond it.
- * Global proportional moisture allocation approximates transport; no fluid solver is stepped.
+/** Chronological reduced climate. Surface stores and column water are authoritative in both modes.
+ * Energy is a labeled relaxation approximation; water transfers are conservative.
  */
 internal class FastClimateStepper(
     private val surface: TerrainMoistSurface, private val hydrology: HydrologySimulation,
     private val atmosphere: MoistAtmosphere, private val history: SeasonalClimate,
-    private val normals: ClimateNormals, startSeconds: Double
+    private val normals: ClimateNormals, startSeconds: Double,
+    private val evolveEcology: (Double, DoubleArray) -> Unit = { _, _ -> }
 ) {
     private val config = surface.mapping.config
     private val count = config.cellCount
     private val phaseMeanMoisture = DoubleArray(count) // Owner-only scratch; never published.
-    private val precipitableMoisture = DoubleArray(count)
+    private val transport = ClimateMoistureTransport(config)
+    // Freeze independent detailed calibration on entry; never learn from our own modeled rain.
+    private val calibration = history.snapshot?.takeUnless { it.containsAggregateEstimates }
+    private val water = DoubleArray(count)
+    private val actualRain = DoubleArray(count)
+    private val oldTemperature = DoubleArray(count)
+    private val newTemperature = DoubleArray(count)
+    private val integral = DoubleArray(count)
+    private val potential = DoubleArray(count)
+    private val soilExposure = DoubleArray(surface.soil.size)
+    private var soilExposureSeconds = 0.0
     val maximumIntervalSeconds get() = 20 * normals.yearSeconds
     var completedSeconds = startSeconds
         private set
@@ -60,7 +71,6 @@ internal class FastClimateStepper(
         require((completedSeconds + seconds).isFinite() && completedSeconds + seconds > completedSeconds)
         check(surface.pendingFluxBatch?.consumed != false)
         check(history.elapsedSeconds == completedSeconds)
-        val historyEligibleAtStart = history.snapshot?.let { it.hasAnnualCoverage && !it.containsAggregateEstimates } == true
         val start = completedSeconds
         val before = atmosphere.atmosphericWaterKg + surface.totalWaterKg
         val fields = Array(7) { DoubleArray(surface.mapping.tileWidth * surface.mapping.tileHeight) }
@@ -71,13 +81,7 @@ internal class FastClimateStepper(
         val routingBefore = hydrology.completedRoutingPasses
         val representativeCloud = DoubleArray(count)
         val representativeHumidity = DoubleArray(count)
-        val plan = ClimatePhasePlan(start, seconds, normals.yearSeconds, normals.initialYearFraction)
-        val seasonalTemperature = Array(4) { DoubleArray(count) }
-        val seasonalRain = Array(4) { DoubleArray(count) }
-        val seasonalSeconds = DoubleArray(4)
-        val minimum = DoubleArray(count) { Double.POSITIVE_INFINITY }
-        val maximum = DoubleArray(count) { Double.NEGATIVE_INFINITY }
-        val peak = DoubleArray(count)
+        val plan = ClimatePhasePlan(start, seconds, normals.yearSeconds)
         var phaseClock = start
         var evaporated = 0.0
         var rainfall = 0.0
@@ -87,13 +91,10 @@ internal class FastClimateStepper(
             val phaseStart = phaseClock
             val phaseSeconds = phase.seconds
             val phaseDays = phaseSeconds / DAY_SECONDS
-            val event = if (phase.season == null) normals.estimate(phase.forcingStart + phase.forcingSeconds / 2, history.snapshot)
-                else normals.estimateSeason(phase.forcingStart, phase.forcingSeconds, phase.season, history.snapshot)
-            val estimate = if (phase.season == null) normals.estimate(phaseStart + phaseSeconds / 2, history.snapshot) else event
-            val demands = DoubleArray(count)
-            val oldTemperature = DoubleArray(count)
-            val newTemperature = DoubleArray(count)
-            val integral = DoubleArray(count)
+            // Forcing is sampled on an absolute calendar, independent of worker transaction size.
+            val estimate = normals.estimate(phase.forcingStart + phase.forcingSeconds / 2, calibration)
+            val event = estimate
+            actualRain.fill(0.0)
             surface.beginUpdate()
             for (c in 0 until count) {
                 val old = atmosphere.surfaceThermalState[c]
@@ -106,50 +107,39 @@ internal class FastClimateStepper(
                 oldTemperature[c] = old - 273.15
                 newTemperature[c] = next - 273.15
                 relaxationEnergy += surface.heatCapacityJm2K(c) * (next - old) * config.cellArea
-                // Coarse evaporation demand: finite store limited; latent heat is not resolved here.
-                val potential = 3.0 * ((next - 273.15) / 30).coerceIn(0.0, 1.5) * phaseDays
-                val actual = surface.evaporate(c, potential)
+                // 0–4.5 mm/day is an energy-limited PET proxy (~0–128 W/m² latent heat).
+                // Half exchange on each side of rainfall limits ordering error in a ten-day step.
+                potential[c] = 3.0 * ((next - 273.15 + 5) / 35).coerceIn(0.0, 1.5) * phaseDays
+                val actual = surface.evaporate(c, potential[c] / 2)
                 atmosphere.receiveEffectiveMoistureMm(c, actual)
                 evaporated += actual * config.cellArea
-                val wetPhase = if (event.wetAnomaly(c) >= 0.0) 0 else 1
-                demands[c] = if (phase.wetSlot == wetPhase) estimate.precipitationMmPerDay(c) * 2 * phaseDays else 0.0
+                water[c] = atmosphere.effectiveMoistureMmAt(c)
+                phaseMeanMoisture[c] = water[c]
+                requestedRain += estimate.precipitationMmPerDay(c) * phaseDays * config.cellArea
             }
-            val demand = demands.sum()
-            requestedRain += demand * config.cellArea
-            // Rain cannot remove the unsaturated vapor needed by the current
-            // climate air state. Only supersaturated column water funds rain.
-            var available = 0.0
+            transport.advance(water, actualRain, phaseSeconds,
+                ((phaseStart + phaseSeconds / 2) / normals.yearSeconds + normals.initialYearFraction) % 1.0,
+                surface::orographicUpliftMetersPerSecond, atmosphere::saturatedVaporMmAt, newTemperature, estimate::wetAnomaly)
+            val wetFractions = DoubleArray(count) { c ->
+                (0.25 + 0.15 * event.wetAnomaly(c)).coerceIn(0.1, 0.4)
+            }
             for (c in 0 until count) {
-                val capacity = atmosphere.saturatedVaporMmAt(c,
-                    newTemperature[c] + 273.15 - MoistAtmosphere.CLIMATE_AIR_SURFACE_OFFSET_K)
-                precipitableMoisture[c] = max(0.0, atmosphere.effectiveMoistureMmAt(c) - capacity)
-                available += precipitableMoisture[c]
+                // Commit the transported column inventory, never a separate persistent reservoir.
+                atmosphere.withdrawEffectiveMoistureMm(c, atmosphere.effectiveMoistureMmAt(c))
+                atmosphere.receiveEffectiveMoistureMm(c, water[c])
+                phaseMeanMoisture[c] = (phaseMeanMoisture[c] + water[c]) / 2
+                surface.receiveClimateRain(c, actualRain[c], wetFractions[c])
+                rainfall += actualRain[c] * config.cellArea
             }
-            val fraction = if (available > 0.0) min(1.0, demand / available) else 0.0
-            var withdrawn = 0.0
-            for (c in 0 until count) {
-                val beforeRain = atmosphere.effectiveMoistureMmAt(c)
-                withdrawn += atmosphere.withdrawEffectiveMoistureMm(c, precipitableMoisture[c] * fraction)
-                phaseMeanMoisture[c] = (beforeRain + atmosphere.effectiveMoistureMmAt(c)) / 2
-            }
-            // Distribute only the actual withdrawn budget, including its final funded remainder.
-            var remainingWater = withdrawn
-            var remainingDemand = demand
-            val actualRain = DoubleArray(count)
-            val wetFractions = DoubleArray(count) { c -> if (seconds <= 7 * DAY_SECONDS) 1.0 else
-                0.12 + 0.18 * ((event.wetAnomaly(c) + 1) / 2).coerceIn(0.0, 1.0) }
-            val lastWet = demands.indexOfLast { it > 0.0 }
-            for (c in 0 until count) {
-                if (demands[c] == 0.0) continue
-                val amount = if (c == lastWet) remainingWater else min(remainingWater, remainingWater * (demands[c] / remainingDemand))
-                actualRain[c] = amount
-                surface.receiveClimateRain(c, amount, wetFractions[c])
-                remainingWater -= amount
-                remainingDemand -= demands[c]
-            }
-            rainfall += withdrawn * config.cellArea
             surface.finishClimateStep(phaseSeconds)
+            for (c in 0 until count) {
+                val actual = surface.evaporate(c, potential[c] / 2)
+                atmosphere.receiveEffectiveMoistureMm(c, actual)
+                evaporated += actual * config.cellArea
+            }
+            soilExposureSeconds += phaseSeconds
             for (tile in fields[0].indices) {
+                soilExposure[tile] += (surface.soil[tile] / 120.0).coerceIn(0.0, 1.0) * phaseSeconds
                 fields[0][tile] = max(fields[0][tile], surface.peakRainRate[tile])
                 fields[1][tile] += surface.rain[tile]
                 fields[2][tile] += surface.drainage[tile]
@@ -162,21 +152,17 @@ internal class FastClimateStepper(
             for (tile in throughput.indices) throughput[tile] += hydrology.routedMmTiles(tile % hydrology.width, tile / hydrology.width)
             for (lake in lakeInflow.indices) lakeInflow[lake] += hydrology.lakeInflowMmTilesLastPeriod(lake)
             outlet += hydrology.outletMmTilesLastPeriod
-            if (plan.aggregate) {
-                val season = phase.season!!
-                seasonalSeconds[season] += phaseSeconds
-                for (c in 0 until count) {
-                    seasonalTemperature[season][c] += integral[c]
-                    seasonalRain[season][c] += actualRain[c]
-                    minimum[c] = min(minimum[c], min(oldTemperature[c], newTemperature[c]))
-                    maximum[c] = max(maximum[c], max(oldTemperature[c], newTemperature[c]))
-                    peak[c] = max(peak[c], actualRain[c] * 3600 / (phaseSeconds * wetFractions[c]))
-                }
-            } else {
-                history.observeInterval(ClimateIntervalSummary(config.width, config.height, phaseStart, phaseSeconds,
-                    integral, actualRain, DoubleArray(count) { min(oldTemperature[it], newTemperature[it]) },
-                    DoubleArray(count) { max(oldTemperature[it], newTemperature[it]) },
-                    DoubleArray(count) { actualRain[it] * 3600 / (phaseSeconds * wetFractions[it]) }))
+            val yearsBefore = history.observedYears
+            history.observeInterval(ClimateIntervalSummary(config.width, config.height, phaseStart, phaseSeconds,
+                integral, actualRain, DoubleArray(count) { min(oldTemperature[it], newTemperature[it]) },
+                DoubleArray(count) { max(oldTemperature[it], newTemperature[it]) },
+                DoubleArray(count) { actualRain[it] * 3600 / (phaseSeconds * wetFractions[it]) }), modeled = true)
+            // Annual ecology uses the actual intervening years, even in a twenty-year transaction.
+            if (history.observedYears > yearsBefore) {
+                for (tile in soilExposure.indices) soilExposure[tile] /= soilExposureSeconds
+                evolveEcology(min(normals.yearSeconds, soilExposureSeconds), soilExposure)
+                soilExposure.fill(0.0)
+                soilExposureSeconds = 0.0
             }
             // A representative column depends on rain RATE, not accumulated rain
             // depth: the latter turned longer quanta into near-uniform overcast.
@@ -191,13 +177,6 @@ internal class FastClimateStepper(
             }
             phaseClock += phaseSeconds
         }
-        if (plan.aggregate) {
-            for (s in 0..3) for (c in 0 until count) {
-                seasonalTemperature[s][c] /= seasonalSeconds[s]
-                seasonalRain[s][c] /= seasonalSeconds[s]
-            }
-            history.observeAggregate(start, seconds, SeasonalAggregate(seasonalTemperature, seasonalRain, minimum, maximum, peak))
-        }
         hydrology.publishClimateThroughput(representedHydrologySeconds, throughput, lakeInflow, outlet)
         val after = atmosphere.atmosphericWaterKg + surface.totalWaterKg
         val residual = (after - before) / max(1.0, abs(before))
@@ -206,7 +185,7 @@ internal class FastClimateStepper(
         return FastClimateResult(ClimateIntervalDiagnostics(start, seconds, plan.phases.size, before, after, residual,
             evaporated, rainfall, requestedRain, relaxationEnergy, atmosphere.completedSteps,
             routingPasses = hydrology.completedRoutingPasses - routingBefore, representedHydrologySeconds = representedHydrologySeconds,
-            aggregateYears = plan.aggregate, ecologyEligibleSeconds = if (plan.aggregate || !historyEligibleAtStart) 0.0 else min(seconds, normals.yearSeconds / 4)), fields, representativeCloud, representativeHumidity)
+            aggregateYears = false, ecologyEligibleSeconds = seconds), fields, representativeCloud, representativeHumidity)
             .also { latest = it }
     }
 

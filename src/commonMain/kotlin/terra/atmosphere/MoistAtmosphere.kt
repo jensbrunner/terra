@@ -215,14 +215,18 @@ class MoistAtmosphere(
         val before = atmosphericWaterKg
         val energyBefore = diagnostics().totalModelEnergyJoules
         val temperature = DoubleArray(config.cellCount) { surfaceTemperature[it] - CLIMATE_AIR_SURFACE_OFFSET_K }
-        val circulation = flow.initializeClimateCirculation(temperature)
+        val circulation = flow.initializeClimateCirculation(temperature, atWorldSeconds / (7 * 86400.0))
         val vaporTarget = 1.0
         var vaporTotal = 0.0
         var cloudTotal = 0.0
         for (i in water.indices) {
             val depth = flow.depthAt(i)
             val vaporLimit = saturatedVaporMmAt(i, temperature[i])
-            val vapor = min(water[i], vaporLimit)
+            // A moist mean column contains unresolved saturated parcels. Partition a
+            // small, bounded fraction as cloud without creating any column water.
+            val humidity = water[i] / max(1e-12, vaporLimit)
+            val subgridCloud = min(water[i], 0.3 * ((humidity - 0.75) / 0.25).coerceIn(0.0, 1.0))
+            val vapor = min(max(0.0, water[i] - subgridCloud), vaporLimit)
             val cloud = water[i] - vapor
             columns.values[0][i] = depth * temperature[i]
             columns.values[1][i] = vapor / density

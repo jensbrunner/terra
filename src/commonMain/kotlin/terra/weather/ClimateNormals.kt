@@ -60,6 +60,7 @@ internal class ClimateNormals(world: World, surface: TerrainMoistSurface, privat
     private val config = surface.mapping.config
     private val count = config.cellCount
     private val anomalies = ClimateAnomalies(world.seed, solar.yearSeconds)
+    private val warmScratch = DoubleArray(count)
     private val prior: ClimateNormalsSnapshot
     private var latestObservation: SeasonalClimateSnapshot? = null
     private var blended: ClimateNormalsSnapshot? = null
@@ -120,6 +121,7 @@ internal class ClimateNormals(world: World, surface: TerrainMoistSurface, privat
     fun normals(observed: SeasonalClimateSnapshot? = null): ClimateNormalsSnapshot {
         if (observed == null) return prior
         require(observed.width == config.width && observed.height == config.height && observed.yearSeconds == solar.yearSeconds)
+        if (observed.containsAggregateEstimates) return prior
         if (observed === latestObservation) return blended!!
         // One post-spin-up year gives 40% observed weight; two or more give 80%.
         val weight = 0.8 * minOf(1.0, observed.observedYears / 2.0)
@@ -139,11 +141,9 @@ internal class ClimateNormals(world: World, surface: TerrainMoistSurface, privat
         val wet = DoubleArray(count)
         val temperature = DoubleArray(count)
         val rain = DoubleArray(count)
+        anomalies.fillGrid(wet, warmScratch, config.width, config.height, start, seconds)
         for (cell in 0 until count) {
-            val x = (cell % config.width + 0.5) / config.width
-            val y = (cell / config.width + 0.5) / config.height
-            wet[cell] = anomalies.meanWet(x, y, start, seconds)
-            val warm = anomalies.meanWarm(x, y, start, seconds)
+            val warm = warmScratch[cell]
             temperature[cell] = normal.temperatureC(season, cell) + 3 * (0.6 * warm - 0.4 * wet[cell])
             rain[cell] = normal.precipitationMmPerDay(season, cell) * (1 + 0.65 * wet[cell])
         }
@@ -161,12 +161,10 @@ internal class ClimateNormals(world: World, surface: TerrainMoistSurface, privat
         val temperature = DoubleArray(count)
         val rain = DoubleArray(count)
         val wetness = DoubleArray(count)
+        anomalies.fillGrid(wetness, warmScratch, config.width, config.height, seconds)
         for (cell in 0 until count) {
-            val longitude = (cell % config.width + 0.5) / config.width
-            val northward = (cell / config.width + 0.5) / config.height
-            val wet = anomalies.wet(longitude, northward, seconds)
-            val warm = anomalies.warm(longitude, northward, seconds)
-            wetness[cell] = wet
+            val wet = wetness[cell]
+            val warm = warmScratch[cell]
             temperature[cell] = normal.temperatureC(first, cell) * (1 - fraction) + normal.temperatureC(second, cell) * fraction +
                 3 * (0.6 * warm - 0.4 * wet)
             rain[cell] = (normal.precipitationMmPerDay(first, cell) * (1 - fraction) +

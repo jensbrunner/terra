@@ -19,7 +19,7 @@ import kotlin.math.min
  * Atmosphere and terrain wrap longitude; hydrology returns river discharge to its finite ocean.
  */
 class DynamicalWeather(
-    world: World,
+    private val world: World,
     private val hydrology: HydrologySimulation,
     val config: DryAtmosphereConfig = DryAtmosphereConfig(),
     val physics: MoistPhysicsConfig = MoistPhysicsConfig(),
@@ -110,7 +110,9 @@ class DynamicalWeather(
     /** Explicit owner entry only. Automatic speed/fidelity selection is a later step. */
     internal fun advanceClimateInterval(seconds: Double): ClimateIntervalDiagnostics {
         require(seconds.isFinite() && seconds >= FastClimateStepper.MIN_INTERVAL_SECONDS && seconds <= 20 * physics.solar.yearSeconds)
-        val engine = fastClimate ?: FastClimateStepper(surface, hydrology, model, climate, climateNormals, elapsedSeconds)
+        val engine = fastClimate ?: FastClimateStepper(surface, hydrology, model, climate, climateNormals, elapsedSeconds) { duration, moisture ->
+            world.advanceClimateBiomes(seasonalClimate, duration, moisture)
+        }
         val result = engine.advance(seconds)
         fastClimate = engine
         detailedReentryPending = false
