@@ -3,13 +3,11 @@ package terra.render
 import korlibs.image.color.RGBA
 import terra.weather.WeatherModel
 import terra.weather.WeatherFieldQuality
-import terra.weather.SynopticPattern
 import kotlin.math.exp
 import kotlin.math.floor
-import kotlin.math.sin
-import kotlin.math.PI
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /** Display-only cloud detail. No water, rain, or atmosphere state is written here. */
 internal class CloudRenderer(private val width: Int, private val height: Int, seed: Int) {
@@ -26,6 +24,7 @@ internal class CloudRenderer(private val width: Int, private val height: Int, se
     var frame = RasterCanvas(pixelWidth, pixelHeight).finish()
         private set
     private val cloud = FloatArray(width * height)
+    private val coverage = FloatArray(width * height)
     private val rain = FloatArray(width * height)
     private val instability = FloatArray(width * height)
     private val windU = FloatArray(width * height)
@@ -45,7 +44,6 @@ internal class CloudRenderer(private val width: Int, private val height: Int, se
     init { reset(seed) }
 
     fun reset(seed: Int) {
-        val pattern = SynopticPattern(seed, height.toDouble() / width)
         for (y in 0 until pixelHeight) for (x in 0 until pixelWidth) {
             val i = y * pixelWidth + x
             val longitude = x.toDouble() / pixelWidth
@@ -55,30 +53,34 @@ internal class CloudRenderer(private val width: Int, private val height: Int, se
             val warp = noise(longitude, tileY, 4, max(8.0, height / 4.0), seed xor 0x71b9) - 0.5
             val broadValue = noise(longitude + warp * 0.13, tileY + warp * height * 0.16,
                 max(3, (width / 22.0).roundToInt()), max(6.0, height / 9.0), seed)
-            val frontal = pattern.cloudBands(longitude, 1 - (y + 0.5) / pixelHeight, coreRadiusSquared = 0.0005)
-            broadSource[i] = (0.65 * smoothstep(0.12, 0.65, frontal) +
-                0.35 * smoothstep(0.25, 0.75, broadValue)).toFloat()
+            broadSource[i] = smoothstep(0.25, 0.75, broadValue).toFloat()
             fineSource[i] = (0.65 * noise(longitude, tileY,
                 max(2, (width / 2.8).roundToInt()), 2.8, seed xor 0x51a3) +
                 0.35 * noise(longitude, tileY, max(2, width), 1.0, seed xor 0x195b)).toFloat()
         }
-        // A steady streamfunction-like flow for the illustrative climate texture.
-        // Precompute once; no synthetic wind is fed to the atmosphere or inspector.
-        val radius = minOf(width, height) * 0.20
+        // Seeded streamfunction: neutral display circulation, no storm centers
+        // or latitude envelope. The whole field is scaled, preserving its curl.
+        val stream = FloatArray(width * height) { i ->
+            val east = (i % width + 0.5) / width
+            val y = (i / width + 0.5)
+            (minOf(width, height) * 60 * (0.7 * noise(east, y, 4, max(1.0, height / 4.0), seed xor 0x173e) +
+                0.3 * noise(east, y, 8, max(1.0, height / 8.0), seed xor 0x528b))).toFloat()
+        }
+        var maximumSpeed = 0.0
         for (y in 0 until height) for (x in 0 until width) {
-            val latitude = (y + 0.5) / height
-            var u = 30 + 35 * sin(latitude * PI * 2) * sin(latitude * PI * 2)
-            var v = 0.0
-            for (hemisphere in 0..1) for (system in 0..1) {
-                val centerX = width * pattern.centerX(hemisphere, system)
-                val dx = x + 0.5 - centerX - floor((x + 0.5 - centerX) / width + 0.5) * width
-                val dy = y + 0.5 - height * (1 - pattern.centerNorth(hemisphere))
-                val turn = (if (hemisphere == 0) 1 else -1) * 170 * exp(-(dx * dx + dy * dy) / (2 * radius * radius))
-                u -= dy / radius * turn
-                v += dx / radius * turn
-            }
-            illustrativeU[y * width + x] = u.toFloat()
-            illustrativeV[y * width + x] = v.toFloat()
+            val i = y * width + x
+            val top = maxOf(0, y - 1)
+            val bottom = minOf(height - 1, y + 1)
+            val u = 30.0 + (stream[bottom * width + x] - stream[top * width + x]) / maxOf(1, bottom - top)
+            val v = -(stream[y * width + (x + 1) % width] - stream[y * width + (x + width - 1) % width]) / 2.0
+            illustrativeU[i] = u.toFloat(); illustrativeV[i] = v.toFloat()
+            maximumSpeed = max(maximumSpeed, sqrt(u * u + v * v))
+        }
+        val velocityScale = if (maximumSpeed > 0) 120.0 / maximumSpeed else 1.0
+        for (i in illustrativeU.indices) {
+            // One illustrative day is 60 real visual seconds: <= 2 tiles/s.
+            illustrativeU[i] = (illustrativeU[i] * velocityScale).toFloat()
+            illustrativeV[i] = (illustrativeV[i] * velocityScale).toFloat()
         }
         broadSource.copyInto(broad)
         fineSource.copyInto(fine)
@@ -108,6 +110,8 @@ internal class CloudRenderer(private val width: Int, private val height: Int, se
             val i = y * width + x
             val targetWater = max(0.0, weather.cloudWaterMm(x, y))
             cloud[i] = (cloud[i] + response * (targetWater - cloud[i])).toFloat()
+            val targetCoverage = weather.cloudCover(x, y).coerceIn(0.0, 1.0)
+            coverage[i] = (coverage[i] + response * (targetCoverage - coverage[i])).toFloat()
             val rainfall = max(0.0, weather.precipitationMmPerHour(x, y))
             rain[i] = (rainfall / (rainfall + 0.8)).toFloat()
             // A visual regime proxy, not an independent convective cloud or rain source.
@@ -131,9 +135,9 @@ internal class CloudRenderer(private val width: Int, private val height: Int, se
             val convective = sampleTile(instability, x, y) * wet
             val small = fine[i].toDouble()
             val billow = smoothstep(0.2, 0.8, small)
-            val coverage = 0.82 * (1 - exp(-water / 0.08))
+            val cover = sampleTile(coverage, x, y)
             val structure = 0.8 * broad[i] + 0.2 * small
-            val edge = smoothstep(1 - coverage - 0.09, 1 - coverage + 0.09, structure)
+            val edge = smoothstep(1 - cover - 0.09, 1 - cover + 0.09, structure)
             val optical = 1 - exp(-water / 0.10)
             val alpha = (edge * optical * (0.78 + 0.22 * billow)).coerceIn(0.0, 0.94)
             // Gentle upper-left highlights and cool shaded cores distinguish dense rain cloud.

@@ -1,5 +1,9 @@
 # Moist atmosphere prototype
 
+Latest correction: [cloud recovery after centuries of fast climate](CLOUD_REENTRY.md).
+Coarse rain can no longer consume unsaturated vapor, and detailed reentry retains
+local climate temperature differences while preserving each column's water.
+
 Open the standalone cloud/rain preview:
 
 ```sh
@@ -534,3 +538,14 @@ visible mixture. Short hour/month desktop observations reduce mean publication
 work from about 19–21 ms to 7–8 ms. Seven focused checks and 16 GPU samples pass;
 manual native-window inspection remains open because desktop automation could
 not attach to the Java process.
+
+
+[Cloud geography and coupling](CLOUD_COUPLING.md) records the 12 November repair.
+Initial moisture now has a planet-wide background independent of temporary seeded
+lows. Rendering uses model cloud cover and neutral advected detail; fast climate
+adds a saturation-based humidity/cloud diagnostic alongside funded rainfall.
+These proxies do not enter the water/energy inventory or biome history. Public
+weather methods, 10 Hz publication and existing conservative convection remain.
+The initial inventory changes for new worlds; continuing worlds are not reseeded.
+Latitude diagnostics and before/after previews accompany 21 focused checks and
+one short desktop smoke, without claiming calibrated global circulation.

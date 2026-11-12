@@ -31,6 +31,8 @@ data class TerrainGenerationSettings(
     val noiseLacunarity: Double = 2.0,
     val seaLevel: Double = 0.305,
     val mountainThreshold: Double = 0.6,
+    val mountainRelief: Double = 0.32,
+    val erosionStrength: Double = 0.45,
 
     val equatorTemperatureC: Double = 30.0,
     val poleTemperatureDropC: Double = 45.0,

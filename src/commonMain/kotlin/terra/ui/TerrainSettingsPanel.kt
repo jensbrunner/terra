@@ -37,8 +37,11 @@ class TerrainSettingsPanel(
     private val onSettingsChanged: (TerrainGenerationSettings) -> Unit
 ) {
     private var settings = initialSettings
+    private var appliedSettings = initialSettings
     private val menus = mutableMapOf<SettingsMenuKind, Container>()
     private var biomeSummaryLabel: Text? = null
+    private val pendingLabels = mutableListOf<Text>()
+    private val applyButtons = mutableListOf<SolidRect>()
 
     init {
         drawMenuButtons(parent)
@@ -46,6 +49,8 @@ class TerrainSettingsPanel(
     }
 
     fun hasOpenMenu(): Boolean = menus.values.any { it.visible }
+
+    fun closeMenus() { menus.values.forEach { it.visible = false } }
 
     fun updateBiomeSummary(summary: String) {
         biomeSummaryLabel?.text = summary
@@ -71,11 +76,11 @@ class TerrainSettingsPanel(
 
     private fun drawSettingsMenus(parent: Container) {
         createSettingsMenu(
-            parent, SettingsMenuKind.ELEVATION, "Elevation settings", 24.0, 108.0, 430.0, 690.0,
-            "Elevation and landform FBM", elevationSliders(), showBiomeSummary = true
+            parent, SettingsMenuKind.ELEVATION, "Elevation settings", 24.0, 108.0, 430.0, 842.0,
+            "Continents, ranges and erosion", elevationSliders(), showBiomeSummary = true
         )
         createSettingsMenu(
-            parent, SettingsMenuKind.CLIMATE, "Climate settings", 986.0, 126.0, 430.0, 310.0,
+            parent, SettingsMenuKind.CLIMATE, "Climate settings", 986.0, 138.0, 430.0, 310.0,
             "Geographic temperature baseline", climateSliders()
         )
     }
@@ -94,7 +99,9 @@ class TerrainSettingsPanel(
         slider("Detail octaves", { it.detailOctaves.toDouble() }, 1.0, 8.0, 1.0, 0) { s, v -> s.copy(detailOctaves = v.toInt()) },
         slider("Detail strength", { it.detailStrength }, 0.0, 0.4, 0.01, 2) { s, v -> s.copy(detailStrength = v) },
         slider("FBM persistence", { it.noisePersistence }, 0.1, 0.9, 0.01, 2) { s, v -> s.copy(noisePersistence = v) },
-        slider("FBM lacunarity", { it.noiseLacunarity }, 1.1, 4.0, 0.05, 2) { s, v -> s.copy(noiseLacunarity = v) }
+        slider("FBM lacunarity", { it.noiseLacunarity }, 1.1, 4.0, 0.05, 2) { s, v -> s.copy(noiseLacunarity = v) },
+        slider("Mountain relief", { it.mountainRelief }, 0.0, 0.6, 0.01, 2) { s, v -> s.copy(mountainRelief = v) },
+        slider("Erosion strength", { it.erosionStrength }, 0.0, 1.0, 0.05, 2) { s, v -> s.copy(erosionStrength = v) }
     )
 
     private fun climateSliders() = listOf(
@@ -113,7 +120,7 @@ class TerrainSettingsPanel(
         update: (TerrainGenerationSettings, Double) -> TerrainGenerationSettings
     ) = SettingSlider(label, value(settings), minimum, maximum, step, decimals) { newValue ->
         settings = update(settings, newValue)
-        onSettingsChanged(settings)
+        refreshPendingChanges()
     }
 
     private fun createSettingsMenu(
@@ -149,6 +156,20 @@ class TerrainSettingsPanel(
                 ).xy(16.0, 48.0)
             }
             settingsColumn(sectionTitle, 16.0, sectionY, width - 32.0, sliders)
+            pendingLabels += text("Changes rebuild the world and restart time.", font = font,
+                textSize = 12.0, color = Colors["#e5bd72"]).xy(16.0, height - 66.0)
+            val apply = solidRect(width - 32.0, 34.0, Colors["#223538"]).xy(16.0, height - 48.0)
+            applyButtons += apply
+            val caption = text("Apply & rebuild world", font = font, textSize = 14.0,
+                color = Colors["#e3e8d7"]).xy(26.0, height - 40.0)
+            fun applyChanges() {
+                if (settings == appliedSettings) return
+                appliedSettings = settings
+                onSettingsChanged(settings)
+                refreshPendingChanges()
+            }
+            apply.mouse { click { applyChanges() } }
+            caption.mouse { click { applyChanges() } }
         }.xy(x, y)
 
         val dragHandler: (Double, Double) -> Unit = { dx, dy ->
@@ -173,6 +194,12 @@ class TerrainSettingsPanel(
         }
 
         menus[kind] = panel
+    }
+
+    private fun refreshPendingChanges() {
+        val pending = settings != appliedSettings
+        pendingLabels.forEach { it.text = if (pending) "Unapplied changes · rebuild restarts time" else "Changes rebuild the world and restart time." }
+        applyButtons.forEach { it.color = Colors[if (pending) "#49776b" else "#223538"] }
     }
 
     private fun Container.settingsColumn(

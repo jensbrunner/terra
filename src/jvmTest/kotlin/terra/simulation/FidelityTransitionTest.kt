@@ -72,6 +72,70 @@ class FidelityTransitionTest {
     }
 
     @Test
+    fun centuriesOfClimateDoNotLeaveDetailedWeatherCloudlessForTwentyHours() {
+        val owner = WorldSimulation(request.copy(width = 48, height = 36,
+            atmosphere = DryAtmosphereConfig(width = 24, height = 18)))
+        fun capture() = owner.snapshot(SimulationProgress(1, 1, 0, owner.completedSeconds,
+            SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, day, false, 0.0, 0.0, 0))
+        owner.advance(20.0, SimulationSpeed.ONE_HOUR)
+        val initialWater = capture().diagnostics!!.totalWaterKg
+        repeat(255) { owner.advanceClimateInterval(365 * day) }
+        val coarse = capture()
+        val records = StringBuilder()
+        val output = java.io.File("build/reports/clouds/reentry-255.jsonl")
+        output.parentFile.mkdirs()
+        fun record(label: String, snapshot: WorldPresentationSnapshot) {
+            val w = snapshot.weather
+            val n = w.width * w.height.toDouble()
+            fun mean(field: (Int, Int) -> Double) =
+                (0 until w.height).sumOf { y -> (0 until w.width).sumOf { x -> field(x, y) } } / n
+            // Fresh texture each time: an old representative frame cannot hide missing condensate.
+            val renderer = terra.render.CloudRenderer(w.width, w.height, snapshot.world.seed)
+            renderer.update(w)
+            val frame = renderer.frame
+            val image = java.awt.image.BufferedImage(frame.width, frame.height * 2,
+                java.awt.image.BufferedImage.TYPE_INT_RGB)
+            var visible = 0
+            for (y in 0 until frame.height) for (x in 0 until frame.width) {
+                val pixel = frame[x, y]
+                val a = pixel.a / 255.0
+                image.setRGB(x, y, java.awt.Color((27 * (1 - a) + pixel.r * a).toInt(),
+                    (65 * (1 - a) + pixel.g * a).toInt(), (86 * (1 - a) + pixel.b * a).toInt()).rgb)
+                val raw = (255 * (1 - kotlin.math.exp(-w.cloudWaterMm(x / 2, y / 2) / 0.15))).toInt().coerceIn(0, 255)
+                image.setRGB(x, y + frame.height, java.awt.Color(raw, raw, raw).rgb)
+                if (pixel.a > 24) visible++
+            }
+            javax.imageio.ImageIO.write(image, "png", java.io.File(output.parentFile, "reentry-$label.png"))
+            val row = """{"label":"$label","seconds":${owner.completedSeconds},"quality":"${w.fieldSemantics.quality}","water_mm":${mean(w::atmosphericWaterMm)},"cloud_mm":${mean(w::cloudWaterMm)},"rh":${mean(w::relativeHumidity)},"air_c":${mean(w::airTemperatureC)},"surface_c":${mean(w::surfaceTemperatureC)},"abs_wind_tiles_day":${mean { x, y -> abs(w.windUTilesPerDay(x, y)) + abs(w.windVTilesPerDay(x, y)) }},"visible_fraction":${visible.toDouble() / (frame.width * frame.height)}}"""
+            records.appendLine(row)
+            println("REENTRY $row")
+            if (label == "detailed1") assertTrue(visible > 0, "This moist fixture should recover resolved clouds within one hour")
+        }
+        record("climate255", coarse)
+        owner.setFidelity(SimulationFidelity.DETAILED)
+        val pending = capture()
+        record("handoff", pending)
+        println("REENTRY_HANDOFF ${pending.lastHandoff}")
+        for (hour in 1..20) {
+            repeat(180) { owner.advance(20.0, SimulationSpeed.ONE_HOUR) }
+            if (hour in listOf(1, 6, 20)) record("detailed$hour", capture())
+        }
+        val resolved = capture()
+        assertEquals(coarse.progress.completedSeconds + 20 * 3600, owner.completedSeconds)
+        assertEquals(initialWater, resolved.diagnostics!!.totalWaterKg, initialWater * 1e-10)
+        assertTrue(abs(resolved.diagnostics.relativeWaterResidual) < 1e-10)
+        val renderer = terra.render.CloudRenderer(resolved.world.width, resolved.world.height, resolved.world.seed)
+        renderer.update(resolved.weather)
+        var visible = 0
+        for (y in 0 until renderer.frame.height) for (x in 0 until renderer.frame.width)
+            if (renderer.frame[x, y].a > 24) visible++
+        output.writeText(records.toString())
+        println("REENTRY_WATER relative_residual=${resolved.diagnostics.relativeWaterResidual}")
+        println("REENTRY_VISIBLE pixels=$visible")
+        assertTrue(visible > 0, "A moist world must recover visible resolved clouds within twenty hours")
+    }
+
+    @Test
     fun workerAcknowledgesPausedFidelityChangesAndResumesSameGeneration() {
         val worker = SimulationWorker(request)
         try {

@@ -31,6 +31,8 @@ class FastClimateStepperTest {
         val daily = capture()
         val frozenRain = daily.weather.rainMmThisUpdate(3, 3)
         val frozenSoil = daily.weather.soilWaterMm(3, 3)
+        val frozenHumidity = daily.weather.relativeHumidity(3, 3)
+        val frozenCloud = daily.weather.cloudWaterMm(3, 3)
         assertEquals(20 + day, owner.completedSeconds)
         assertEquals(1L, first.detailedCompletedSteps)
         assertEquals(2, first.subperiods)
@@ -59,6 +61,8 @@ class FastClimateStepperTest {
         assertEquals(first.waterBeforeKg, week.waterAfterKg, week.waterAfterKg * 1e-12)
         assertEquals(frozenRain, daily.weather.rainMmThisUpdate(3, 3))
         assertEquals(frozenSoil, daily.weather.soilWaterMm(3, 3))
+        assertEquals(frozenHumidity, daily.weather.relativeHumidity(3, 3))
+        assertEquals(frozenCloud, daily.weather.cloudWaterMm(3, 3))
         var hasEventPeak = false
         for (y in 0 until request.height) for (x in 0 until request.width) {
             val weather = weekly.weather
@@ -72,6 +76,7 @@ class FastClimateStepperTest {
             assertTrue(events.intenseRainMm >= 0 && events.intenseRainMm <= weather.rainMmThisUpdate(x, y) + 1e-12)
             assertTrue(weather.soilWaterMm(x, y) in 0.0..250.00000001)
             assertTrue(weather.atmosphericWaterMm(x, y) >= 0.0)
+            assertTrue(weather.relativeHumidity(x, y) in 0.0..1.0)
             assertTrue(weather.cloudWaterMm(x, y) >= 0.0)
             assertTrue(weather.surfaceTemperatureC(x, y).isFinite())
             assertEquals(weather.rainMmThisUpdate(x, y) * 3600 / (7 * day), weather.precipitationMmPerHour(x, y), 1e-12)
@@ -105,6 +110,17 @@ class FastClimateStepperTest {
     }
 
     @Test
+    fun humidityCloudEstimateNeedsMoistureButNotRain() {
+        val humid = FastClimateStepper.humidityProxy(10.0, 10.0)
+        val dry = FastClimateStepper.humidityProxy(1.0, 10.0)
+        assertTrue(FastClimateStepper.cloudProxyMm(10.0, humid, 0.0) > 0.0)
+        assertEquals(0.0, FastClimateStepper.cloudProxyMm(1.0, dry, 0.0))
+        assertEquals(0.0, FastClimateStepper.cloudProxyMm(0.0, 0.0, 0.0))
+        assertTrue(FastClimateStepper.cloudProxyMm(0.01, 1.0, 0.0) <= 0.01)
+        assertEquals(1.0, FastClimateStepper.humidityProxy(20.0, 10.0))
+    }
+
+    @Test
     fun rainDemandCannotCreateWaterInAnExhaustedWorld() {
         val settings = TerrainGenerationSettings(baseElevation = 0.1, continentStrength = 0.0, regionalStrength = 0.0, detailStrength = 0.0)
         val world = World(31742, 15, 11, settings)
@@ -117,7 +133,12 @@ class FastClimateStepperTest {
         val history = SeasonalClimate(config.width, config.height, 365 * day)
         val stepper = FastClimateStepper(surface, hydrology, atmosphere, history,
             ClimateNormals(world, surface, SolarConfig()), 0.0)
-        val result = stepper.advance(day).diagnostics
+        val empty = stepper.advance(day)
+        val result = empty.diagnostics
+        for (c in 0 until config.cellCount) {
+            assertEquals(0.0, empty.cloudMm(c))
+            assertEquals(0.0, empty.relativeHumidity(c))
+        }
         assertTrue(result.requestedRainfallKg > 0)
         assertEquals(0.0, result.waterBeforeKg)
         assertEquals(0.0, result.waterAfterKg)
@@ -127,6 +148,28 @@ class FastClimateStepperTest {
         assertEquals(day, history.elapsedSeconds)
         assertTrue(surface.rain.all { it == 0.0 })
         assertEquals(0.0, hydrology.waterInventory().totalWaterMmTiles)
+    }
+
+    @Test
+    fun unsaturatedAtmosphericWaterCannotBeSpentAsRain() {
+        val settings = TerrainGenerationSettings(baseElevation = 0.1, continentStrength = 0.0,
+            regionalStrength = 0.0, detailStrength = 0.0)
+        val world = World(31742, 15, 11, settings)
+        val hydrology = HydrologySimulation(HydrologyTopology(world))
+        hydrology.evaporateOceanWaterMmTiles(hydrology.oceanWaterMmTiles)
+        val surface = TerrainMoistSurface(world, AtmosphereTileMapping(world.width, world.height, config), hydrology)
+        val atmosphere = MoistAtmosphere(config, scenario = DryScenario.REST, surface = surface,
+            initializeColumns = { _, _ -> MoistCell(relativeHumidity = 0.25, surfaceWaterKgM2 = 0.0) })
+        val water = atmosphere.atmosphericWaterKg
+        val stepper = FastClimateStepper(surface, hydrology, atmosphere,
+            SeasonalClimate(config.width, config.height, 365 * day),
+            ClimateNormals(world, surface, SolarConfig()), 0.0)
+        val result = stepper.advance(3600.0).diagnostics
+        assertTrue(water > 0 && result.requestedRainfallKg > 0)
+        assertEquals(0.0, result.evaporationKg)
+        assertEquals(0.0, result.rainfallKg)
+        assertEquals(water, atmosphere.atmosphericWaterKg)
+        assertEquals(0L, atmosphere.completedSteps)
     }
 
     @Test

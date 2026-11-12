@@ -29,11 +29,11 @@ internal class DynamicalWeatherPresentation(
     }
 
     private fun index(x: Int, y: Int) = y * width + x
-    override fun relativeHumidity(x: Int, y: Int) = if (climate != null) (atmosphericWaterMm(x, y) / 20).coerceIn(0.0, 1.0) else sample(x, y, view::relativeHumidityAt)
+    override fun relativeHumidity(x: Int, y: Int) = climate?.let { result -> sample(x, y) { cx, cy -> result.relativeHumidity(cy * config.width + cx) } } ?: sample(x, y, view::relativeHumidityAt)
     override fun cloudWaterMm(x: Int, y: Int) = climate?.let { result -> sample(x, y) { cx, cy -> result.cloudMm(cy * config.width + cx) } } ?: sample(x, y, view::cloudWaterMmAt)
     override fun cloudCover(x: Int, y: Int) = 1 - exp(-cloudWaterMm(x, y) / 0.15)
     override fun atmosphericWaterMm(x: Int, y: Int) = if (climate != null) sample(x, y) { cx, cy -> view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy) } else sample(x, y, view::vaporMmAt)
-    override fun airTemperatureC(x: Int, y: Int) = if (climate != null) surfaceTemperatureC(x, y) - 6.0 else sample(x, y, view::temperatureKelvinAt) - 273.15
+    override fun airTemperatureC(x: Int, y: Int) = if (climate != null) surfaceTemperatureC(x, y) - MoistAtmosphere.CLIMATE_AIR_SURFACE_OFFSET_K else sample(x, y, view::temperatureKelvinAt) - 273.15
     override fun surfaceTemperatureC(x: Int, y: Int) = sample(x, y, view::surfaceTemperatureKelvinAt) - 273.15
     override fun windUTilesPerDay(x: Int, y: Int) = if (climate != null) 0.0 else sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
     override fun windVTilesPerDay(x: Int, y: Int) = if (climate != null) 0.0 else -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters

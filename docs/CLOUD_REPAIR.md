@@ -1,5 +1,10 @@
 # Cloud appearance investigation and repair
 
+**Subsequent geography repair:** [CLOUD_COUPLING.md](CLOUD_COUPLING.md) supersedes
+the storm-centered initialization/rendering and rain-only fast clouds below. It
+records the diagnosed equatorial gap, independent moisture background, neutral
+texture and humidity-based fast-cloud estimate. Earlier observations are historical.
+
 **Latest rendering update:** [CLOUD_SMOOTHNESS.md](CLOUD_SMOOTHNESS.md) records the
 subsequent 10 Hz cloud cadence, faster sampling and interrupted-fade continuity.
 Earlier cadence/timing observations below are historical.

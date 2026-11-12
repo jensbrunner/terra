@@ -58,6 +58,15 @@ internal class TerrainMoistSurface(
     val soilWaterMmTiles: Double get() = soil.sum()
     val unacceptedWaterMmTiles: Double get() = if (transferred) 0.0 else drainage.sum() + overflow.sum() + lakeRain.sum() + queuedSoilRain.sum()
 
+    /** Read the initial physical stores without coupling weather initialization to soil constants. */
+    fun initialWaterAvailability(cell: Int): Double {
+        var available = 1 - landFraction[cell]
+        mapping.forCell(cell) { tile, fraction ->
+            available += (soil[tile] / SOIL_CAPACITY_MM).coerceIn(0.0, 1.0) * fraction / mapping.tilesPerCell
+        }
+        return available.coerceIn(0.0, 1.0)
+    }
+
     override fun heatCapacityJm2K(cell: Int) = landFraction[cell] * 2_000_000.0 + (1 - landFraction[cell]) * 41_800_000.0
     override fun albedo(cell: Int) = landFraction[cell] * 0.24 + (1 - landFraction[cell]) * 0.08
 

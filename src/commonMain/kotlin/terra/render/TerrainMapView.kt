@@ -35,6 +35,7 @@ class TerrainMapView(
     private val terrainTileMapData = TileMapData(world.width, world.height, terrainTileSet)
     private val queuedTerrain = BooleanArray(world.width * world.height)
     private val terrainQueue = ArrayDeque<Int>()
+    private val reliefBitmap = Bitmap32(world.width, world.height)
     private var nextOverlay = 0
     private var cloudFrame: RasterFrame? = null
     private val layerWeather = mutableMapOf<WeatherLayer, WeatherModel>()
@@ -66,6 +67,9 @@ class TerrainMapView(
         }
         terrainContainer.scaleX = 1.0 / terrainTileSet.width.toDouble()
         terrainContainer.scaleY = 1.0 / terrainTileSet.height.toDouble()
+
+        updateRelief()
+        parent.image(reliefBitmap) { smoothing = true }
 
         surfaceWaterContainer = parent.container {
             waterFade.image = RasterBlendImage(waterFade.previous, surfaceWaterBitmap).addTo(this) {
@@ -107,6 +111,7 @@ class TerrainMapView(
         val generationChanged = world.generation != newWorld.generation
         world = newWorld
         if (generationChanged) {
+            updateRelief()
             cloudFrame = null
             layerWeather.clear()
             lightingWeather = null
@@ -287,6 +292,24 @@ class TerrainMapView(
     fun selectTile(x: Int, y: Int) {
         selectionBorder.xy(x, y)
         selectionBorder.visible = true
+    }
+
+    fun clearSelection() { selectionBorder.visible = false }
+
+    /** Static topographic light, independent of seasonal lighting and physical temperatures. */
+    private fun updateRelief() {
+        reliefBitmap.lock {
+            for (y in 0 until world.height) for (x in 0 until world.width) {
+                val west = world[x - 1, y].elevation
+                val east = world[x + 1, y].elevation
+                val north = world[x, (y - 1).coerceAtLeast(0)].elevation
+                val south = world[x, (y + 1).coerceAtMost(world.height - 1)].elevation
+                val shade = (0.88 + 6 * (west - east) + 4 * (south - north)).coerceIn(0.55, 1.12)
+                val oceanFactor = if (world[x, y].terrain == Terrain.OCEAN) 0.35 else 1.0
+                val alpha = (abs(1 - shade) * oceanFactor * 255).toInt()
+                reliefBitmap[x, y] = Colors[if (shade < 1) "#10151b" else "#fff1d0"].withA(alpha)
+            }
+        }
     }
 
     private fun createTerrainTileSet(): TileSet {

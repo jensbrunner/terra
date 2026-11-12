@@ -1,5 +1,10 @@
 # Phase 7, Step 7 — detailed/climate handoff
 
+The reconstruction below is historical. The later
+[centuries/cloud reentry repair](CLOUD_REENTRY.md) replaces uniform temperature
+and the 90% vapor cap with local climate temperatures, saturation partition and
+approximately balanced thermal pressure, and corrects coarse moisture depletion.
+
 Historical Step 7 result. Step 8 adds automatic selection, adaptive quanta and A
 to restore automatic mode; see [PHASE_7_ADAPTIVE.md](PHASE_7_ADAPTIVE.md).
 

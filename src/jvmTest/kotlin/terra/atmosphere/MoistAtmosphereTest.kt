@@ -4,11 +4,46 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class MoistAtmosphereTest {
     private val geometry = DryAtmosphereConfig(width = 12, height = 8)
     private val closedPhysics = MoistPhysicsConfig(radiationEnabled = false, surfaceExchangeEnabled = false)
+
+    @Test
+    fun climateReconstructionPreservesColumnWaterAndCarrierVolumeWithLocalTemperatures() {
+        val model = MoistAtmosphere(geometry, closedPhysics, DryScenario.REST) { _, y ->
+            MoistCell(relativeHumidity = 0.95, cloudWaterKgM2 = 0.2,
+                surfaceTemperatureKelvin = 270 + 20 * y / geometry.domainHeightMeters)
+        }
+        val before = model.snapshot()
+        val handoff = model.initializeFromClimate(255 * 365 * 86400.0)
+        val after = model.snapshot()
+        var volumeBefore = 0.0
+        var volumeAfter = 0.0
+        val pressure = after.dynamics.heightAt(0, 0).let { it * it * after.temperatureKelvinAt(0, 0) }
+        for (y in 0 until geometry.height) for (x in 0 until geometry.width) {
+            assertEquals(before.vaporMmAt(x, y) + before.cloudWaterMmAt(x, y),
+                after.vaporMmAt(x, y) + after.cloudWaterMmAt(x, y), 1e-12)
+            assertEquals(before.surfaceTemperatureKelvinAt(x, y) - 6.0,
+                after.temperatureKelvinAt(x, y), 1e-12)
+            val depth = after.dynamics.heightAt(x, y)
+            assertEquals(pressure, depth * depth * after.temperatureKelvinAt(x, y), pressure * 1e-12)
+            volumeBefore += before.dynamics.heightAt(x, y)
+            volumeAfter += depth
+        }
+        assertEquals(volumeBefore, volumeAfter, volumeBefore * 1e-12)
+        assertTrue(handoff.maximumAirTemperatureKelvin > handoff.minimumAirTemperatureKelvin)
+        assertEquals(0L, model.completedSteps)
+        assertEquals(handoff.worldSeconds, model.worldSeconds)
+        model.step()
+        val diagnostics = model.snapshot().diagnostics
+        assertTrue(abs(diagnostics.relativeWaterResidual) < 1e-12)
+        // Reconstruction energy is deliberately reported, not silently removed from raw residuals.
+        val unexplained = diagnostics.unexplainedEnergyResidualJoules - handoff.initializationEnergyChangeJoules
+        assertTrue(abs(unexplained / diagnostics.totalModelEnergyJoules) < 1e-10)
+    }
 
     @Test
     fun condensationKeepsCloudAndReleasesLatentHeatWithoutLosingWaterOrEnergy() {

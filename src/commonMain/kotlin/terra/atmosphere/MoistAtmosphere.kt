@@ -119,7 +119,9 @@ data class AtmosphereHandoff(
     val worldSeconds: Double, val waterBeforeKg: Double, val waterAfterKg: Double,
     val vaporKg: Double, val cloudKg: Double, val airTemperatureKelvin: Double,
     val initializationEnergyChangeJoules: Double, val physicalStepsAtHandoff: Long,
-    val spinInSteps: Int = 0, val vaporRelativeHumidityLimit: Double = 0.9
+    val spinInSteps: Int = 0, val vaporRelativeHumidityLimit: Double = 1.0,
+    val minimumAirTemperatureKelvin: Double = airTemperatureKelvin,
+    val maximumAirTemperatureKelvin: Double = airTemperatureKelvin
 )
 
 /**
@@ -136,6 +138,10 @@ class MoistAtmosphere(
     initializeFlow: ((Double, Double) -> DryCell)? = null,
     initializeColumns: ((Double, Double) -> MoistCell)? = null
 ) {
+    companion object {
+        internal const val CLIMATE_AIR_SURFACE_OFFSET_K = 6.0
+    }
+
     private val columns = MoistColumnTransport(config.cellCount, physics)
     private val flow = DryAtmosphere(config, columns, initializeFlow ?: DryScenarios.initializer(scenario, config, seed))
     private val density = physics.referenceDryColumnKgM2 / config.meanHeightMeters
@@ -165,6 +171,14 @@ class MoistAtmosphere(
     fun surfaceTemperatureKelvinAt(cell: Int): Double = surfaceTemperature[cell]
     fun rainMmThisStepAt(cell: Int): Double = rainRate[cell] * config.stepSeconds / 3600.0
 
+    /** Read-only diagnostic capacity; does not condense or move column water. */
+    internal fun saturatedVaporMmAt(cell: Int, temperatureKelvin: Double): Double {
+        require(temperatureKelvin.isFinite() && temperatureKelvin > 0)
+        val mass = density * flow.depthAt(cell)
+        return mass * physics.humidColumnFraction * WarmCloud.saturationMixingRatio(
+            temperatureKelvin, mass * config.gravity * physics.cloudPressureFraction)
+    }
+
     /** The same column water is the effective climate pool while detailed dynamics are dormant. */
     internal fun effectiveMoistureMmAt(cell: Int): Double = density * (columns.values[1][cell] + columns.values[2][cell])
     internal val atmosphericWaterKg: Double get() = (0 until config.cellCount).sumOf { effectiveMoistureMmAt(it) } * config.cellArea
@@ -186,26 +200,26 @@ class MoistAtmosphere(
 
     internal fun markClimateEvolution() { approximateHistory = true }
 
-    /** Uniform air T + flat height + zero wind is exactly at rest before surface forcing resumes.
-     * Retain each column's total water; vapor is capped at 90% saturation and excess is cloud.
+    /** Reconstruct from current climate temperatures, preserving every column's water.
+     * Vapor/condensate partition at saturation; pressure is approximately balanced
+     * without new-world moisture, old storms or hidden physical advancement.
      */
     internal fun initializeFromClimate(atWorldSeconds: Double): AtmosphereHandoff {
         require(atWorldSeconds.isFinite() && atWorldSeconds >= 0.0)
         val water = DoubleArray(config.cellCount) { effectiveMoistureMmAt(it) }
         val before = atmosphericWaterKg
         val energyBefore = diagnostics().totalModelEnergyJoules
-        val temperature = (surfaceTemperature.average() - 8.0).coerceIn(240.0, 300.0)
-        val depth = flow.initializeRestState()
-        val mass = density * depth
-        val pressure = mass * config.gravity * physics.cloudPressureFraction
-        val vaporTarget = 0.9
-        val vaporLimit = vaporTarget * mass * physics.humidColumnFraction * WarmCloud.saturationMixingRatio(temperature, pressure)
+        val temperature = DoubleArray(config.cellCount) { surfaceTemperature[it] - CLIMATE_AIR_SURFACE_OFFSET_K }
+        flow.initializeThermalRestState(temperature)
+        val vaporTarget = 1.0
         var vaporTotal = 0.0
         var cloudTotal = 0.0
         for (i in water.indices) {
+            val depth = flow.depthAt(i)
+            val vaporLimit = saturatedVaporMmAt(i, temperature[i])
             val vapor = min(water[i], vaporLimit)
             val cloud = water[i] - vapor
-            columns.values[0][i] = depth * temperature
+            columns.values[0][i] = depth * temperature[i]
             columns.values[1][i] = vapor / density
             columns.values[2][i] = cloud / density
             vaporTotal += vapor; cloudTotal += cloud
@@ -218,7 +232,9 @@ class MoistAtmosphere(
         val after = atmosphericWaterKg
         check(kotlin.math.abs(after - before) <= 1e-12 * max(1.0, before))
         return AtmosphereHandoff(atWorldSeconds, before, after, vaporTotal * config.cellArea,
-            cloudTotal * config.cellArea, temperature, energyChange, completedSteps, vaporRelativeHumidityLimit = vaporTarget)
+            cloudTotal * config.cellArea, temperature.average(), energyChange, completedSteps,
+            vaporRelativeHumidityLimit = vaporTarget, minimumAirTemperatureKelvin = temperature.min(),
+            maximumAirTemperatureKelvin = temperature.max())
     }
 
     init {

@@ -18,13 +18,15 @@ data class ClimateIntervalDiagnostics(
 
 internal class FastClimateResult(
     val diagnostics: ClimateIntervalDiagnostics,
-    private val fields: Array<DoubleArray>, private val representativeCloud: DoubleArray
+    private val fields: Array<DoubleArray>, private val representativeCloud: DoubleArray,
+    private val representativeHumidity: DoubleArray
 ) {
     val semantics = WeatherFieldSemantics(WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL,
         diagnostics.startSeconds, diagnostics.durationSeconds, energyApproximate = true, aggregateYears = diagnostics.aggregateYears)
     fun field(field: Int, tile: Int) = fields[field][tile]
     fun rainEvents(tile: Int) = RainEventSummary(fields[5][tile] / diagnostics.durationSeconds, fields[6][tile])
     fun cloudMm(cell: Int) = representativeCloud[cell]
+    fun relativeHumidity(cell: Int) = representativeHumidity[cell].coerceIn(0.0, 1.0)
     fun captureFields(surface: TerrainMoistSurface) = arrayOf(fields[0], fields[1], fields[2], fields[3], fields[4],
         surface.climateRainRate.copyOf(), surface.soil.copyOf())
 }
@@ -39,6 +41,8 @@ internal class FastClimateStepper(
 ) {
     private val config = surface.mapping.config
     private val count = config.cellCount
+    private val phaseMeanMoisture = DoubleArray(count) // Owner-only scratch; never published.
+    private val precipitableMoisture = DoubleArray(count)
     val maximumIntervalSeconds get() = 20 * normals.yearSeconds
     var completedSeconds = startSeconds
         private set
@@ -66,6 +70,7 @@ internal class FastClimateStepper(
         var outlet = 0.0
         val routingBefore = hydrology.completedRoutingPasses
         val representativeCloud = DoubleArray(count)
+        val representativeHumidity = DoubleArray(count)
         val plan = ClimatePhasePlan(start, seconds, normals.yearSeconds, normals.initialYearFraction)
         val seasonalTemperature = Array(4) { DoubleArray(count) }
         val seasonalRain = Array(4) { DoubleArray(count) }
@@ -111,11 +116,22 @@ internal class FastClimateStepper(
             }
             val demand = demands.sum()
             requestedRain += demand * config.cellArea
-            val available = (0 until count).sumOf { atmosphere.effectiveMoistureMmAt(it) }
+            // Rain cannot remove the unsaturated vapor needed by the current
+            // climate air state. Only supersaturated column water funds rain.
+            var available = 0.0
+            for (c in 0 until count) {
+                val capacity = atmosphere.saturatedVaporMmAt(c,
+                    newTemperature[c] + 273.15 - MoistAtmosphere.CLIMATE_AIR_SURFACE_OFFSET_K)
+                precipitableMoisture[c] = max(0.0, atmosphere.effectiveMoistureMmAt(c) - capacity)
+                available += precipitableMoisture[c]
+            }
             val fraction = if (available > 0.0) min(1.0, demand / available) else 0.0
             var withdrawn = 0.0
-            for (c in 0 until count) withdrawn += atmosphere.withdrawEffectiveMoistureMm(c,
-                atmosphere.effectiveMoistureMmAt(c) * fraction)
+            for (c in 0 until count) {
+                val beforeRain = atmosphere.effectiveMoistureMmAt(c)
+                withdrawn += atmosphere.withdrawEffectiveMoistureMm(c, precipitableMoisture[c] * fraction)
+                phaseMeanMoisture[c] = (beforeRain + atmosphere.effectiveMoistureMmAt(c)) / 2
+            }
             // Distribute only the actual withdrawn budget, including its final funded remainder.
             var remainingWater = withdrawn
             var remainingDemand = demand
@@ -166,7 +182,12 @@ internal class FastClimateStepper(
             // depth: the latter turned longer quanta into near-uniform overcast.
             for (c in 0 until count) {
                 val hourlyRain = actualRain[c] * 3600 / phaseSeconds
-                representativeCloud[c] += min(0.6, hourlyRain * 1.5) * (phaseSeconds / seconds)
+                val meanAirKelvin = integral[c] / phaseSeconds + 273.15 - MoistAtmosphere.CLIMATE_AIR_SURFACE_OFFSET_K
+                val saturation = atmosphere.saturatedVaporMmAt(c, meanAirKelvin)
+                val humidity = humidityProxy(phaseMeanMoisture[c], saturation)
+                val weight = phaseSeconds / seconds
+                representativeHumidity[c] += humidity * weight
+                representativeCloud[c] += cloudProxyMm(phaseMeanMoisture[c], humidity, hourlyRain) * weight
             }
             phaseClock += phaseSeconds
         }
@@ -185,11 +206,22 @@ internal class FastClimateStepper(
         return FastClimateResult(ClimateIntervalDiagnostics(start, seconds, plan.phases.size, before, after, residual,
             evaporated, rainfall, requestedRain, relaxationEnergy, atmosphere.completedSteps,
             routingPasses = hydrology.completedRoutingPasses - routingBefore, representedHydrologySeconds = representedHydrologySeconds,
-            aggregateYears = plan.aggregate, ecologyEligibleSeconds = if (plan.aggregate || !historyEligibleAtStart) 0.0 else min(seconds, normals.yearSeconds / 4)), fields, representativeCloud)
+            aggregateYears = plan.aggregate, ecologyEligibleSeconds = if (plan.aggregate || !historyEligibleAtStart) 0.0 else min(seconds, normals.yearSeconds / 4)), fields, representativeCloud, representativeHumidity)
             .also { latest = it }
     }
 
     companion object {
+        // Appearance estimates only: no mass/heat exchange and no history feedback.
+        internal fun humidityProxy(meanMoistureMm: Double, saturationMm: Double): Double =
+            (meanMoistureMm / max(1e-12, saturationMm)).coerceIn(0.0, 1.0)
+
+        internal fun cloudProxyMm(meanMoistureMm: Double, humidity: Double, fundedHourlyRain: Double): Double {
+            val t = ((humidity - 0.8) / 0.2).coerceIn(0.0, 1.0)
+            val humidityCloud = min(meanMoistureMm, 0.25 * t * t * (3 - 2 * t))
+            val rainCloud = min(0.6, fundedHourlyRain * 1.5)
+            return min(0.6, max(humidityCloud, rainCloud))
+        }
+
         /** Diagnostic rain above 2 mm/h, not an Earth-calibrated infiltration cutoff. */
         const val INTENSE_RAIN_MM_PER_HOUR = 2.0
         const val MIN_INTERVAL_SECONDS = 1.0

@@ -92,6 +92,33 @@ class CloudRendererTest {
         assertEquals(20 * 365 * 86400.0, b.elapsedSeconds)
     }
 
+    @Test
+    fun uniformCloudInputsHaveNoEquatorialVisibilityPenalty() {
+        for (representative in listOf(false, true)) {
+            val totals = DoubleArray(3)
+            for (seed in listOf(31742, 42)) {
+                val weather = CloudFixture(uniform = true, representative = representative, width = 283, height = 212)
+                val renderer = CloudRenderer(weather.width, weather.height, seed)
+                renderer.update(weather)
+                val frame = renderer.frame
+                val rows = frame.height / 6
+                for ((band, center) in listOf(0.25, 0.5, 0.75).withIndex()) {
+                    val start = (frame.height * center).toInt() - rows / 2
+                    for (y in start until start + rows) for (x in 0 until frame.width)
+                        totals[band] += frame[x, y].a / (255.0 * rows * frame.width * 2)
+                }
+            }
+            val adjacentMean = (totals[0] + totals[2]) / 2
+            assertTrue(adjacentMean > 0.0)
+            assertTrue(totals[1] / adjacentMean in 0.75..1.25,
+                "Uniform cloud field has an aggregate latitude bias: representative=$representative means=${totals.toList()}")
+            // Also reject an equatorial deficit against either individual band.
+            for (adjacent in listOf(totals[0], totals[2]))
+                assertTrue(totals[1] >= adjacent * 0.75)
+            println("CLOUD_NEUTRALITY representative=$representative north_equator_south=${totals.toList()}")
+        }
+    }
+
     /** One small before/after artifact for visual review, not a physics experiment. */
     private fun writeVisualReview(renderer: CloudRenderer, weather: CloudFixture) {
         val scale = 3
@@ -130,12 +157,11 @@ class CloudRendererTest {
     }
 }
 
-private class CloudFixture(private val uniform: Boolean = false, private val representative: Boolean = false) : WeatherModel by WeatherSimulation(World(31742, 96, 72)) {
+private class CloudFixture(private val uniform: Boolean = false, private val representative: Boolean = false,
+    override val width: Int = 96, override val height: Int = 72) : WeatherModel by WeatherSimulation(World(31742, width, height)) {
     override val fieldSemantics get() = if (representative)
         WeatherFieldSemantics(WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL, 0.0, 20 * 365 * 86400.0)
         else WeatherFieldSemantics.RESOLVED
-    override val width = 96
-    override val height = 72
     override var elapsedSeconds = 0.0
     var empty = false
     override fun step(seconds: Double) { error("A renderer must not advance weather") }
@@ -148,6 +174,7 @@ private class CloudFixture(private val uniform: Boolean = false, private val rep
         val band = 0.16 * exp(-((y - 22 - 0.25 * x) * (y - 22 - 0.25 * x)) / 20) * exp(-dx * dx / 1100)
         return head + band
     }
+    override fun cloudCover(x: Int, y: Int) = 1 - exp(-cloudWaterMm(x, y) / 0.15)
     override fun precipitationMmPerHour(x: Int, y: Int) = if (cloudWaterMm(x, y) > 0.4) 2.0 else 0.0
     override fun surfaceTemperatureC(x: Int, y: Int) = 28.0
     override fun airTemperatureC(x: Int, y: Int) = 2.0

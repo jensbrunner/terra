@@ -17,6 +17,7 @@ import kotlin.math.pow
 import kotlin.time.TimeSource
 import terra.*
 import terra.render.TerrainMapView
+import terra.render.weatherLegend
 import terra.simulation.SimulationSpeed
 import terra.simulation.SimulationFidelity
 import terra.simulation.PerformanceProbe
@@ -59,6 +60,8 @@ class AtlasScene(
     private lateinit var pauseLabel: Text
     private lateinit var selectionLabel: Text
     private lateinit var frameTimeLabel: Text
+    private lateinit var helpPanel: Container
+    private lateinit var legendPanel: Container
     private val activeOverlays = mutableSetOf<WeatherLayer>(WeatherLayer.CLOUDS)
     private var selectedTileX: Int? = null
     private var selectedTileY: Int? = null
@@ -70,39 +73,43 @@ class AtlasScene(
     private var frameTimeDisplayElapsed = 0.0
     private var statusDisplayElapsed = 0.1
     private var previousFrameTime = TimeSource.Monotonic.markNow()
-    private var zoom = minOf(
-        WINDOW_WIDTH / MAP_WIDTH_TILES,
-        WINDOW_HEIGHT / MAP_HEIGHT_TILES
-    )
-    private var panX = 0.0
-    private var panY = 0.0
+    private val camera = MapCamera(WINDOW_WIDTH, WINDOW_HEIGHT - 372.0, MAP_WIDTH_TILES, MAP_HEIGHT_TILES)
     private var dragStartPanX = 0.0
     private var dragStartPanY = 0.0
+    private var draggedMap = false
 
     override suspend fun SContainer.sceneMain() {
         uiFont = SystemFont.getDefaultFont()
         solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, Colors["#000000"])
-        mapViewport = fixedSizeContainer(Size(WINDOW_WIDTH, WINDOW_HEIGHT), clip = true)
+        mapViewport = fixedSizeContainer(Size(camera.viewportWidth, camera.viewportHeight), clip = true).xy(0.0, 138.0)
         mapLayer = mapViewport.container { }
         terrainTextures = loadTerrainTextures()
 
         drawControls()
         drawAtmosphereControls()
         drawSelectionPanel()
+        legendPanel = container { }.xy(1188.0, WINDOW_HEIGHT - 220.0)
+        refreshLegend()
         refreshOverlays()
         settingsPanel = TerrainSettingsPanel(this, uiFont, terrainSettings, ::updateTerrainSettings)
         settingsPanel.updateBiomeSummary(presentation?.world?.landBiomeSummary() ?: "Generating world…")
         drawFrameTimeCounter()
+        drawHelp()
         applyMapTransform()
 
         mapViewport.keys {
             WeatherLayer.entries.forEach { layer ->
-                justDown(Key.valueOf("N${layer.key}")) { toggleLayer(layer) }
+                justDown(Key.valueOf("N${layer.key}")) { if (!helpPanel.visible && !settingsPanel.hasOpenMenu()) toggleLayer(layer) }
             }
-            justDown(Key.M) { switchAtmosphere() }
-            justDown(Key.F) { toggleFidelity() }
-            justDown(Key.A) { manualFidelity = false; simulation.useAutomaticFidelity() }
+            justDown(Key.M) { if (!helpPanel.visible && !settingsPanel.hasOpenMenu()) switchAtmosphere() }
+            justDown(Key.F) { if (!helpPanel.visible) toggleFidelity() }
+            justDown(Key.A) { if (!helpPanel.visible) { manualFidelity = false; simulation.useAutomaticFidelity() } }
             justDown(Key.SPACE) { togglePause() }
+            justDown(Key.HOME) { camera.home(); applyMapTransform() }
+            justDown(Key.H) { toggleHelp() }
+            justDown(Key.ESCAPE) { helpPanel.visible = false; settingsPanel.closeMenus() }
+            justDown(Key.LEFT) { if (!helpPanel.visible) cycleSpeed(-1) }
+            justDown(Key.RIGHT) { if (!helpPanel.visible) cycleSpeed(1) }
         }
 
         mapViewport.addUpdater { _ ->
@@ -134,7 +141,10 @@ class AtlasScene(
                 if (changedWorld) settingsPanel.updateBiomeSummary(snapshot.world.landBiomeSummary())
                 if (previous?.surfaceWater !== snapshot.surfaceWater) refreshSurfaceWater()
                 updateSelectionInfo()
-                if (previous?.weather?.fieldSemantics?.quality != snapshot.weather.fieldSemantics.quality) refreshLayerButtons()
+                if (previous?.weather?.fieldSemantics?.quality != snapshot.weather.fieldSemantics.quality) {
+                    refreshLayerButtons()
+                    refreshLegend()
+                }
             }
             if (this@AtlasScene::mapView.isInitialized) {
                 mapView.advanceVisuals(realSeconds)
@@ -152,21 +162,23 @@ class AtlasScene(
         }
 
         mapViewport.onClick { event ->
-            if (!settingsPanel.hasOpenMenu()) selectTileAt(event.currentPosLocal.x, event.currentPosLocal.y)
+            if (!draggedMap && !helpPanel.visible && !settingsPanel.hasOpenMenu()) selectTileAt(event.currentPosLocal.x, event.currentPosLocal.y)
+            draggedMap = false
         }
         mapViewport.onScroll { event ->
-            if (settingsPanel.hasOpenMenu()) return@onScroll
+            if (helpPanel.visible || settingsPanel.hasOpenMenu()) return@onScroll
             val delta = event.scrollDeltaYLines.toDouble().coerceIn(-64.0, 64.0)
             if (delta != 0.0) zoomBy(1.12.pow(-delta), event.currentPosLocal.x, event.currentPosLocal.y)
         }
         mapViewport.onMouseDrag { drag ->
-            if (settingsPanel.hasOpenMenu()) return@onMouseDrag
+            if (helpPanel.visible || settingsPanel.hasOpenMenu()) return@onMouseDrag
             if (drag.start) {
-                dragStartPanX = panX
-                dragStartPanY = panY
+                dragStartPanX = camera.x
+                dragStartPanY = camera.y
+                draggedMap = false
             }
-            panX = dragStartPanX + drag.dx
-            panY = dragStartPanY + drag.dy
+            if (drag.dx * drag.dx + drag.dy * drag.dy > 16) draggedMap = true
+            camera.moveTo(dragStartPanX + drag.dx, dragStartPanY + drag.dy)
             applyMapTransform()
         }
     }
@@ -216,16 +228,16 @@ class AtlasScene(
                 val mode = if (!snapshot.dynamical) "Prescribed" else if (snapshot.detailedReentryPending) "Detailed pending" else if (snapshot.fidelity == SimulationFidelity.CLIMATE && !representative) "Climate pending" else if (representative) "Approximate climate" else "Detailed weather"
                 val guides = buildList {
                     add(WeatherDisplayText.quality(period))
+                    if (snapshot.dynamical) add("${if (progress.automaticFidelity) "auto" else "manual"} · step ${WeatherDisplayText.duration(progress.quantumSeconds, year)}")
                     if (WeatherLayer.CLOUDS in activeOverlays && representative) add("cloud drift: illustrative")
                     if (WeatherLayer.DAY_NIGHT in activeOverlays) add(if (representative) "light: day-averaged seasonal" else "light: current date")
                     if (WeatherLayer.WIND in activeOverlays && representative) add("wind: unresolved")
-                    if (snapshot.dynamical) add("F manual · A auto · M model/reset")
+                    if (progress.pendingSeconds > 0) add("queued ${WeatherDisplayText.duration(progress.pendingSeconds, year)}")
+                    if (progress.coarsenedForLoad) add("coarser for load")
                 }.joinToString(" · ")
                 "$mode · ${WeatherDisplayText.date(progress.completedSeconds, year)} · " +
                     "${simulationSpeed.label} requested / ${WeatherDisplayText.rate(progress.achievedSecondsPerWallSecond, year)} actual · " +
-                    "interval ${WeatherDisplayText.duration(progress.quantumSeconds, year)} · ${if (progress.automaticFidelity) "auto" else "manual"} · $state" +
-                    (if (progress.pendingSeconds > 0) " · queued ${WeatherDisplayText.duration(progress.pendingSeconds, year)}" else "") +
-                    (if (progress.coarsenedForLoad) " · coarser for load" else "") + "\n" + guides
+                    "$state\n$guides"
 
             }
         }
@@ -236,7 +248,7 @@ class AtlasScene(
     }
 
     private fun SContainer.drawSelectionPanel() {
-        val panelHeight = 208.0
+        val panelHeight = 220.0
         solidRect(1164.0, panelHeight, Colors["#101b20"]).xy(12.0, WINDOW_HEIGHT - panelHeight - 12.0)
         selectionLabel = text(
             "Click a tile to inspect it", font = uiFont, textSize = 15.0, color = Colors["#e3e8d7"]
@@ -247,6 +259,70 @@ class AtlasScene(
         frameTimeLabel = text(
             "Frame 16.7 ms · 60 FPS", font = uiFont, textSize = 12.0, color = Colors["#ffffff"]
         ).xy(WINDOW_WIDTH - 190.0, WINDOW_HEIGHT - 24.0)
+    }
+
+    private fun refreshLegend() {
+        if (!::legendPanel.isInitialized) return
+        legendPanel.removeChildren()
+        legendPanel.solidRect(238.0, 180.0, Colors["#101b20"])
+        val layer = activeOverlays.firstOrNull { weatherLegend(it) != null }
+        val legend = layer?.let(::weatherLegend)
+        fun line(value: String, y: Double, size: Double = 12.0) =
+            legendPanel.text(value, font = uiFont, textSize = size, color = Colors["#e3e8d7"]).xy(12.0, y)
+        if (legend != null) {
+            line(legend.title, 12.0, 13.0)
+            for (i in 0..99) {
+                val color = legend.colors[(i / 99.0 * (legend.colors.size - 1)).toInt()]
+                legendPanel.solidRect(2.1, 18.0, Colors[color]).xy(12 + i * 2.1, 38.0)
+            }
+            line(legend.low, 62.0); line(legend.middle, 62.0).x = 97.0
+            line(legend.high, 62.0).x = 182.0
+            line("One colour layer at a time.\nClouds and lighting can tint it.", 88.0, 11.0)
+            val representative = presentation?.weather?.fieldSemantics?.quality == WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL
+            line(if (representative) "Interval estimate\nCloud movement is illustrative." else "Current weather\nClick a tile for exact values.", 133.0, 11.0)
+        } else {
+            line("Map layers · keys 1–9", 12.0, 14.0)
+            line("${if (WeatherLayer.CLOUDS in activeOverlays) "Clouds on" else "Clouds off"} · 2 to toggle\n\nColour layers show weather ranges.\nWind arrows point with the flow.\n8 toggles lighting / seasonal shade.\n\nH opens all controls.", 40.0, 11.0)
+        }
+    }
+
+    private fun SContainer.drawHelp() {
+        helpPanel = container {
+            visible = false
+            solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, Colors["#000000"].withA(180))
+            container {
+                solidRect(760.0, 510.0, Colors["#101b20"])
+                text("Terra · explore the simulation", font = uiFont, textSize = 24.0,
+                    color = Colors["#e5bd72"]).xy(24.0, 22.0)
+                text("Navigate\n\nDrag to pan · scroll to zoom\nHome fits the map\nClick a tile to inspect it\n\nSpace pauses / resumes\nLeft / Right change speed\n1–9 toggle map layers\nH opens help · Esc closes panels",
+                    font = uiFont, textSize = 16.0, color = Colors["#e3e8d7"]).xy(24.0, 78.0)
+                text("Weather and climate\n\nF selects detailed / fast climate\nA restores automatic selection\n\nDetailed: physical winds and clouds\nFast: interval climate estimates\nFast cloud movement is illustrative\n\nM switches model and resets the world",
+                    font = uiFont, textSize = 16.0, color = Colors["#e3e8d7"]).xy(382.0, 78.0)
+                text("Elevation / Climate settings are drafts until Apply & rebuild.\nApplying settings or switching model restarts the world and its clock.",
+                    font = uiFont, textSize = 14.0, color = Colors["#e5bd72"]).xy(24.0, 366.0)
+                fun button(label: String, x: Double, width: Double, action: () -> Unit) {
+                    val background = solidRect(width, 38.0, Colors["#223538"]).xy(x, 448.0)
+                    val caption = text(label, font = uiFont, textSize = 15.0, color = Colors["#e3e8d7"]).xy(x + 12, 459.0)
+                    background.mouse { click { action() } }; caption.mouse { click { action() } }
+                }
+                button("Switch weather model & rebuild", 24.0, 320.0) {
+                    helpPanel.visible = false
+                    settingsPanel.closeMenus()
+                    switchAtmosphere()
+                }
+                button("Close · Esc", 600.0, 136.0) { helpPanel.visible = false }
+            }.xy((WINDOW_WIDTH - 760) / 2, (WINDOW_HEIGHT - 510) / 2)
+        }
+    }
+
+    private fun toggleHelp() {
+        if (helpPanel.visible) helpPanel.visible = false else showHelp()
+    }
+
+    private fun showHelp() {
+        settingsPanel.closeMenus()
+        helpPanel.parent?.sendChildToFront(helpPanel)
+        helpPanel.visible = true
     }
 
     private fun updateFrameTimeCounter(frameDeltaSeconds: Double) {
@@ -264,16 +340,16 @@ class AtlasScene(
         requestedGeneration++
         simulation.regenerate(WorldRequest(generation = requestedGeneration, terrain = settings, dynamical = dynamicalAtmosphere))
         simulation.updateControls(simulationSpeed, paused)
+        selectedTileX = null; selectedTileY = null
+        selectionLabel.text = "Rebuilding world…"
+        if (::mapView.isInitialized) mapView.clearSelection()
+        settingsPanel.updateBiomeSummary("Rebuilding world…")
         updateAtmosphereStatus()
     }
 
     private fun selectTileAt(screenX: Double, screenY: Double) {
-        if (presentation == null || !this@AtlasScene::mapView.isInitialized) return
-        val mapX = (screenX - mapLayer.x) / zoom
-        val mapY = (screenY - mapLayer.y) / zoom
-        val x = mapX.toInt()
-        val y = mapY.toInt()
-        if (x !in 0 until world.width || y !in 0 until world.height) return
+        if (presentation?.progress?.generation != requestedGeneration || !this@AtlasScene::mapView.isInitialized) return
+        val (x, y) = camera.tileAt(screenX, screenY) ?: return
         selectedTileX = x
         selectedTileY = y
         mapView.selectTile(x, y)
@@ -285,7 +361,10 @@ class AtlasScene(
             selectionLabel.text = presentation?.initializationStatus ?: "Generating world…"
             return
         }
-        val x = selectedTileX ?: return
+        val x = selectedTileX ?: run {
+            selectionLabel.text = "Explore your world\n\nClick a tile for weather, soil, rivers and climate.\nDrag to pan · scroll to zoom · Home to fit the map.\n\nH opens controls and model help."
+            return
+        }
         val y = selectedTileY ?: return
         val cell = world[x, y]
         val representative = weather.fieldSemantics.quality == WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL
@@ -341,8 +420,13 @@ class AtlasScene(
     }
 
     private fun toggleLayer(layer: WeatherLayer) {
-        if (!activeOverlays.add(layer)) activeOverlays.remove(layer)
+        if (layer in activeOverlays) activeOverlays.remove(layer) else {
+            // Independent scalar tints cannot share a meaningful colour legend.
+            if (weatherLegend(layer) != null) activeOverlays.removeAll { weatherLegend(it) != null }
+            activeOverlays.add(layer)
+        }
         refreshLayerButtons()
+        refreshLegend()
         refreshOverlays()
     }
 
@@ -383,6 +467,9 @@ class AtlasScene(
         controlButton("-", x, 30.0) { cycleSpeed(-1) }
         speedLabel = controlButton(simulationSpeed.label, x + 35, 142.0) { cycleSpeed(1) }.second
         controlButton("+", x + 182, 30.0) { cycleSpeed(1) }
+        controlButton("Home", 1150.0, 76.0) { camera.home(); applyMapTransform() }
+        controlButton("Help H", 1234.0, 82.0) { toggleHelp() }
+        controlButton("Model…", 1324.0, 96.0) { showHelp() }
         refreshLayerButtons()
         refreshSpeedButtons()
     }
@@ -425,20 +512,13 @@ class AtlasScene(
     }
 
     private fun zoomBy(factor: Double, anchorX: Double, anchorY: Double) {
-        val worldX = (anchorX - mapLayer.x) / zoom
-        val worldY = (anchorY - mapLayer.y) / zoom
-        zoom = (zoom * factor).coerceAtLeast(0.1)
-        panX = anchorX - worldX * zoom - (WINDOW_WIDTH - (presentation?.world?.width ?: MAP_WIDTH_TILES) * zoom) / 2.0
-        panY = anchorY - worldY * zoom - (WINDOW_HEIGHT - (presentation?.world?.height ?: MAP_HEIGHT_TILES) * zoom) / 2.0
+        camera.zoomBy(factor, anchorX, anchorY)
         applyMapTransform()
     }
 
     private fun applyMapTransform() {
-        val mapWidth = (presentation?.world?.width ?: MAP_WIDTH_TILES) * zoom
-        val mapHeight = (presentation?.world?.height ?: MAP_HEIGHT_TILES) * zoom
-        mapLayer.scaleX = zoom
-        mapLayer.scaleY = zoom
-        mapLayer.x = (WINDOW_WIDTH - mapWidth) / 2.0 + panX
-        mapLayer.y = (WINDOW_HEIGHT - mapHeight) / 2.0 + panY
+        mapLayer.scaleX = camera.scale
+        mapLayer.scaleY = camera.scale
+        mapLayer.xy(camera.x, camera.y)
     }
 }

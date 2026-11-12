@@ -36,11 +36,11 @@ class DynamicalWeather(
     private val model = MoistAtmosphere(config, physics, seed = world.seed, surface = surface, initializeFlow = initialWeather::flow, initializeColumns = { x, y ->
         val c = min(config.height - 1, (y / config.dy).toInt()) * config.width +
             min(config.width - 1, (x / config.dx).toInt())
-        val moist = initialWeather.moistFraction(x / config.domainWidthMeters, y / config.domainHeightMeters)
-        // Start with air masses, including saturated cloudy cores, rather than an
-        // everywhere-clear column that reaches condensation almost in synchrony.
-        MoistCell(temperatureKelvin = 280.0, relativeHumidity = initialWeather.relativeHumidity(x / config.domainWidthMeters, y / config.domainHeightMeters, moist),
-            cloudWaterKgM2 = 0.30 * moist * moist * moist,
+        val moist = initialWeather.moistFraction(x / config.domainWidthMeters, y / config.domainHeightMeters,
+            surface.initialWaterAvailability(c))
+        // These are time-zero inventories, not ongoing moisture/temperature forcing.
+        MoistCell(temperatureKelvin = 280.0, relativeHumidity = initialWeather.relativeHumidity(moist),
+            cloudWaterKgM2 = initialWeather.cloudWaterMm(moist),
             surfaceTemperatureKelvin = 288.0 - 4.0 * surface.landFraction[c], surfaceWaterKgM2 = 0.0)
     })
     private val sunlight = PlanetarySunlight(width, height, physics.solar, northUp = false)
@@ -168,11 +168,11 @@ class DynamicalWeather(
     }
 
     private fun index(x: Int, y: Int) = y * width + x
-    override fun relativeHumidity(x: Int, y: Int) = if (hasRepresentativeFields) (atmosphericWaterMm(x, y) / 20).coerceIn(0.0, 1.0) else sample(x, y, view::relativeHumidityAt)
+    override fun relativeHumidity(x: Int, y: Int) = climateResult?.let { result -> sample(x, y) { cx, cy -> result.relativeHumidity(cy * config.width + cx) } } ?: sample(x, y, view::relativeHumidityAt)
     override fun cloudWaterMm(x: Int, y: Int) = climateResult?.let { result -> sample(x, y) { cx, cy -> result.cloudMm(cy * config.width + cx) } } ?: sample(x, y, view::cloudWaterMmAt)
     override fun cloudCover(x: Int, y: Int) = 1 - exp(-cloudWaterMm(x, y) / 0.15)
     override fun atmosphericWaterMm(x: Int, y: Int) = if (hasRepresentativeFields) sample(x, y) { cx, cy -> view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy) } else sample(x, y, view::vaporMmAt)
-    override fun airTemperatureC(x: Int, y: Int) = if (hasRepresentativeFields) surfaceTemperatureC(x, y) - 6.0 else sample(x, y, view::temperatureKelvinAt) - 273.15
+    override fun airTemperatureC(x: Int, y: Int) = if (hasRepresentativeFields) surfaceTemperatureC(x, y) - MoistAtmosphere.CLIMATE_AIR_SURFACE_OFFSET_K else sample(x, y, view::temperatureKelvinAt) - 273.15
     override fun surfaceTemperatureC(x: Int, y: Int) = sample(x, y, view::surfaceTemperatureKelvinAt) - 273.15
     override fun windUTilesPerDay(x: Int, y: Int) = if (hasRepresentativeFields) 0.0 else sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
     override fun windVTilesPerDay(x: Int, y: Int) = if (hasRepresentativeFields) 0.0 else -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters

@@ -13,6 +13,19 @@ private val annualPrecipitationPalette =
 private val climateRainPalette = listOf("#bb9d67", "#d8cc8b", "#72ae82", "#388f9e", "#294f91")
 private val temperaturePalette = listOf("#344f9a", "#73aeb5", "#d8d5a3", "#e6a04f", "#b84b3f")
 
+internal data class WeatherLegend(val title: String, val colors: List<String>, val low: String, val middle: String, val high: String)
+
+/** Uses exactly the same palette and scale as the map, including rain's square-root scale. */
+internal fun weatherLegend(layer: WeatherLayer): WeatherLegend? = when (layer) {
+    WeatherLayer.HUMIDITY -> WeatherLegend("Relative humidity", humidityPalette, "0%", "50%", "100%")
+    WeatherLayer.PRECIPITATION -> WeatherLegend("Rain · mm/h", precipitationPalette, "0", "0.75", "3+")
+    WeatherLayer.CLIMATE_RAIN -> WeatherLegend("30-day rain EMA · mm/h", climateRainPalette, "0", "6", "12+")
+    WeatherLayer.AIR_TEMPERATURE -> WeatherLegend("Air temperature · °C", temperaturePalette, "−20", "7.5", "35+")
+    WeatherLayer.SURFACE_TEMPERATURE -> WeatherLegend("Surface temperature · °C", temperaturePalette, "−20", "7.5", "35+")
+    WeatherLayer.ANNUAL_PRECIPITATION -> WeatherLegend("Rain EMA · mm/year", annualPrecipitationPalette, "0", "1250", "2500+")
+    else -> null
+}
+
 internal fun tileColor(layer: WeatherLayer, weather: WeatherModel, x: Int, y: Int) =
     when (layer) {
         WeatherLayer.HUMIDITY -> ramp(weather.relativeHumidity(x, y), humidityPalette)

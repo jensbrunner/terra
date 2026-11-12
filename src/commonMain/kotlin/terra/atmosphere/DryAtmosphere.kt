@@ -139,13 +139,22 @@ class DryAtmosphere internal constructor(
         validate(h, mx, my)
     }
 
-    /** Balanced rest state for climate re-entry; retains the physical-step counter and allocation. */
-    internal fun initializeRestState(): Double {
-        val meanDepth = h.average()
-        h.fill(meanDepth)
+    /** Reconstruct approximately balanced thermal pressure without reviving stale winds.
+     * h²*T is spatially constant and total carrier volume is preserved. The finite
+     * volume scheme can still diffuse thermal contacts; this is not a new equilibrium solver.
+     */
+    internal fun initializeThermalRestState(temperature: DoubleArray) {
+        require(temperature.size == count)
+        val reference = columns?.physics?.referenceTemperatureKelvin ?: error("Thermal rest needs moist columns")
+        val weights = DoubleArray(count) { i ->
+            require(temperature[i].isFinite() && temperature[i] > 0)
+            sqrt(reference / temperature[i])
+        }
+        val scale = h.sum() / weights.sum()
+        for (i in h.indices) h[i] = weights[i] * scale
         mx.fill(0.0); my.fill(0.0)
         maximumCourant = 0.0
-        return meanDepth
+        validate(h, mx, my)
     }
 
     fun step() {
