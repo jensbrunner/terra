@@ -124,6 +124,10 @@ class DynamicalWeather(
         return result.diagnostics
     }
 
+    /** Review-only access to the running reduced climate's zonal energy budget. */
+    internal val climateRowBudget: ClimateRowBudget? get() = fastClimate?.rowBudget
+    internal val climateZonalStructure: List<Double>? get() = fastClimate?.zonalStructure
+
     /** Rebuild only atmosphere; no surface/history/calendar integration is performed here. */
     internal fun resumeDetailed(): terra.atmosphere.AtmosphereHandoff? {
         val engine = fastClimate ?: return null

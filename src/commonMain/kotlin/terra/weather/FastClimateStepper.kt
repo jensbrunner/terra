@@ -107,6 +107,13 @@ internal class FastClimateStepper(
     var latest: FastClimateResult? = null
         private set
 
+    /** Zonal energy budget accumulated by the energy model; diagnostic only. */
+    val rowBudget: ClimateRowBudget get() = energy.rowBudget
+    /** Last diagnosed zonal overturning structure (degrees), for review output. */
+    val zonalStructure: List<Double> get() = listOf(circulation.thermalEquatorDegrees,
+        circulation.hadleyEdgeSouthDegrees, circulation.hadleyEdgeNorthDegrees,
+        circulation.stormTrackSouthDegrees, circulation.stormTrackNorthDegrees)
+
     /** Preserve the diagnosed free-air climate instead of discarding it at reentry. */
     fun reentryAirTemperatureKelvin(): DoubleArray = energy.detailedAirTemperatureKelvin()
 

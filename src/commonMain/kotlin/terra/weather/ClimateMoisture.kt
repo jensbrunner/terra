@@ -58,6 +58,8 @@ internal class ClimateMoisture(
     private val fineScratch = DoubleArray(count)
     private val regimeWet = DoubleArray(count)
     private val regimeStorm = DoubleArray(count)
+    private val transportEast = DoubleArray(count)
+    private val transportNorth = DoubleArray(count)
 
     fun advance(
         water: DoubleArray,
@@ -90,6 +92,10 @@ internal class ClimateMoisture(
         // bounded and measured separately from the numerical advection CFL.
         var maximumSpeed = 0.0
         for (cell in 0 until count) {
+            transportEast[cell] = circulation.east[cell] + DIVERGENT_MOISTURE_FRACTION * circulation.divergentEast[cell]
+            transportNorth[cell] = circulation.north[cell] + DIVERGENT_MOISTURE_FRACTION * circulation.divergentNorth[cell]
+        }
+        for (cell in 0 until count) {
             val x = cell % width
             val y = cell / width
             val west = y * width + (x + width - 1) % width
@@ -100,65 +106,42 @@ internal class ClimateMoisture(
                 surfaceTemperatureC[north] - surfaceTemperatureC[south]) / (2 * dx)
             val storm = regimeStorm[cell]
             eddy[cell] = (EDDY_VELOCITY_BASE + EDDY_VELOCITY_GRADIENT * gradient.coerceIn(0.0, 3e-5) * 1e5 *
-                storm).coerceIn(0.4, 2.4) * dx
-            maximumSpeed = max(maximumSpeed, hypot(circulation.east[cell], circulation.north[cell]))
+                storm).coerceIn(0.15, 1.5) * dx
+            maximumSpeed = max(maximumSpeed, hypot(transportEast[cell], transportNorth[cell]))
         }
 
         val advectiveCourant = maximumSpeed * seconds * (1.0 / dx + 1.0 / dy)
         var maximumEddy = 0.0
         for (value in eddy) maximumEddy = max(maximumEddy, value)
         val diffusiveCourant = maximumEddy * seconds * 2 * (1.0 / (dx * dx) + 1.0 / (dy * dy))
-        steps = ceil(max(advectiveCourant, diffusiveCourant) / TARGET_COURANT).toInt().coerceIn(1, MAX_TRANSPORT_STEPS)
+        steps = ceil(max(max(advectiveCourant, diffusiveCourant) / TARGET_COURANT, seconds / MAX_RAIN_SUBSTEP_SECONDS))
+            .toInt().coerceIn(1, MAX_TRANSPORT_STEPS)
         val dt = seconds / steps
-
-        repeat(steps) {
-            transportStep(water, circulation, dt)
+        for (cell in 0 until count) {
+            saturation[cell] = max(1e-6, ColumnThermodynamics.saturationMm(airTemperatureK[cell],
+                physics.referenceDryColumnKgM2, config.gravity, physics))
         }
-        maximumCourant = max(advectiveCourant, diffusiveCourant) / steps
 
-        // One precipitation closure. Supersaturation, convergence/orographic ascent and
-        // convective ascent are combined multiplicatively so no water is counted twice.
+        // Transport and precipitation alternate within the phase, so water converging
+        // into an ascending column rains as it arrives instead of piling up for ten days.
         var rainfall = 0.0
         var potentialRainfall = 0.0
         var supersaturationRain = 0.0
         var reEvaporated = 0.0
         rainSource.fill(0.0)
-        for (cell in 0 until count) {
-            val x = cell % width
-            val y = cell / width
-            val air = airTemperatureK[cell]
-            val saturationMm = ColumnThermodynamics.saturationMm(air, physics.referenceDryColumnKgM2,
-                config.gravity, physics)
-            saturation[cell] = max(1e-6, saturationMm)
-            val humidity = (water[cell] / saturation[cell]).coerceIn(0.0, 4.0)
-            val supersaturation = max(0.0, water[cell] - saturation[cell])
-            val supersaturationRate = 1 - exp(-seconds / SUPERSATURATION_SECONDS)
-            val supersaturationFraction = if (water[cell] > 1e-12)
-                (supersaturation / water[cell]).coerceIn(0.0, 1.0) * supersaturationRate else 0.0
-            val supersaturationCondensed = supersaturation * supersaturationRate
-
-            val lift = max(0.0, circulation.ascent[cell] * regimeStorm[cell])
-            val scaleHeight = MOIST_SCALE_HEIGHT_METERS + 12 * (air - 273.15).coerceIn(-40.0, 35.0)
-            // Lift only condenses air that is already close to saturation. A dry column
-            // cannot be wrung out merely because it is ascending.
-            val humidityGate = (((humidity - 0.62) / 0.38).coerceIn(0.0, 1.0)).let { it * it }
-            val liftFraction = (1 - exp(-lift * seconds / max(800.0, scaleHeight))) * humidityGate
-            val combined = 1 - (1 - supersaturationFraction.coerceIn(0.0, 1.0)) * (1 - liftFraction.coerceIn(0.0, 1.0))
-            val raw = water[cell] * combined * PRECIPITATION_EFFICIENCY
-            // Dry descending air evaporates part of the falling rain back into the column.
-            val descent = circulation.descent[cell]
-            val dryFactor = (1 - relativeHumidity(cell)).coerceIn(0.0, 1.0)
-            val reEvaporationFraction = (RE_EVAPORATION_BASE + RE_EVAPORATION_DRY * dryFactor +
-                RE_EVAPORATION_DESCENT * min(1.0, descent / 0.01)).coerceIn(0.0, MAX_RE_EVAPORATION)
-            val reEvaporatedMm = raw * reEvaporationFraction
-            val rain = max(0.0, raw - reEvaporatedMm).coerceAtMost(water[cell])
-            water[cell] -= rain
-            rainSource[cell] = rain
-            rainfall += rain
-            potentialRainfall += raw
-            supersaturationRain += supersaturationCondensed
-            reEvaporated += reEvaporatedMm
+        repeat(steps) {
+            transportStep(water, dt)
+            for (cell in 0 until count) {
+                val result = precipitate(cell, water[cell], dt, circulation, airTemperatureK[cell])
+                water[cell] -= result.rain
+                rainSource[cell] += result.rain
+                rainfall += result.rain
+                potentialRainfall += result.raw
+                supersaturationRain += result.supersaturation
+                reEvaporated += result.reEvaporated
+            }
         }
+        maximumCourant = max(advectiveCourant, diffusiveCourant) / steps
 
         // Prolong to the physical tile/atmosphere surface, weighting rain toward the
         // colder, higher sub-columns inside a climate cell while conserving the total.
@@ -177,15 +160,48 @@ internal class ClimateMoisture(
             0.0, wetSum / count, maximumLift, residual)
     }
 
+    private class RainStep(val rain: Double, val raw: Double, val supersaturation: Double, val reEvaporated: Double)
+
+    /**
+     * One precipitation closure over a substep. Supersaturation, convergence/orographic
+     * ascent and convective ascent are combined multiplicatively so no water is counted
+     * twice; falling rain partly re-evaporates in dry or subsiding air.
+     */
+    private fun precipitate(cell: Int, water: Double, dt: Double, circulation: CirculationState, air: Double): RainStep {
+        if (water <= 1e-12) return RainStep(0.0, 0.0, 0.0, 0.0)
+        val humidity = (water / saturation[cell]).coerceIn(0.0, 4.0)
+        val supersaturation = max(0.0, water - saturation[cell])
+        val supersaturationRate = 1 - exp(-dt / SUPERSATURATION_SECONDS)
+        val supersaturationFraction = (supersaturation / water).coerceIn(0.0, 1.0) * supersaturationRate
+        // Transient eddies (fronts, upper lows) lift air intermittently even where the
+        // time-mean flow subsides, so no climate is a rain-free numerical desert.
+        val lift = max(0.0, (circulation.ascent[cell] + TRANSIENT_ASCENT_METERS_PER_SECOND) * regimeStorm[cell])
+        val scaleHeight = MOIST_SCALE_HEIGHT_METERS + 12 * (air - 273.15).coerceIn(-40.0, 35.0)
+        // Lift only condenses air that is already close to saturation. A dry column
+        // cannot be wrung out merely because it is ascending.
+        // Sub-grid humidity variance: a dry mean column still holds a few moist patches.
+        val humidityGate = (((humidity - LIFT_HUMIDITY_THRESHOLD) / (1 - LIFT_HUMIDITY_THRESHOLD))
+            .coerceIn(0.0, 1.0)).let { it * it * it }
+        val liftFraction = (1 - exp(-lift * dt / max(800.0, scaleHeight))) * humidityGate
+        val combined = 1 - (1 - supersaturationFraction) * (1 - liftFraction.coerceIn(0.0, 1.0))
+        val raw = water * combined * PRECIPITATION_EFFICIENCY
+        val dryFactor = (1 - humidity).coerceIn(0.0, 1.0)
+        val reEvaporationFraction = (RE_EVAPORATION_BASE + RE_EVAPORATION_DRY * dryFactor +
+            RE_EVAPORATION_DESCENT * min(1.0, circulation.descent[cell] / 0.01)).coerceIn(0.0, MAX_RE_EVAPORATION)
+        val reEvaporatedMm = raw * reEvaporationFraction
+        val rain = max(0.0, raw - reEvaporatedMm).coerceAtMost(water)
+        return RainStep(rain, raw, supersaturation * supersaturationRate, reEvaporatedMm)
+    }
+
     /** Upwind advection plus bounded eddy diffusion, one explicit substep. */
-    private fun transportStep(water: DoubleArray, circulation: CirculationState, dt: Double) {
+    private fun transportStep(water: DoubleArray, dt: Double) {
         water.copyInto(next)
         // Zonal faces (periodic).
         for (y in 0 until height) {
             for (x in 0 until width) {
                 val cell = y * width + x
                 val east = y * width + (x + 1) % width
-                val u = 0.5 * (circulation.east[cell] + circulation.east[east])
+                val u = 0.5 * (transportEast[cell] + transportEast[east])
                 val kappa = 0.5 * (eddy[cell] + eddy[east])
                 var flux = if (u > 0) u * water[cell] else u * water[east]
                 flux -= kappa * (water[east] - water[cell]) / dx
@@ -203,7 +219,7 @@ internal class ClimateMoisture(
             for (x in 0 until width) {
                 val cell = y * width + x
                 val northCell = cell + width
-                val v = 0.5 * (circulation.north[cell] + circulation.north[northCell])
+                val v = 0.5 * (transportNorth[cell] + transportNorth[northCell])
                 val kappa = 0.5 * (eddy[cell] + eddy[northCell])
                 var flux = if (v > 0) v * water[cell] else v * water[northCell]
                 flux -= kappa * (water[northCell] - water[cell]) / dy
@@ -219,7 +235,7 @@ internal class ClimateMoisture(
     }
 
     companion object {
-        const val EDDY_VELOCITY_BASE = 0.9
+        const val EDDY_VELOCITY_BASE = 0.3
         const val EDDY_VELOCITY_GRADIENT = 0.8
         const val TARGET_COURANT = 0.7
         const val MAX_TRANSPORT_STEPS = 400
@@ -230,5 +246,10 @@ internal class ClimateMoisture(
         const val RE_EVAPORATION_DRY = 0.30
         const val RE_EVAPORATION_DESCENT = 0.18
         const val MAX_RE_EVAPORATION = 0.48
+        /** Share of the low-level divergent inflow that carries column water (dry return flow aloft). */
+        const val DIVERGENT_MOISTURE_FRACTION = 0.8
+        const val LIFT_HUMIDITY_THRESHOLD = 0.3
+        const val TRANSIENT_ASCENT_METERS_PER_SECOND = 0.004
+        const val MAX_RAIN_SUBSTEP_SECONDS = 86400.0
     }
 }

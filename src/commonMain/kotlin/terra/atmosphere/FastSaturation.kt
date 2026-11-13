@@ -13,6 +13,14 @@ internal object FastSaturation {
     private const val COUNT = ((MAX_TEMPERATURE - MIN_TEMPERATURE) / STEP).toInt() + 1
     private val table = DoubleArray(COUNT) { WarmCloud.vaporPressure(MIN_TEMPERATURE + it * STEP) }
 
+    /** Saturation vapour pressure in pascals from the same table. */
+    fun vaporPressure(temperature: Double): Double {
+        val position = ((temperature.coerceIn(MIN_TEMPERATURE, MAX_TEMPERATURE) - MIN_TEMPERATURE) / STEP)
+        val index = position.toInt().coerceIn(0, COUNT - 2)
+        val fraction = position - index
+        return table[index] * (1 - fraction) + table[index + 1] * fraction
+    }
+
     fun mixingRatio(temperature: Double, pressure: Double): Double {
         require(pressure > 1000.0)
         val position = ((temperature.coerceIn(MIN_TEMPERATURE, MAX_TEMPERATURE) - MIN_TEMPERATURE) / STEP)
