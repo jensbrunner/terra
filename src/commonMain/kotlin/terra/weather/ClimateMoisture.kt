@@ -1,7 +1,7 @@
 package terra.weather
 
 import terra.atmosphere.MoistPhysicsConfig
-import terra.atmosphere.FastSaturation
+import terra.atmosphere.ColumnThermodynamics
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.exp
@@ -127,10 +127,8 @@ internal class ClimateMoisture(
             val x = cell % width
             val y = cell / width
             val air = airTemperatureK[cell]
-            val pressure = 101_325.0 * exp(-geography.elevationMeters[cell] / 8000.0)
-            val saturationMm = physics.referenceDryColumnKgM2 * physics.humidColumnFraction *
-                FastSaturation.mixingRatio(air.coerceIn(190.0, 350.0), pressure) *
-                SATURATION_COLUMN_FACTOR
+            val saturationMm = ColumnThermodynamics.saturationMm(air, physics.referenceDryColumnKgM2,
+                config.gravity, physics)
             saturation[cell] = max(1e-6, saturationMm)
             val humidity = (water[cell] / saturation[cell]).coerceIn(0.0, 4.0)
             val supersaturation = max(0.0, water[cell] - saturation[cell])
@@ -225,7 +223,6 @@ internal class ClimateMoisture(
         const val EDDY_VELOCITY_GRADIENT = 0.8
         const val TARGET_COURANT = 0.7
         const val MAX_TRANSPORT_STEPS = 400
-        const val SATURATION_COLUMN_FACTOR = 1.0
         const val SUPERSATURATION_SECONDS = 6 * 3600.0
         const val MOIST_SCALE_HEIGHT_METERS = 2600.0
         const val PRECIPITATION_EFFICIENCY = 0.52

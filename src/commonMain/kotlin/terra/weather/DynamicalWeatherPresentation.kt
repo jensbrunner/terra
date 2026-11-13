@@ -41,7 +41,9 @@ internal class DynamicalWeatherPresentation(
     override fun relativeHumidity(x: Int, y: Int) = climate?.let { result -> sample(x, y) { cx, cy -> result.relativeHumidity(cy * config.width + cx) } } ?: sample(x, y, view::relativeHumidityAt)
     override fun cloudWaterMm(x: Int, y: Int) = climate?.let { result -> sample(x, y) { cx, cy -> result.cloudMm(cy * config.width + cx) } } ?: sample(x, y, view::cloudWaterMmAt)
     override fun cloudCover(x: Int, y: Int) = 1 - exp(-cloudWaterMm(x, y) / 0.15)
-    override fun atmosphericWaterMm(x: Int, y: Int) = if (climate != null) sample(x, y) { cx, cy -> view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy) } else sample(x, y, view::vaporMmAt)
+    override fun atmosphericWaterMm(x: Int, y: Int) = sample(x, y) { cx, cy ->
+        view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy)
+    }
     override fun airTemperatureC(x: Int, y: Int) = if (climate != null)
         sample(x, y) { cx, cy -> climate.airTemperatureC(cy * config.width + cx) }
     else sample(x, y, view::temperatureKelvinAt) - 273.15

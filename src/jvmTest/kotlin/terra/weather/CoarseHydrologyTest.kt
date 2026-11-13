@@ -98,6 +98,41 @@ class CoarseHydrologyTest {
     }
 
     @Test
+    fun energyLimitedSnowDoesNotAlsoMeltByDegreeDayAndOverlapEnergyHasCellUnits() {
+        val world = World(31742, 16, 12, TerrainGenerationSettings(baseElevation = 0.4,
+            continentStrength = 0.0, regionalStrength = 0.0, detailStrength = 0.0))
+        val config = DryAtmosphereConfig(width = 6, height = 5)
+        val hydrology = HydrologySimulation(HydrologyTopology(world))
+        val surface = TerrainMoistSurface(world, AtmosphereTileMapping(world.width, world.height, config), hydrology)
+        surface.beginUpdate()
+        for (cell in 0 until config.cellCount) {
+            surface.setCellTemperature(cell, 10.0)
+            surface.receiveClimateRain(cell, 200.0, 1.0, 1.0)
+        }
+        for (tile in surface.soil.indices) surface.soil[tile] = 250.0
+        val water = surface.totalWaterKg
+        val snow = surface.snowWaterMmTiles
+        val fields = Array(7) { DoubleArray(world.width * world.height) }
+        surface.finishClimateStep(day, energyLimitedSnowMelt = true, totals = ClimateFluxTotals(fields))
+        assertEquals(snow, surface.snowWaterMmTiles, 1e-8, "No second empirical melt without an energy budget")
+        val melted = surface.meltSnowEnergyMm(0, 334_000.0)
+        assertEquals(1.0, melted, 1e-12, "334 kJ per square metre melts 1 mm over the cell, including partial tile overlaps")
+        assertEquals(snow - surface.mapping.tilesPerCell, surface.snowWaterMmTiles, 1e-8)
+        surface.meltSnowEnergyMm(0, 100 * 334_000.0)
+        assertTrue(surface.overflow.sum() > 0.0)
+        assertEquals(surface.overflow.sum(), fields[3].sum(), 1e-12,
+            "Melt after the bucket pass must remain visible in interval diagnostics")
+        for (cell in 0 until config.cellCount) surface.setCellTemperature(cell, -5.0)
+        surface.setCellTemperature(0, 10.0)
+        val coldCellSnow = surface.snowWaterMm(config.cellCount - 1)
+        surface.finishClimateStep(day)
+        assertEquals(coldCellSnow, surface.snowWaterMm(config.cellCount - 1), 1e-12,
+            "A warm member of one response unit must not melt its cold members")
+        hydrology.acceptClimateFluxBatch(surface.sealFluxBatch(2 * day))
+        assertEquals(water, surface.totalWaterKg, water * 1e-12)
+    }
+
+    @Test
     fun responseUnitsPreserveAreaGroundwaterSnowAndWholeSurfaceMass() {
         val width = 16; val height = 12
         val config = DryAtmosphereConfig(width = 6, height = 5)
@@ -196,7 +231,7 @@ class CoarseHydrologyTest {
         assertEquals(365.25 * day, represented)
         assertEquals(1L, hydrology.completedRoutingPasses)
         assertEquals(capacity, hydrology.lakeStorageMmTiles(0), 1e-9)
-        assertEquals(4003 - capacity, hydrology.outletMmTilesLastPeriod, 1e-9)
+        assertEquals(4003 - capacity, hydrology.outletMmTilesLastPeriod + hydrology.channelStorageMmTiles, 1e-9)
         assertEquals(initial, hydrology.storedAndPendingWaterMmTiles, 1e-9)
         assertEquals(0.0, hydrology.waterInventory().pendingDurationSeconds)
         val wet = hydrology.snapshot()

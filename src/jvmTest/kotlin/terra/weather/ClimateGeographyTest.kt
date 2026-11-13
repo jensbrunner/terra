@@ -62,7 +62,10 @@ class ClimateGeographyTest {
             val circulation = CirculationState(east, zero, east, zero, zero, ascent, zero, zero, 14.0, 14.0, 14.0)
             val moisture = ClimateMoisture(grid, geography, MoistPhysicsConfig(),
                 WeatherRegimes(grid, 3))
-            val water = DoubleArray(count) { 7.0 }
+            // Specify moisture by RH under the shared saturation convention.
+            val capacity = terra.atmosphere.ColumnThermodynamics.saturationMm(265.0, 8000.0,
+                fine.gravity, MoistPhysicsConfig())
+            val water = DoubleArray(count) { capacity * 0.90 }
             val surface = DoubleArray(count) { -3.0 }
             val air = DoubleArray(count) { 265.0 }
             val fineElevation = DoubleArray(fine.cellCount) {
@@ -115,7 +118,9 @@ class ClimateGeographyTest {
             val ascent = DoubleArray(grid.count) { geography.upliftMetersPerSecond(it, east[it], north[it]) }
             val circulation = CirculationState(east, north, east, north, zero, ascent, zero, zero, 14.0, 14.0, 14.0)
             val moisture = ClimateMoisture(grid, geography, MoistPhysicsConfig(), WeatherRegimes(grid, 9))
-            val water = DoubleArray(grid.count) { 7.0 }
+            val capacity = terra.atmosphere.ColumnThermodynamics.saturationMm(265.0, 8000.0,
+                fine.gravity, MoistPhysicsConfig())
+            val water = DoubleArray(grid.count) { capacity * 0.90 }
             val air = DoubleArray(grid.count) { 265.0 }
             val surface = DoubleArray(grid.count) { -3.0 }
             val fineElevation = DoubleArray(fine.cellCount) { maxOf(0.0, (elevation[it] - settings.seaLevel) * 10_000.0) }

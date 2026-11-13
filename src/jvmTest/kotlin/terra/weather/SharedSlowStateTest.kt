@@ -37,6 +37,7 @@ class SharedSlowStateTest {
         thermal[0] = oldTemperature
         assertFailsWith<IllegalArgumentException> { thermal[0] = Double.NaN }
 
+        val dryBasinCapacity = surface.heatCapacityJm2K(cell(40))
         // Move real ocean water into a pre-existing wet lake, without an atmospheric source term.
         assertEquals(80.0, hydrology.evaporateOceanWaterMmTiles(80.0))
         val initialLakeExchange = object : HydrologyExchange {
@@ -46,6 +47,8 @@ class SharedSlowStateTest {
         hydrology.acceptFluxBatch(WaterFluxBatch.fromTileDepths(width, height, 86400.0,
             DoubleArray(80), DoubleArray(80) { if (it in depression) 20.0 else 0.0 }, DoubleArray(80), initialLakeExchange))
         assertEquals(80.0, hydrology.lakeStorageMmTiles(0))
+        assertTrue(surface.heatCapacityJm2K(cell(40)) > dryBasinCapacity * 10)
+        assertEquals(0.07, surface.albedo(cell(40)), 1e-12)
 
         // Establish six hours of pending runoff before the synthetic twelve-hour interval.
         surface.beginUpdate()
@@ -105,6 +108,26 @@ class SharedSlowStateTest {
     }
 
     @Test
+    fun slabIceSurvivesRepeatedClimateAndDetailedTransitions() {
+        val world = World(31742, 31, 23)
+        val hydrology = HydrologySimulation(HydrologyTopology(world))
+        val weather = DynamicalWeather(world, hydrology, DryAtmosphereConfig(width = 12, height = 8))
+        val cell = weather.surfaceState.landFraction.indexOfFirst { it < 0.01 }
+        assertTrue(cell >= 0)
+        weather.surfaceState.seaIceFraction[cell] = 0.6
+        weather.surfaceThermalState[cell] = ClimateEnergyModel.FREEZING_KELVIN
+        weather.advanceClimateInterval(1.0)
+        weather.resumeDetailed()
+        val albedo = weather.surfaceState.albedo(cell)
+        assertTrue(albedo > 0.30, "Detailed radiation must see the persisted ice albedo")
+        weather.advanceBudgeted(20.0, 1)
+        hydrology.acceptWeatherStep(weather, 20.0)
+        weather.advanceClimateInterval(1.0)
+        assertTrue(weather.surfaceState.seaIceFraction[cell] > 0.59,
+            "Constructing a new climate engine must retain the shared slab-ice memory")
+    }
+
+    @Test
     fun batchCopiesInputsValidatesAmountsAndCannotBeAcceptedTwice() {
         val topology = HydrologyTopology(3, 1, doubleArrayOf(0.5, 0.4, 0.0), booleanArrayOf(false, false, true))
         val hydrology = HydrologySimulation(topology)
@@ -120,12 +143,12 @@ class SharedSlowStateTest {
         runoff[0] = 999.0
         val initial = hydrology.oceanWaterMmTiles
         hydrology.acceptFluxBatch(batch)
-        assertEquals(initial + 3.0, hydrology.oceanWaterMmTiles)
+        assertEquals(initial + 3.0, hydrology.oceanWaterMmTiles + hydrology.channelStorageMmTiles, 1e-9)
         assertEquals(1, acknowledgements)
         assertFailsWith<IllegalStateException> { HydrologySimulation(topology).acceptFluxBatch(batch) }
         assertFailsWith<IllegalArgumentException> {
             WaterFluxBatch.fromTileDepths(3, 1, 1.0, doubleArrayOf(Double.NaN, 0.0, 0.0), zero, zero, exchange)
         }
-        assertEquals(initial + 3.0, hydrology.oceanWaterMmTiles)
+        assertEquals(initial + 3.0, hydrology.oceanWaterMmTiles + hydrology.channelStorageMmTiles, 1e-9)
     }
 }

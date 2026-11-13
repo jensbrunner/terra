@@ -6,6 +6,7 @@ import terra.atmosphere.PlanetLatitude
 import terra.atmosphere.SolarConfig
 import terra.atmosphere.SurfaceThermalState
 import terra.atmosphere.FastSaturation
+import terra.atmosphere.ColumnThermodynamics
 import kotlin.math.exp
 import kotlin.math.expm1
 import kotlin.math.floor
@@ -66,8 +67,10 @@ internal class ClimateEnergyModel(
     val airTemperatureK = DoubleArray(count)
     private val airScratch = DoubleArray(count)
     private val surfaceRestricted = DoubleArray(count)
-    private val vaporSaturation = DoubleArray(fineCount)
-    private val seaIceFraction = DoubleArray(fineCount)
+    private val surfacePressure = DoubleArray(fineCount) {
+        101_325.0 * exp(-surface.terrain.meanElevationMeters[it] / 8000.0)
+    }
+    private val seaIceFraction = surface.seaIceFraction
     private val fineAlbedo = DoubleArray(fineCount)
     private val fineHeatCapacity = DoubleArray(fineCount)
     var seaIceJoules = 0.0; private set
@@ -76,6 +79,7 @@ internal class ClimateEnergyModel(
     private var initialized = false
     private var lastMidSeconds = 0.0
     private var phasesSinceProperties = 0
+    private var waterMaskRevision = -1L
 
     // Accumulated external and internal energy, joules.
     var absorbedShortwaveJoules = 0.0; private set
@@ -108,7 +112,7 @@ internal class ClimateEnergyModel(
         grid.restrict(DoubleArray(fineCount) { fineTemperature[it] - 273.15 }, surfaceRestricted)
         for (cell in 0 until count) {
             if (!airTemperatureK[cell].isFinite() || airTemperatureK[cell] <= 0.0) {
-                val elevationLapse = 0.0065 * geography.elevationMeters[cell]
+                val elevationLapse = ColumnThermodynamics.LAPSE_K_PER_METER * geography.elevationMeters[cell]
                 airTemperatureK[cell] = (surfaceRestricted[cell] + 273.15 + ACTIVE_AIR_OFFSET_K -
                     elevationLapse).coerceIn(180.0, 340.0)
             }
@@ -122,11 +126,9 @@ internal class ClimateEnergyModel(
         phaseEvaporationMm = 0.0
         phasePotentialMm = 0.0
         // Surface albedo and heat capacity change slowly; refresh every few phases.
-        if (phasesSinceProperties % 3 == 0) {
-            for (cell in 0 until fineCount) {
-                fineAlbedo[cell] = surface.albedo(cell)
-                fineHeatCapacity[cell] = surface.heatCapacityJm2K(cell)
-            }
+        if (phasesSinceProperties % 3 == 0 || waterMaskRevision != surface.waterMaskRevision) {
+            waterMaskRevision = surface.waterMaskRevision
+            surface.fillThermalProperties(fineAlbedo, fineHeatCapacity)
         }
         phasesSinceProperties++
     }
@@ -152,28 +154,27 @@ internal class ClimateEnergyModel(
         // Air temperature at each fine cell: coarse free-air state plus local lapse.
         val insolationFraction = ((midSeconds / solar.yearSeconds + solar.initialYearFraction) % 1.0)
         val tilt = solar.axialTiltDegrees
-        val sun = DoubleArray(fineCount)
-        for (cell in 0 until fineCount) {
-            val latitude = PlanetLatitude.atmosphereRowRadians(cell / fineConfig.width, fineConfig.height)
-            sun[cell] = ClimateInsolation.dailyMean(insolationFraction, latitude, tilt)
+        val sun = DoubleArray(fineConfig.height) { row ->
+            val latitude = PlanetLatitude.atmosphereRowRadians(row, fineConfig.height)
+            ClimateInsolation.dailyMean(insolationFraction, latitude, tilt)
         }
 
         for (cell in 0 until fineCount) {
             val coarse = grid.overlap.targetOfSource[cell]
-            val localElevation = surface.terrain.meanElevationMeters[cell]
-            val lapse = 0.0065 * (localElevation - geography.elevationMeters[coarse])
-            val air = (airTemperatureK[coarse] - lapse).coerceIn(180.0, 340.0)
+            val air = detailedAirTemperatureAt(cell)
             val surfaceTemperature = fineTemperature[cell]
             val land = surface.landFraction[cell]
             val ice = seaIceFraction[cell]
             val albedo = if (land < 0.5) OCEAN_ALBEDO * (1 - ice) + SEA_ICE_ALBEDO * ice else fineAlbedo[cell]
+            // Legacy calibrated radiative proxy. Changing its meaning to condensate
+            // requires retuning the approximate air/surface energy closure together.
             val cloud = atmosphere.effectiveMoistureMmAt(cell)
             val relativeHumidity = relativeHumidityAt(cell).coerceIn(0.0, 1.0)
 
-            val incomingSolar = physics.solarPeakWm2 * sun[cell] * SOLAR_SCALE
-            val cloudReflection = CLOUD_SHORTWAVE_REFLECTION * (1 - exp(-cloud / CLOUD_OPTICAL_MM))
+            val incomingSolar = physics.solarPeakWm2 * sun[cell / fineConfig.width] * SOLAR_SCALE
+            val cloudReflection = CLOUD_SHORTWAVE_REFLECTION *
+                (if (cloud / CLOUD_OPTICAL_MM >= 38.0) 1.0 else 1 - exp(-cloud / CLOUD_OPTICAL_MM))
             val shortwave = incomingSolar * (1 - albedo) * (1 - cloudReflection)
-            val airSolar = incomingSolar * ATMOSPHERIC_SOLAR_ABSORPTION * (1 - 0.6 * cloudReflection)
             val airEmissivity = (CLEAR_SKY_EMISSIVITY + HUMIDITY_EMISSIVITY * relativeHumidity)
                 .coerceIn(0.4, 0.98)
             val airEmission = airEmissivity * STEFAN_BOLTZMANN * air * air * air * air
@@ -191,13 +192,13 @@ internal class ClimateEnergyModel(
 
             // Potential evaporation from the surface water vapour deficit, capped by
             // the energy actually available at the surface this fragment.
-            val surfacePressure = 101_325.0 * exp(-localElevation / 8000.0)
-            vaporSaturation[cell] = FastSaturation.mixingRatio(
-                surfaceTemperature.coerceIn(190.0, 345.0), surfacePressure)
-            val airSaturation = FastSaturation.mixingRatio(air.coerceIn(190.0, 345.0), surfacePressure)
+            val pressure = surfacePressure[cell]
+            val vaporSaturation = FastSaturation.mixingRatio(
+                surfaceTemperature.coerceIn(190.0, 345.0), pressure)
+            val airSaturation = FastSaturation.mixingRatio(air.coerceIn(190.0, 345.0), pressure)
             val specificHumidity = relativeHumidity * airSaturation
             val bulkPotential = AIR_DENSITY * DRAG_COEFFICIENT * windSpeed *
-                max(0.0, vaporSaturation[cell] - specificHumidity) * seconds
+                max(0.0, vaporSaturation - specificHumidity) * seconds
             val netRadiative = shortwave + airEmission - surfaceEmission - sensible
             val energyLimit = max(0.0, netRadiative) * seconds / LATENT_HEAT +
                 max(0.0, (surfaceTemperature - 273.15)) * SURFACE_HEAT_CAPACITY_LIMIT_FRACTION *
@@ -210,7 +211,7 @@ internal class ClimateEnergyModel(
             val meltLatent = if (meltSnowThisExchange && surface.snowMmInCell(cell) > 0.0) {
                 val meltEnergy = max(0.0, shortwave + airEmission - surfaceEmission) * seconds * SNOW_MELT_ENERGY_FRACTION
                 val meltMm = surface.meltSnowEnergyMm(cell, meltEnergy)
-                snowMeltJoules += meltMm * LATENT_HEAT_FUSION
+                snowMeltJoules += meltMm * LATENT_HEAT_FUSION * fineConfig.cellArea
                 meltMm * LATENT_HEAT_FUSION / seconds
             } else 0.0
 
@@ -237,20 +238,22 @@ internal class ClimateEnergyModel(
                 // A simple slab sea-ice buffer: the ocean cannot cool below freezing
                 // without first growing ice. The phase-change heat is reported.
                 if (nextTemperature < FREEZING_KELVIN) {
-                    val energy = (FREEZING_KELVIN - nextTemperature) * surface.heatCapacityJm2K(cell)
+                    val energy = (FREEZING_KELVIN - nextTemperature) * fineHeatCapacity[cell]
                     val iceGain = (energy / (LATENT_HEAT_FUSION * SEA_ICE_MASS_PER_M2)).coerceIn(0.0, 1.0 - ice)
                     seaIceFraction[cell] = ice + iceGain
-                    seaIceJoules += energy
-                    nextTemperature = FREEZING_KELVIN
+                    val phaseEnergy = iceGain * LATENT_HEAT_FUSION * SEA_ICE_MASS_PER_M2
+                    seaIceJoules += phaseEnergy * fineConfig.cellArea
+                    nextTemperature += phaseEnergy / fineHeatCapacity[cell]
                 } else if (nextTemperature > FREEZING_KELVIN && ice > 0.0) {
-                    val energy = (nextTemperature - FREEZING_KELVIN) * surface.heatCapacityJm2K(cell)
+                    val energy = (nextTemperature - FREEZING_KELVIN) * fineHeatCapacity[cell]
                     val iceLoss = (energy / (LATENT_HEAT_FUSION * SEA_ICE_MASS_PER_M2)).coerceIn(0.0, ice)
                     seaIceFraction[cell] = ice - iceLoss
-                    seaIceJoules -= energy
-                    nextTemperature = FREEZING_KELVIN
+                    val phaseEnergy = iceLoss * LATENT_HEAT_FUSION * SEA_ICE_MASS_PER_M2
+                    seaIceJoules -= phaseEnergy * fineConfig.cellArea
+                    nextTemperature -= phaseEnergy / fineHeatCapacity[cell]
                 }
             } else if (nextTemperature < LAND_TEMPERATURE_FLOOR_KELVIN) {
-                coldFloorJoules += (LAND_TEMPERATURE_FLOOR_KELVIN - nextTemperature) * surface.heatCapacityJm2K(cell)
+                coldFloorJoules += (LAND_TEMPERATURE_FLOOR_KELVIN - nextTemperature) * fineHeatCapacity[cell] * fineConfig.cellArea
                 nextTemperature = LAND_TEMPERATURE_FLOOR_KELVIN
             }
             fineTemperature[cell] = nextTemperature.coerceIn(180.0, 345.0)
@@ -266,10 +269,10 @@ internal class ClimateEnergyModel(
         }
 
 
-        absorbedShortwaveJoules += absorbed
-        outgoingLongwaveJoules += outgoing
-        sensibleHeatJoules += sensibleTotal
-        latentHeatJoules += latentTotal
+        absorbedShortwaveJoules += absorbed * fineConfig.cellArea
+        outgoingLongwaveJoules += outgoing * fineConfig.cellArea
+        sensibleHeatJoules += sensibleTotal * fineConfig.cellArea
+        latentHeatJoules += latentTotal * fineConfig.cellArea
         return evaporation
     }
 
@@ -279,7 +282,6 @@ internal class ClimateEnergyModel(
         val heat = DoubleArray(count)
         val weight = DoubleArray(count)
         for (cell in 0 until rainMmFine.size) {
-            if (rainMmFine[cell] <= 0.0) continue
             val coarse = grid.overlap.targetOfSource[cell]
             heat[coarse] += rainMmFine[cell] * LATENT_HEAT
             weight[coarse] += 1.0
@@ -288,7 +290,7 @@ internal class ClimateEnergyModel(
             if (weight[coarse] <= 0.0) continue
             val delta = heat[coarse] / weight[coarse] / AIR_HEAT_CAPACITY
             airTemperatureK[coarse] = (airTemperatureK[coarse] + delta).coerceIn(180.0, 340.0)
-            condensationJoules += heat[coarse]
+            condensationJoules += heat[coarse] * fineConfig.cellArea
         }
     }
 
@@ -312,7 +314,7 @@ internal class ClimateEnergyModel(
         }
         for (cell in 0 until count) {
             val target = surfaceRestricted[cell] + 273.15 + ACTIVE_AIR_OFFSET_K -
-                0.0065 * geography.elevationMeters[cell]
+                ColumnThermodynamics.LAPSE_K_PER_METER * geography.elevationMeters[cell]
             airTemperatureK[cell] = (airTemperatureK[cell] + (target - airTemperatureK[cell]) * AIR_SURFACE_COUPLING)
                 .coerceIn(180.0, 340.0)
         }
@@ -332,7 +334,7 @@ internal class ClimateEnergyModel(
             airTemperatureK[cell] = (airTemperatureK[cell] + (airScratch[cell] - airTemperatureK[cell]) * AIR_ADVECTION_WEIGHT)
                 .coerceIn(180.0, 340.0)
         }
-        airTransportJoules += transport * AIR_ADVECTION_WEIGHT
+        airTransportJoules += transport * AIR_ADVECTION_WEIGHT * config.cellArea
 
         // Ocean mixed-layer heat redistribution. Only same-basin neighbours exchange;
         // no global teleportation or prescribed western-coast warming is introduced.
@@ -389,7 +391,7 @@ internal class ClimateEnergyModel(
         airResidualJoules = 0.0
         return EnergyIntervalDiagnostics(
             absorbedShortwaveJoules, outgoingLongwaveJoules, sensibleHeatJoules, latentHeatJoules,
-            airTransportJoules, oceanTransportJoules * config.cellArea, snowMeltJoules, condensationJoules,
+            airTransportJoules, oceanTransportJoules, snowMeltJoules, condensationJoules,
             beforeSurfaceResidual, beforeAirResidual, phasePotentialMm, phaseEvaporationMm
         )
     }
@@ -417,6 +419,18 @@ internal class ClimateEnergyModel(
     }
 
     fun airTemperatureAt(cell: Int): Double = airTemperatureK[cell]
+
+    /** Fine-grid air at the same elevation convention used by exchange(). */
+    fun detailedAirTemperatureAt(fineCell: Int): Double {
+        val coarse = grid.overlap.targetOfSource[fineCell]
+        return ColumnThermodynamics.airAtElevation(airTemperatureK[coarse],
+            surface.terrain.meanElevationMeters[fineCell], geography.elevationMeters[coarse])
+    }
+
+    /** The evolved climate-air field is handed into the resolved physics unchanged. */
+    fun detailedAirTemperatureKelvin(): DoubleArray =
+        DoubleArray(fineCount) { detailedAirTemperatureAt(it) }
+
     fun potentialEvaporationMm(): Double = phasePotentialMm
     fun actualEvaporationMm(): Double = phaseEvaporationMm
 
@@ -439,7 +453,6 @@ internal class ClimateEnergyModel(
         const val SEA_ICE_ALBEDO = 0.55
         const val OCEAN_ALBEDO = 0.07
         const val LAND_TEMPERATURE_FLOOR_KELVIN = 208.15
-        const val ATMOSPHERIC_SOLAR_ABSORPTION = 0.24
         const val SOLAR_SCALE = 0.85
         const val EQUILIBRIUM_ITERATIONS = 2
         const val LATENT_HEAT = 2_500_000.0

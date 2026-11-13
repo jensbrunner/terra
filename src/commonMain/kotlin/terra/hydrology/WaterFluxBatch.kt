@@ -91,7 +91,7 @@ class WaterFluxBatch private constructor(
 data class HydrologyWaterInventory(
     val oceanMmTiles: Double, val lakesMmTiles: Double, val pendingRunoffMmTiles: Double,
     val pendingLakeRainMmTiles: Double, val pendingPotentialLakeEvaporationMmTiles: Double,
-    val pendingDurationSeconds: Double
+    val pendingDurationSeconds: Double, val channelsMmTiles: Double = 0.0
 ) {
-    val totalWaterMmTiles: Double get() = oceanMmTiles + lakesMmTiles + pendingRunoffMmTiles + pendingLakeRainMmTiles
+    val totalWaterMmTiles: Double get() = oceanMmTiles + lakesMmTiles + channelsMmTiles + pendingRunoffMmTiles + pendingLakeRainMmTiles
 }

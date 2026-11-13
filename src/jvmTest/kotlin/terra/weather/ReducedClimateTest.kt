@@ -123,6 +123,7 @@ class ReducedClimateTest {
         }
         val output = File("build/experiments/climate-century.png"); output.parentFile.mkdirs()
         ImageIO.write(image, "png", output)
+        println("CENTURY_THERMAL surface_c=${globalT/globalN} tropics_c=${tropT/max(1,tropN)} land_c=${meanLandT/max(1,landCount)} wet=${wetSoil.toDouble()/land} trees=${trees/land} rainfall=${landRain/max(1,landCount)}")
         assertTrue(residual < 1e-10)
         assertTrue(wetSoil > land / 10 && trees / land > 0.05)
         assertTrue(maxRain > minRain + 300)

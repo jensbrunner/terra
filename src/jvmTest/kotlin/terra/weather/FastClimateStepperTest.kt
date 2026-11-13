@@ -81,6 +81,12 @@ class FastClimateStepperTest {
             assertEquals(weather.rainMmThisUpdate(x, y) * 3600 / (7 * day), weather.precipitationMmPerHour(x, y), 1e-12)
             if (weather.peakSubstepPrecipitationMmPerHour(x, y) > weather.precipitationMmPerHour(x, y) * 1.1) hasEventPeak = true
         }
+        val totalTileRain = (0 until request.height).sumOf { y -> (0 until request.width).sumOf { x ->
+            weekly.weather.rainMmThisUpdate(x, y)
+        } }
+        val tileArea = config.domainWidthMeters * config.domainHeightMeters / (request.width * request.height)
+        assertEquals(week.rainfallKg, totalTileRain * tileArea, week.rainfallKg * 1e-12,
+            "Every tile's published rain must reconcile with the physical atmospheric rain volume")
         assertTrue(hasEventPeak, "Wet-phase intensity must differ from interval mean")
         assertEquals(0.0, owner.advance(20.0, SimulationSpeed.ONE_HOUR)) // Climate waits for its fixed day quantum.
         assertEquals(20 + 8 * day, owner.completedSeconds)

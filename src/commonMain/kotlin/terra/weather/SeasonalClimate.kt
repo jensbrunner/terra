@@ -56,7 +56,8 @@ class SeasonalClimate(
         minimumC: DoubleArray, maximumC: DoubleArray, peakRainMmPerHour: DoubleArray
     ) {
         require(startSeconds == elapsedSeconds) { "Climate phase must follow the last committed observation" }
-        require(seconds > 0.0 && temperatureIntegralC.size == count && rainMm.size == count)
+        require(seconds > 0.0 && temperatureIntegralC.size == count && rainMm.size == count &&
+            minimumC.size == count && maximumC.size == count && peakRainMmPerHour.size == count)
         accumulate(seconds, { temperatureIntegralC[it] / seconds }, { rainMm[it] },
             { minimumC[it] }, { maximumC[it] }, { peakRainMmPerHour[it] }, modeled = true)
     }

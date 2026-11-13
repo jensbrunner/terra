@@ -128,7 +128,7 @@ class DynamicalWeather(
     internal fun resumeDetailed(): terra.atmosphere.AtmosphereHandoff? {
         val engine = fastClimate ?: return null
         check(surface.pendingFluxBatch?.consumed != false)
-        val handoff = model.initializeFromClimate(engine.completedSeconds)
+        val handoff = model.initializeFromClimate(engine.completedSeconds, engine.reentryAirTemperatureKelvin())
         heldRepresentative = engine.latest
         fastClimate = null
         detailedReentryPending = true
@@ -181,7 +181,9 @@ class DynamicalWeather(
     override fun relativeHumidity(x: Int, y: Int) = climateResult?.let { result -> sample(x, y) { cx, cy -> result.relativeHumidity(cy * config.width + cx) } } ?: sample(x, y, view::relativeHumidityAt)
     override fun cloudWaterMm(x: Int, y: Int) = climateResult?.let { result -> sample(x, y) { cx, cy -> result.cloudMm(cy * config.width + cx) } } ?: sample(x, y, view::cloudWaterMmAt)
     override fun cloudCover(x: Int, y: Int) = 1 - exp(-cloudWaterMm(x, y) / 0.15)
-    override fun atmosphericWaterMm(x: Int, y: Int) = if (hasRepresentativeFields) sample(x, y) { cx, cy -> view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy) } else sample(x, y, view::vaporMmAt)
+    override fun atmosphericWaterMm(x: Int, y: Int) = sample(x, y) { cx, cy ->
+        view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy)
+    }
     override fun airTemperatureC(x: Int, y: Int) = if (hasRepresentativeFields)
         climateResult?.let { result -> sample(x, y) { cx, cy -> result.airTemperatureC(cy * config.width + cx) } }
             ?: (surfaceTemperatureC(x, y) - MoistAtmosphere.CLIMATE_AIR_SURFACE_OFFSET_K)

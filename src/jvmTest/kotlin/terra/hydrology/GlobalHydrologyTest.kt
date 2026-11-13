@@ -57,18 +57,19 @@ class GlobalHydrologyTest {
         val weather = RoutingWeather(width, height) { tile -> if (ocean[tile]) 0.0 else 1.0 }
         val before = hydrology.oceanWaterMmTiles
         hydrology.acceptWeatherStep(weather, 86400.0)
-        assertEquals(47.0, hydrology.outletMmTilesTotal, 1e-10)
-        assertEquals(before + 47, hydrology.oceanWaterMmTiles, 1e-10)
+        assertTrue(hydrology.outletMmTilesTotal in 0.0..47.0)
+        assertTrue(hydrology.channelStorageMmTiles > 0.0)
+        assertEquals(before + 47, hydrology.oceanWaterMmTiles + hydrology.channelStorageMmTiles, 1e-10)
         assertEquals(before + 47, hydrology.storedAndPendingWaterMmTiles, 1e-10)
         weather.runoff = { 0.0 }
         hydrology.acceptWeatherStep(weather, 0.0)
-        hydrology.acceptWeatherStep(weather, 86400.0)
-        assertEquals(before + 47, hydrology.oceanWaterMmTiles, 1e-10)
+        repeat(30) { hydrology.acceptWeatherStep(weather, 86400.0) }
+        assertEquals(before + 47, hydrology.oceanWaterMmTiles, 1e-9)
         val available = hydrology.oceanWaterMmTiles
         assertEquals(available, hydrology.evaporateOceanWaterMmTiles(available + 100))
         assertEquals(0.0, hydrology.oceanWaterMmTiles)
         hydrology.receiveOceanWaterMmTiles(3.0)
-        assertEquals(3.0, hydrology.storedAndPendingWaterMmTiles)
+        assertEquals(3.0, hydrology.storedAndPendingWaterMmTiles, 1e-9)
     }
 
     @Test
@@ -95,7 +96,7 @@ class GlobalHydrologyTest {
         hydrology.acceptWeatherStep(weather, 86400.0)
         val capacity = hydrology.lakeCapacityMmTiles(0)
         assertEquals(capacity, hydrology.lakeStorageMmTiles(0), 1e-9)
-        assertEquals(oceanBefore + 4080 - capacity, hydrology.oceanWaterMmTiles, 1e-9)
+        assertEquals(oceanBefore + 4080 - capacity, hydrology.oceanWaterMmTiles + hydrology.channelStorageMmTiles, 1e-9)
         assertEquals(oceanBefore + 4080, hydrology.storedAndPendingWaterMmTiles, 1e-9)
         // Three inexpensive annual cycles of monthly basin refill, evaporation,
         // and spill. Evaporation leaves this subsystem for the atmosphere.

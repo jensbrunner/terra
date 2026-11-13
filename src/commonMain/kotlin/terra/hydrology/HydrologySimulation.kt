@@ -1,11 +1,15 @@
 package terra.hydrology
 
 import terra.weather.WeatherModel
+import kotlin.math.expm1
 import kotlin.math.max
 import kotlin.math.min
 
 /** Routes weather fluxes and owns mutable channel and lake water state. */
-class HydrologySimulation(private val topology: HydrologyTopology) {
+class HydrologySimulation(private val topology: HydrologyTopology,
+    /** Effective reach residence time; the game-scale tile geometry is not a hydraulic channel survey. */
+    val channelTravelSeconds: Double = 6 * 3600.0
+) {
     val width: Int = topology.width
     val height: Int = topology.height
     private val count = width * height
@@ -19,15 +23,28 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         private set
     val meanOceanDepthMm: Double get() = if (oceanTileCount > 0) oceanWaterMmTiles / oceanTileCount else 0.0
 
+    // Fine-cell evaporation repeatedly debits a much larger ocean store. Compensate
+    // additions so centuries of small transfers do not accumulate roundoff drift.
+    private var oceanRoundoff = 0.0
+    private fun adjustOceanWater(amount: Double) {
+        val corrected = amount - oceanRoundoff
+        val updated = oceanWaterMmTiles + corrected
+        oceanRoundoff = (updated - oceanWaterMmTiles) - corrected
+        oceanWaterMmTiles = updated
+    }
+
     fun receiveOceanWaterMmTiles(amount: Double) {
         require(amount.isFinite() && amount >= 0 && (amount == 0.0 || oceanTileCount > 0))
-        oceanWaterMmTiles += amount
+        adjustOceanWater(amount)
     }
 
     fun evaporateOceanWaterMmTiles(requested: Double): Double {
         require(requested.isFinite() && requested >= 0)
         val actual = min(oceanWaterMmTiles, requested)
-        oceanWaterMmTiles -= actual
+        if (actual == oceanWaterMmTiles) {
+            oceanWaterMmTiles = 0.0
+            oceanRoundoff = 0.0
+        } else adjustOceanWater(-actual)
         return actual
     }
 
@@ -36,6 +53,9 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     private val pendingLakePotentialEvaporationMmTiles = DoubleArray(count)
     private var pendingElapsedSeconds = 0.0
     private var pendingExchange: HydrologyExchange? = null
+    private val channelWaterMmTiles = DoubleArray(count)
+    val channelStorageMmTiles: Double get() = channelWaterMmTiles.sum()
+    fun channelStorageMmTilesAt(x: Int, y: Int): Double = channelWaterMmTiles[index(x, y)]
     private val routedMmTiles = DoubleArray(count)
     private val dischargeMmTilesPerDay = DoubleArray(count)
 
@@ -48,6 +68,9 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     private val lakePotentialEvaporationMmTiles = DoubleArray(lakeCount)
     private val lakeWaterSurfaceElevation = DoubleArray(lakeCount)
     private val lakeWetMask = BooleanArray(count)
+    private val previousLakeWetMask = BooleanArray(count)
+    internal var lakeMaskRevision = 0L
+        private set
 
     /** River-to-ocean transfer from the most recently routed period, in mm·tiles. */
     var outletMmTilesLastPeriod: Double = 0.0
@@ -65,9 +88,9 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     var routedPeriodRevision: Long = 0L
         private set
 
-    /** Water in ocean, lakes, and the unprocessed routing interval. */
+    /** Water in ocean, lakes, channels, and the unprocessed routing interval. */
     val storedAndPendingWaterMmTiles: Double
-        get() = oceanWaterMmTiles + lakeStorageMmTiles.sum() + pendingRunoffMmTiles.sum() + pendingLakeRainMmTiles.sum()
+        get() = oceanWaterMmTiles + lakeStorageMmTiles.sum() + channelStorageMmTiles + pendingRunoffMmTiles.sum() + pendingLakeRainMmTiles.sum()
 
     var completedRoutingPasses = 0L
         private set
@@ -105,6 +128,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     }
 
     init {
+        require(channelTravelSeconds.isFinite() && channelTravelSeconds > 0.0)
         for (i in topology.processingOrder.indices.reversed()) {
             val tile = topology.processingOrder[i]
             val downstream = topology.downstreamIndex[tile]
@@ -205,7 +229,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
 
     fun waterInventory() = HydrologyWaterInventory(oceanWaterMmTiles, lakeStorageMmTiles.sum(),
         pendingRunoffMmTiles.sum(), pendingLakeRainMmTiles.sum(), pendingLakePotentialEvaporationMmTiles.sum(),
-        pendingElapsedSeconds)
+        pendingElapsedSeconds, channelStorageMmTiles)
 
     /** Latest routed throughput for this tile, in mm·tiles over the latest processed period. */
     fun routedMmTiles(x: Int, y: Int): Double = routedMmTiles[index(x, y)]
@@ -265,6 +289,10 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
             }
         }
 
+        // Exact linear reach under interval-mean inflow. Small detailed intervals retain
+        // flood pulses; climate intervals use the same stores with an analytic aggregate step.
+        val response = -expm1(-pendingElapsedSeconds / channelTravelSeconds)
+        val inflowRetention = channelTravelSeconds / pendingElapsedSeconds * response
         var outletAmount = 0.0
         for (tile in topology.processingOrder) {
             val lakeId = lakeIdByTile[tile]
@@ -282,6 +310,14 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
                     }
                 }
             } else {
+                if (topology.isLandTile(tile)) {
+                    val start = channelWaterMmTiles[tile]
+                    val incoming = routedMmTiles[tile]
+                    val end = start * (1 - response) + incoming * inflowRetention
+                    val released = max(0.0, start + incoming - end)
+                    channelWaterMmTiles[tile] = end
+                    routedMmTiles[tile] = released
+                }
                 val downstream = topology.downstreamIndex[tile]
                 if (downstream >= 0) {
                     routedMmTiles[downstream] += routedMmTiles[tile]
@@ -358,6 +394,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     }
 
     private fun updateLakeWetMask(weather: HydrologyExchange) {
+        lakeWetMask.copyInto(previousLakeWetMask)
         lakeWetMask.fill(false)
         for (lakeId in candidates.indices) {
             if (lakeStorageMmTiles[lakeId] <= 0.0) continue
@@ -366,6 +403,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
                 if (topology.terrainElevation[tile] < surface) lakeWetMask[tile] = true
             }
         }
+        if (!lakeWetMask.contentEquals(previousLakeWetMask)) lakeMaskRevision++
         weather.updateLakeWaterMask(lakeWetMask)
     }
 

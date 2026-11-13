@@ -30,8 +30,11 @@ data class MoistPhysicsConfig(
     val unresolvedGustMetersPerSecond: Double = 2.0,
     val condensationSeconds: Double = 300.0,
     val cloudEvaporationSeconds: Double = 900.0,
-    val rainoutSeconds: Double = 3600.0,
+    // Rainfall is episodic: once precipitation begins, condensate rains out much
+    // faster than the cloud-autoconversion timescale used by the old drizzle model.
+    val rainoutSeconds: Double = 480.0,
     val rainCloudThresholdKgM2: Double = 0.1,
+    val rainOnsetKgM2: Double = 0.30,
     /** Diagnostic parcel residence/ascent; no extra atmospheric layer or cloud inventory. */
     val liftResidenceSeconds: Double = 600.0,
     val maximumParcelLiftMeters: Double = 1500.0,
@@ -46,6 +49,7 @@ data class MoistPhysicsConfig(
             airHeatCapacityJkgK, latentHeatJkg, condensationSeconds, cloudEvaporationSeconds, rainoutSeconds,
             liftResidenceSeconds, convectiveMixingDepthMeters)
             .all { it.isFinite() && it > 0 })
+        require(rainOnsetKgM2.isFinite() && rainOnsetKgM2 > rainCloudThresholdKgM2)
         require(humidColumnFraction > 0 && humidColumnFraction <= 1 && cloudPressureFraction > 0 && cloudPressureFraction <= 1)
         require(listOf(surfaceAlbedo, atmosphericEmissivity, cloudSolarReflection).all { it.isFinite() && it in 0.0..1.0 })
         require(listOf(solarPeakWm2, momentumDragPerSecond, bulkExchangeCoefficient, unresolvedGustMetersPerSecond, rainCloudThresholdKgM2,
@@ -154,6 +158,7 @@ class MoistAtmosphere(
     private val surfaceTemperature = surfaceThermalState.kelvin
     private val surfaceWater = DoubleArray(config.cellCount)
     private val rainRate = DoubleArray(config.cellCount)
+    private val rainActive = BooleanArray(config.cellCount)
     private val rainTotal = DoubleArray(config.cellCount)
     private var worldEpochSeconds = 0.0
     private var approximateHistory = false
@@ -180,8 +185,7 @@ class MoistAtmosphere(
     internal fun saturatedVaporMmAt(cell: Int, temperatureKelvin: Double): Double {
         require(temperatureKelvin.isFinite() && temperatureKelvin > 0)
         val mass = density * flow.depthAt(cell)
-        return mass * physics.humidColumnFraction * FastSaturation.mixingRatio(
-            temperatureKelvin, mass * config.gravity * physics.cloudPressureFraction)
+        return ColumnThermodynamics.saturationMm(temperatureKelvin, mass, config.gravity, physics)
     }
 
     /** The same column water is the effective climate pool while detailed dynamics are dormant. */
@@ -216,12 +220,14 @@ class MoistAtmosphere(
      * Vapor/condensate partition at saturation; pressure is approximately balanced
      * without new-world moisture, old storms or hidden physical advancement.
      */
-    internal fun initializeFromClimate(atWorldSeconds: Double): AtmosphereHandoff {
+    internal fun initializeFromClimate(atWorldSeconds: Double, evolvedAirTemperatureKelvin: DoubleArray? = null): AtmosphereHandoff {
         require(atWorldSeconds.isFinite() && atWorldSeconds >= 0.0)
         val water = DoubleArray(config.cellCount) { effectiveMoistureMmAt(it) }
         val before = atmosphericWaterKg
         val energyBefore = diagnostics().totalModelEnergyJoules
-        val temperature = DoubleArray(config.cellCount) { surfaceTemperature[it] - CLIMATE_AIR_SURFACE_OFFSET_K }
+        val temperature = evolvedAirTemperatureKelvin?.also {
+            require(it.size == config.cellCount && it.all { kelvin -> kelvin.isFinite() && kelvin > 0.0 })
+        }?.copyOf() ?: DoubleArray(config.cellCount) { surfaceTemperature[it] - CLIMATE_AIR_SURFACE_OFFSET_K }
         val circulation = flow.initializeClimateCirculation(temperature, atWorldSeconds / (7 * 86400.0))
         val vaporTarget = 1.0
         var vaporTotal = 0.0
@@ -231,10 +237,8 @@ class MoistAtmosphere(
             val vaporLimit = saturatedVaporMmAt(i, temperature[i])
             // A moist mean column contains unresolved saturated parcels. Partition a
             // small, bounded fraction as cloud without creating any column water.
-            val humidity = water[i] / max(1e-12, vaporLimit)
-            val subgridCloud = min(water[i], 0.3 * ((humidity - 0.75) / 0.25).coerceIn(0.0, 1.0))
-            val vapor = min(max(0.0, water[i] - subgridCloud), vaporLimit)
-            val cloud = water[i] - vapor
+            val cloud = ColumnThermodynamics.cloudMm(water[i], vaporLimit)
+            val vapor = water[i] - cloud
             columns.values[0][i] = depth * temperature[i]
             columns.values[1][i] = vapor / density
             columns.values[2][i] = cloud / density
@@ -242,6 +246,7 @@ class MoistAtmosphere(
         }
         worldEpochSeconds = atWorldSeconds - elapsedSeconds
         rainRate.fill(0.0)
+        rainActive.fill(false)
         approximateHistory = true
         val energyChange = diagnostics().totalModelEnergyJoules - energyBefore
         initializationEnergy += energyChange
@@ -418,7 +423,15 @@ class MoistAtmosphere(
             vapor -= transfer
             cloud += transfer
             temperature += physics.latentHeatJkg * transfer / capacity
-            val rain = max(0.0, cloud - physics.rainCloudThresholdKgM2) * rainResponse
+            // Cloud droplets do not precipitate continuously as soon as a tiny
+            // threshold is exceeded. A hysteretic autoconversion trigger makes
+            // rain events less frequent, while conserving the actual cloud water.
+            val onset = physics.rainOnsetKgM2
+            if (!rainActive[i] && cloud >= onset) rainActive[i] = true
+            // Stop above the retained-cloud floor: exponential rainout never reaches that floor exactly.
+            else if (rainActive[i] && cloud <= RainAutoconversion.cessationMm(physics)) rainActive[i] = false
+            val rain = if (rainActive[i])
+                max(0.0, cloud - physics.rainCloudThresholdKgM2) * rainResponse else 0.0
             cloud -= rain
             val surfaceAmount = if (this.surface == null) surfaceWater[i] - evaporated + rain else 0.0
             check(temperature.isFinite() && temperature > 0 && surface.isFinite() && surface > 0 &&
