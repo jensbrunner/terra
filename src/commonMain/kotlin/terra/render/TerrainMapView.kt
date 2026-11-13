@@ -2,6 +2,7 @@ package terra.render
 
 import korlibs.image.bitmap.Bitmap32
 import korlibs.image.color.Colors
+import korlibs.image.color.RGBA
 import korlibs.image.tiles.Tile
 import korlibs.image.tiles.TileMapData
 import korlibs.image.tiles.TileSet
@@ -36,6 +37,8 @@ class TerrainMapView(
     private val queuedTerrain = BooleanArray(world.width * world.height)
     private val terrainQueue = ArrayDeque<Int>()
     private val reliefBitmap = Bitmap32(world.width, world.height)
+    private val canopyBitmap = Bitmap32(world.width, world.height)
+    private var canopyRevision = -1L
     private var nextOverlay = 0
     private var cloudFrame: RasterFrame? = null
     private val layerWeather = mutableMapOf<WeatherLayer, WeatherModel>()
@@ -69,6 +72,8 @@ class TerrainMapView(
         terrainContainer.scaleY = 1.0 / terrainTileSet.height.toDouble()
 
         updateRelief()
+        updateCanopy()
+        parent.image(canopyBitmap) { smoothing = false }
         parent.image(reliefBitmap) { smoothing = true }
 
         surfaceWaterContainer = parent.container {
@@ -112,13 +117,17 @@ class TerrainMapView(
         world = newWorld
         if (generationChanged) {
             updateRelief()
+            updateCanopy()
             cloudFrame = null
             layerWeather.clear()
             lightingWeather = null
             for ((layer, bitmap) in overlayBitmaps) { bitmap.fill(transparentPixel); overlayFades.getValue(layer).reset() }
             surfaceWaterBitmap.fill(transparentPixel); waterFade.reset()
             for (i in queuedTerrain.indices) enqueueTerrain(i)
-        } else for (i in 0 until world.changedTerrainCount) enqueueTerrain(world.changedTerrainIndex(i))
+        } else {
+            for (i in 0 until world.changedTerrainCount) enqueueTerrain(world.changedTerrainIndex(i))
+            if (canopyRevision != world.biomeRevision) updateCanopy()
+        }
     }
 
     /** Only the completed pixel copy/texture invalidation runs on the renderer thread. */
@@ -308,6 +317,25 @@ class TerrainMapView(
     fun clearSelection() { selectionBorder.visible = false }
 
     /** Static topographic light, independent of seasonal lighting and physical temperatures. */
+    /** Continuous canopy, grass and bare-ground fractions instead of a categorical switch. */
+    private fun updateCanopy() {
+        canopyRevision = world.biomeRevision
+        canopyBitmap.lock {
+            for (y in 0 until world.height) for (x in 0 until world.width) {
+                val cell = world[x, y]
+                if (cell.terrain == Terrain.OCEAN) { canopyBitmap[x, y] = Colors["#000000"].withA(0); continue }
+                val tree = world.treeCover(x, y).coerceIn(0.0, 1.0)
+                val grass = world.grassCover(x, y).coerceIn(0.0, 1.0)
+                val bare = world.bareCover(x, y).coerceIn(0.0, 1.0)
+                val red = (28 * tree + 122 * grass + 188 * bare).coerceIn(0.0, 255.0).toInt()
+                val green = (108 * tree + 168 * grass + 150 * bare).coerceIn(0.0, 255.0).toInt()
+                val blue = (42 * tree + 74 * grass + 108 * bare).coerceIn(0.0, 255.0).toInt()
+                val alpha = ((0.70 * tree + 0.38 * grass) * 255).toInt().coerceIn(0, 255)
+                canopyBitmap[x, y] = RGBA(red, green, blue, alpha)
+            }
+        }
+    }
+
     private fun updateRelief() {
         reliefBitmap.lock {
             for (y in 0 until world.height) for (x in 0 until world.width) {

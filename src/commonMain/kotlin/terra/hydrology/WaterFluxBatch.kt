@@ -17,7 +17,9 @@ class WaterFluxBatch private constructor(
     val width: Int, val height: Int, val durationSeconds: Double,
     internal val exchange: HydrologyExchange,
     private val runoff: (Int) -> Double, private val lakeRain: (Int) -> Double,
-    private val potentialLakeEvaporation: (Int) -> Double, private val current: () -> Boolean
+    private val potentialLakeEvaporation: (Int) -> Double, private val current: () -> Boolean,
+    /** Nonzero tiles only; null means scan the full grid (compatibility path). */
+    internal val activeTiles: IntArray? = null
 ) {
     var consumed: Boolean = false
         private set
@@ -45,8 +47,11 @@ class WaterFluxBatch private constructor(
                 require(field.size == width * height && field.all { it.isFinite() && it >= 0.0 })
                 field.copyOf()
             }
+            val active = (0 until width * height).filter {
+                fields[0][it] > 0.0 || fields[1][it] > 0.0 || fields[2][it] > 0.0
+            }.toIntArray()
             return WaterFluxBatch(width, height, durationSeconds, exchange,
-                { fields[0][it] }, { fields[1][it] }, { fields[2][it] }, { true })
+                { fields[0][it] }, { fields[1][it] }, { fields[2][it] }, { true }, active)
         }
 
         /** Owner-thread view avoids full-grid copies on every detailed 20-second step.
@@ -55,10 +60,13 @@ class WaterFluxBatch private constructor(
         internal fun borrowed(
             width: Int, height: Int, durationSeconds: Double, exchange: HydrologyExchange,
             runoff: (Int) -> Double, lakeRain: (Int) -> Double,
-            potentialLakeEvaporation: (Int) -> Double, current: () -> Boolean
+            potentialLakeEvaporation: (Int) -> Double, current: () -> Boolean,
+            activeTiles: IntArray? = null
         ): WaterFluxBatch {
             dimensions(width, height, durationSeconds)
-            return WaterFluxBatch(width, height, durationSeconds, exchange, runoff, lakeRain, potentialLakeEvaporation, current)
+            require(activeTiles == null || activeTiles.all { it in 0 until width * height })
+            return WaterFluxBatch(width, height, durationSeconds, exchange, runoff, lakeRain,
+                potentialLakeEvaporation, current, activeTiles)
         }
 
         internal fun fromWeather(weather: WeatherModel, seconds: Double, tracked: Boolean = false): WaterFluxBatch {

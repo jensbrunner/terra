@@ -180,13 +180,20 @@ class MoistAtmosphere(
     internal fun saturatedVaporMmAt(cell: Int, temperatureKelvin: Double): Double {
         require(temperatureKelvin.isFinite() && temperatureKelvin > 0)
         val mass = density * flow.depthAt(cell)
-        return mass * physics.humidColumnFraction * WarmCloud.saturationMixingRatio(
+        return mass * physics.humidColumnFraction * FastSaturation.mixingRatio(
             temperatureKelvin, mass * config.gravity * physics.cloudPressureFraction)
     }
 
     /** The same column water is the effective climate pool while detailed dynamics are dormant. */
     internal fun effectiveMoistureMmAt(cell: Int): Double = density * (columns.values[1][cell] + columns.values[2][cell])
     internal val atmosphericWaterKg: Double get() = (0 until config.cellCount).sumOf { effectiveMoistureMmAt(it) } * config.cellArea
+    /** Replace the effective column water directly; used by the conservative climate commit. */
+    internal fun setEffectiveMoistureMm(cell: Int, amount: Double) {
+        require(amount.isFinite() && amount >= 0.0)
+        columns.values[1][cell] = amount / density
+        columns.values[2][cell] = 0.0
+    }
+
     internal fun receiveEffectiveMoistureMm(cell: Int, amount: Double) {
         require(amount.isFinite() && amount >= 0.0)
         columns.values[1][cell] += amount / density
@@ -423,7 +430,7 @@ class MoistAtmosphere(
             columns.values[2][i] = cloud / density
             surfaceTemperature[i] = surface
             surfaceWater[i] = surfaceAmount
-            this.surface?.receiveRain(i, rain)
+            this.surface?.receiveRain(i, rain, if (surface < 273.15) 1.0 else 0.0)
             rainRate[i] = rain * 3600 / dt
             rainTotal[i] += rain
             radiationEnergy += (surfaceHeat + airHeat) * config.cellArea

@@ -20,7 +20,10 @@ class AggregateClimateTest {
         val interval = owner.advanceClimateInterval(20 * year)
         val aggregate = capture()
         assertTrue(interval.subperiods in 730..761)
-        assertEquals(interval.subperiods.toLong(), interval.routingPasses)
+        // Catchment routing accumulates several ten-day phases; it must still be bounded
+        // and must represent the whole requested interval.
+        assertTrue(interval.routingPasses in 240..250, "routing passes ${interval.routingPasses}")
+        assertEquals(20 * year, interval.representedHydrologySeconds, 60.0)
         assertEquals(1L, interval.detailedCompletedSteps)
         assertTrue(!interval.aggregateYears)
         assertEquals(20 * year, interval.ecologyEligibleSeconds)

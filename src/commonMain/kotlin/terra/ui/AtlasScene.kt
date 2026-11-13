@@ -484,9 +484,11 @@ class AtlasScene(
         )
         rows.forEachIndexed { index, (label, value) -> inspectorRows[index].first.text = label; inspectorRows[index].second.text = value }
         val seasonal = presentation!!.seasonalClimate
+        val ecology = "Canopy ${formatNumber(world.treeCover(tx, ty) * 100, 0)}% · grass ${formatNumber(world.grassCover(tx, ty) * 100, 0)}% · bare ${formatNumber(world.bareCover(tx, ty) * 100, 0)}%\n" +
+            "Limit: ${world.growthLimitation(tx, ty).name.lowercase()}"
         inspectorClimate.text = if (seasonal?.hasAnnualCoverage == true)
-            "Annual climate · ${formatNumber(seasonal.annualPrecipitationAtTile(tx, ty, world.width, world.height), 0)} mm/year\n${if (seasonal.containsAggregateEstimates) "Includes climate estimates" else "Observed climate window"}"
-            else "Annual climate still collecting\nLand cover is provisional."
+            "Annual climate · ${formatNumber(seasonal.annualPrecipitationAtTile(tx, ty, world.width, world.height), 0)} mm/year\n$ecology\n${if (seasonal.containsAggregateEstimates) "Includes climate estimates" else "Observed climate window"}"
+            else "Annual climate still collecting\n$ecology\nLand cover is provisional."
         if (inspectorDetailed) {
             val represented = WeatherDisplayText.period(period, year)
             val source = if (dynamicalAtmosphere) WeatherDisplayText.quality(period) else "Prescribed weather"

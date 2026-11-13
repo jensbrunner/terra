@@ -115,7 +115,7 @@ private class TestSurface(
     override fun orographicUpliftMetersPerSecond(cell: Int, eastWind: Double, northWind: Double) = max(0.0, eastWind * slope(cell))
     override fun momentumDragMultiplier(cell: Int) = drag(cell)
     override fun evaporate(cell: Int, potentialMm: Double) = minOf(potentialMm, water[cell]).also { water[cell] -= it }
-    override fun receiveRain(cell: Int, amountMm: Double) { water[cell] += amountMm }
+    override fun receiveRain(cell: Int, amountMm: Double, snowFraction: Double) { water[cell] += amountMm }
     override fun waterMm(cell: Int) = water[cell]
     override val totalWaterKg get() = water.sum() * config.cellArea
     override val exportedWaterKg = 0.0

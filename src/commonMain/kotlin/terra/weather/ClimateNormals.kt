@@ -57,6 +57,7 @@ internal class ClimateEstimateSnapshot(
 internal class ClimateNormals(world: World, surface: TerrainMoistSurface, private val solar: SolarConfig) {
     val yearSeconds get() = solar.yearSeconds
     val initialYearFraction get() = solar.initialYearFraction
+    internal fun solarConfig(): SolarConfig = solar
     private val config = surface.mapping.config
     private val count = config.cellCount
     private val anomalies = ClimateAnomalies(world.seed, solar.yearSeconds)

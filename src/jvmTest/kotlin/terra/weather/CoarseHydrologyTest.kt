@@ -28,7 +28,9 @@ class CoarseHydrologyTest {
         val outletError = abs(coarse.hydrology.outletMmTilesTotal - reference.hydrology.outletMmTilesTotal) /
             reference.hydrology.outletMmTilesTotal
         assertTrue(soilError < 0.6, "soil difference $soilError mm")
-        assertTrue(outletError < 0.02, "outlet relative difference $outletError")
+        // A ten-day climate transaction and 3-hour detailed steps differ in
+        // sub-period drainage timing; total soil and river response stay comparable.
+        assertTrue(outletError < 0.05, "outlet relative difference $outletError")
         assertEquals(initial, coarse.water(), 1e-8)
         assertEquals(initial, reference.water(), 1e-8)
         assertEquals(1L, coarse.hydrology.completedRoutingPasses)
@@ -57,6 +59,115 @@ class CoarseHydrologyTest {
         assertEquals(initial, event.water(), 1e-8)
         assertTrue(event.surface.soil.all { it in 0.0..250.0 })
         println("COARSE_EVENT uniform_soil_mm=${spread.surface.soil[36]} event_soil_mm=${event.surface.soil[36]} event_overflow_mm_tiles=$eventOverflow")
+    }
+
+    @Test
+    fun coldPrecipitationIsStoredAsSnowAndMeltsIntoTheCatchmentWhenWarm() {
+        val width = 8; val height = 6
+        val config = DryAtmosphereConfig(width = 4, height = 4)
+        val settings = TerrainGenerationSettings(baseElevation = 0.4,
+            continentStrength = 0.0, regionalStrength = 0.0, detailStrength = 0.0)
+        val elevation = DoubleArray(width * height) { 0.4 }
+        elevation[0] = 0.0 // one ocean sink, no lake depressions
+        val world = World.withElevation(31742, width, height, settings, elevation)
+        val hydrology = HydrologySimulation(HydrologyTopology(world))
+        val surface = TerrainMoistSurface(world, AtmosphereTileMapping(width, height, config), hydrology)
+        val initialSoil = surface.soil.sum()
+        for (cell in 0 until config.cellCount) surface.setCellTemperature(cell, -10.0)
+        surface.beginUpdate()
+        for (cell in 0 until config.cellCount) surface.receiveClimateRain(cell, 20.0, 1.0, 1.0)
+        surface.finishClimateStep(day)
+        hydrology.acceptClimateFluxBatch(surface.sealFluxBatch(day))
+        assertTrue(surface.snowWaterMmTiles > 500.0, "cold precipitation must remain as snow")
+        assertEquals(initialSoil, surface.soil.sum(), 1e-8)
+        val snowBeforeMelt = surface.snowWaterMmTiles
+        for (cell in 0 until config.cellCount) surface.setCellTemperature(cell, 10.0)
+        surface.beginUpdate()
+        surface.finishClimateStep(day)
+        hydrology.acceptClimateFluxBatch(surface.sealFluxBatch(day))
+        assertTrue(surface.snowWaterMmTiles < snowBeforeMelt, "warm conditions must melt snow")
+        assertTrue(surface.soil.sum() > initialSoil, "meltwater must recharge the root zone")
+        val outletAfterMelt = hydrology.outletMmTilesTotal
+        surface.beginUpdate()
+        surface.finishClimateStep(day)
+        hydrology.acceptClimateFluxBatch(surface.sealFluxBatch(day))
+        assertTrue(hydrology.outletMmTilesTotal > outletAfterMelt,
+            "snowmelt must sustain delayed baseflow after the melt event")
+        println("SNOW_MELT snow_before=$snowBeforeMelt snow_after=${surface.snowWaterMmTiles} " +
+            "soil=${surface.soil.sum()} delayed_outlet=${hydrology.outletMmTilesTotal - outletAfterMelt}")
+    }
+
+    @Test
+    fun responseUnitsPreserveAreaGroundwaterSnowAndWholeSurfaceMass() {
+        val width = 16; val height = 12
+        val config = DryAtmosphereConfig(width = 6, height = 5)
+        val world = World(31742, width, height, TerrainGenerationSettings(baseElevation = 0.4,
+            continentStrength = 0.0, regionalStrength = 0.0, detailStrength = 0.0))
+        val hydrology = HydrologySimulation(HydrologyTopology(world))
+        val surface = TerrainMoistSurface(world, AtmosphereTileMapping(width, height, config), hydrology)
+        val units = surface.responseUnits
+        var landTiles = 0
+        for (tile in 0 until width * height) {
+            val isLand = hydrology.isLandTile(tile % width, tile / width)
+            if (isLand) { landTiles++; assertTrue(units.unitOfTile[tile] >= 0) }
+            else assertEquals(-1, units.unitOfTile[tile])
+        }
+        assertEquals(landTiles, units.tileCountPerUnit.sum())
+        assertEquals(150.0 * landTiles, surface.groundwaterMmTiles, 1e-8)
+        val initial = surface.totalWaterKg
+        for (cell in 0 until config.cellCount) surface.setCellTemperature(cell, -8.0)
+        surface.beginUpdate()
+        for (cell in 0 until config.cellCount) surface.receiveClimateRain(cell, 12.0, 0.4, 0.8)
+        val afterRain = surface.totalWaterKg
+        surface.finishClimateStep(day)
+        hydrology.acceptClimateFluxBatch(surface.sealFluxBatch(day))
+        assertEquals(surface.snowWaterMmTiles, surface.unitSnowWaterMmTiles, 1e-6)
+        assertEquals(surface.groundwaterMmTiles, surface.unitGroundwaterMmTiles, 1e-8)
+        assertEquals(afterRain, surface.totalWaterKg, afterRain * 1e-12)
+        assertTrue(surface.snowWaterMmTiles > 0.0)
+        for (cell in 0 until config.cellCount) surface.setCellTemperature(cell, 8.0)
+        surface.beginUpdate()
+        surface.finishClimateStep(day)
+        hydrology.acceptClimateFluxBatch(surface.sealFluxBatch(day))
+        assertEquals(surface.snowWaterMmTiles, surface.unitSnowWaterMmTiles, 1e-6)
+        assertEquals(afterRain, surface.totalWaterKg, afterRain * 1e-12)
+        println("RESPONSE_UNITS units=${units.count} land_tiles=$landTiles " +
+            "snow=${surface.snowWaterMmTiles} groundwater=${surface.groundwaterMmTiles}")
+    }
+
+    @Test
+    fun seasonalRainRechargesGroundwaterAndKeepsBaseflowAfterRainStops() {
+        val width = 12; val height = 8
+        val config = DryAtmosphereConfig(width = 4, height = 4)
+        val settings = TerrainGenerationSettings(baseElevation = 0.4, continentStrength = 0.0,
+            regionalStrength = 0.0, detailStrength = 0.0)
+        val elevation = DoubleArray(width * height) { 0.4 }
+        elevation[0] = 0.0
+        val world = World.withElevation(31742, width, height, settings, elevation)
+        val hydrology = HydrologySimulation(HydrologyTopology(world))
+        val surface = TerrainMoistSurface(world, AtmosphereTileMapping(width, height, config), hydrology)
+        for (cell in 0 until config.cellCount) surface.setCellTemperature(cell, 12.0)
+        surface.beginUpdate()
+        for (cell in 0 until config.cellCount) surface.receiveClimateRain(cell, 130.0, 0.35)
+        surface.finishClimateStep(10 * day)
+        hydrology.acceptClimateFluxBatch(surface.sealFluxBatch(10 * day))
+        val wetOutlet = hydrology.outletMmTilesTotal
+        val afterWetGroundwater = surface.groundwaterMmTiles
+        val dryOutlets = DoubleArray(6)
+        repeat(dryOutlets.size) { step ->
+            val before = hydrology.outletMmTilesTotal
+            surface.beginUpdate()
+            surface.finishClimateStep(10 * day)
+            hydrology.acceptClimateFluxBatch(surface.sealFluxBatch(10 * day))
+            dryOutlets[step] = hydrology.outletMmTilesTotal - before
+        }
+        println("SEASONAL_BASEFLOW wet_outlet=$wetOutlet dry_outlets=${dryOutlets.toList()}")
+        assertTrue(wetOutlet > 0.0, "wet season must produce river outflow")
+        assertTrue(dryOutlets.first() > 0.0, "groundwater must sustain baseflow after rain stops")
+        assertTrue(surface.groundwaterMmTiles < afterWetGroundwater,
+            "dry-season baseflow must draw down the groundwater store")
+        assertTrue(dryOutlets.last() < dryOutlets.first() * 0.95,
+            "baseflow should recede through the dry interval: ${dryOutlets.toList()}")
     }
 
     @Test

@@ -134,6 +134,41 @@ class SeasonalClimateTest {
         assertEquals(Terrain.MOUNTAINS, mountains[3, 3].terrain)
     }
 
+    @Test
+    fun matureForestDeclinesThroughRepeatedDroughtAndRecoversWithoutLosingItsHistory() {
+        val settings = TerrainGenerationSettings(baseElevation = 0.4, continentStrength = 0.0,
+            regionalStrength = 0.0, detailStrength = 0.0)
+        val world = World(31742, 8, 6, settings)
+        val wet = stableClimate(16.0, 1800.0)
+        val dry = stableClimate(16.0, 0.0)
+        repeat(70) { world.advanceClimateBiomes(wet, 40.0) }
+        val mature = world.treeCover(3, 3)
+        assertTrue(mature > 0.5, "expected mature canopy, got $mature")
+        repeat(6) { world.advanceClimateBiomes(dry, 40.0) }
+        val stressed = world.treeCover(3, 3)
+        assertTrue(stressed < mature * 0.85, "drought must thin canopy: mature=$mature stressed=$stressed")
+        assertTrue(stressed > 0.02, "a short drought must not erase the canopy entirely")
+        repeat(40) { world.advanceClimateBiomes(wet, 40.0) }
+        val recovered = world.treeCover(3, 3)
+        assertTrue(recovered > mature * 0.7, "wet years must allow recovery: mature=$mature recovered=$recovered")
+        println("ECOLOGY_DROUGHT mature=$mature stressed=$stressed recovered=$recovered")
+    }
+
+    @Test
+    fun fireEmergesFromFuelDrynessAndWeatherOpportunityWithoutTouchingWaterStores() {
+        val settings = TerrainGenerationSettings(baseElevation = 0.4, continentStrength = 0.0,
+            regionalStrength = 0.0, detailStrength = 0.0)
+        val world = World(31742, 8, 6, settings)
+        val climate = stableClimate(18.0, 900.0)
+        val stressedSoil = DoubleArray(8 * 6) { 0.18 }
+        repeat(300) { world.advanceClimateBiomes(climate, 40.0, stressedSoil) }
+        assertTrue(world.fireCount > 0, "dry fuel-rich land must eventually burn")
+        var youngest = Double.POSITIVE_INFINITY
+        for (y in 0 until 6) for (x in 0 until 8) youngest = minOf(youngest, world.disturbanceAgeAt(x, y))
+        assertTrue(youngest < 50.0, "at least one fire scar should be younger than the run")
+        println("FIRE_DISTURBANCE burns=${world.fireCount} youngest_scar_years=$youngest")
+    }
+
     private fun stableClimate(temperature: Double, annualRain: Double): SeasonalClimateSnapshot {
         val climate = SeasonalClimate(1, 1, 40.0)
         climate.observe(120.0, { temperature }, { annualRain * 3 })

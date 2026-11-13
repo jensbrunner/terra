@@ -96,6 +96,36 @@ tasks.register<JavaExec>("moistAtmosphereExperiment") {
     args(providers.gradleProperty("moistAtmosphereArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
 }
 
+tasks.register<JavaExec>("climateAtlas") {
+    group = "verification"
+    description = "Export the compact physical review atlas for the default world."
+    mainClass.set("terra.experiments.ClimateAtlasKt")
+    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
+    args(providers.gradleProperty("climateAtlasArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
+}
+
+tasks.register<JavaExec>("oceanTransportBenchmark") {
+    group = "verification"
+    description = "Compare lateral and basin-grown ocean heat redistribution."
+    mainClass.set("terra.experiments.OceanTransportBenchmarkKt")
+    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
+}
+
+tasks.register<JavaExec>("responseUnitsBenchmark") {
+    group = "verification"
+    description = "Compare per-tile and response-unit linear store update costs."
+    mainClass.set("terra.experiments.ResponseUnitsBenchmarkKt")
+    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
+}
+
+tasks.register<JavaExec>("climateBenchmark") {
+    group = "verification"
+    description = "Warm-started fast-climate cost and conservation benchmark on the default world."
+    mainClass.set("terra.experiments.ClimateBenchmarkKt")
+    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
+    args(providers.gradleProperty("climateBenchmarkArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
+}
+
 // Opt-in GPU regression for transparent raster interpolation; no numerical simulation.
 tasks.register<JavaExec>("rasterBlendCheck") {
     group = "verification"

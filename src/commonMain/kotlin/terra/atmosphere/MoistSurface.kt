@@ -11,7 +11,7 @@ interface MoistSurface {
     /** Relative to the configured bulk drag, with ocean = 1. */
     fun momentumDragMultiplier(cell: Int): Double = 1.0
     fun evaporate(cell: Int, potentialMm: Double): Double
-    fun receiveRain(cell: Int, amountMm: Double)
+    fun receiveRain(cell: Int, amountMm: Double, snowFraction: Double = 0.0)
     fun waterMm(cell: Int): Double
     val totalWaterKg: Double
     val exportedWaterKg: Double

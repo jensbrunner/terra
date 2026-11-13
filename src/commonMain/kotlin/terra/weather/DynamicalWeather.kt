@@ -23,7 +23,8 @@ class DynamicalWeather(
     private val hydrology: HydrologySimulation,
     val config: DryAtmosphereConfig = DryAtmosphereConfig(),
     val physics: MoistPhysicsConfig = MoistPhysicsConfig(),
-    private val timings: SimulationTimings? = null
+    private val timings: SimulationTimings? = null,
+    private val oceanTransport: OceanTransportMode = OceanTransportMode.LATERAL_MIXING
 ) : WeatherModel {
     override val width = world.width
     override val height = world.height
@@ -110,15 +111,16 @@ class DynamicalWeather(
     /** Explicit owner entry only. Automatic speed/fidelity selection is a later step. */
     internal fun advanceClimateInterval(seconds: Double): ClimateIntervalDiagnostics {
         require(seconds.isFinite() && seconds >= FastClimateStepper.MIN_INTERVAL_SECONDS && seconds <= 20 * physics.solar.yearSeconds)
-        val engine = fastClimate ?: FastClimateStepper(surface, hydrology, model, climate, climateNormals, elapsedSeconds) { duration, moisture ->
-            world.advanceClimateBiomes(seasonalClimate, duration, moisture)
-        }
+        val engine = fastClimate ?: FastClimateStepper(surface, hydrology, model, climate, climateNormals, elapsedSeconds,
+            { duration, moisture -> world.advanceClimateBiomes(seasonalClimate, duration, moisture) },
+            oceanTransport)
         val result = engine.advance(seconds)
         fastClimate = engine
         detailedReentryPending = false
         heldRepresentative = null
         updateSeconds = seconds
-        refreshSnapshot()
+        // The immutable presentation is refreshed by snapshot(); avoid rebuilding the
+        // detailed view and diagnostics for every climate request boundary.
         return result.diagnostics
     }
 
@@ -180,10 +182,17 @@ class DynamicalWeather(
     override fun cloudWaterMm(x: Int, y: Int) = climateResult?.let { result -> sample(x, y) { cx, cy -> result.cloudMm(cy * config.width + cx) } } ?: sample(x, y, view::cloudWaterMmAt)
     override fun cloudCover(x: Int, y: Int) = 1 - exp(-cloudWaterMm(x, y) / 0.15)
     override fun atmosphericWaterMm(x: Int, y: Int) = if (hasRepresentativeFields) sample(x, y) { cx, cy -> view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy) } else sample(x, y, view::vaporMmAt)
-    override fun airTemperatureC(x: Int, y: Int) = if (hasRepresentativeFields) surfaceTemperatureC(x, y) - MoistAtmosphere.CLIMATE_AIR_SURFACE_OFFSET_K else sample(x, y, view::temperatureKelvinAt) - 273.15
+    override fun airTemperatureC(x: Int, y: Int) = if (hasRepresentativeFields)
+        climateResult?.let { result -> sample(x, y) { cx, cy -> result.airTemperatureC(cy * config.width + cx) } }
+            ?: (surfaceTemperatureC(x, y) - MoistAtmosphere.CLIMATE_AIR_SURFACE_OFFSET_K)
+    else sample(x, y, view::temperatureKelvinAt) - 273.15
     override fun surfaceTemperatureC(x: Int, y: Int) = sample(x, y, view::surfaceTemperatureKelvinAt) - 273.15
-    override fun windUTilesPerDay(x: Int, y: Int) = if (hasRepresentativeFields) 0.0 else sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
-    override fun windVTilesPerDay(x: Int, y: Int) = if (hasRepresentativeFields) 0.0 else -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters
+    override fun windUTilesPerDay(x: Int, y: Int) = if (hasRepresentativeFields)
+        climateResult?.let { result -> sample(x, y) { cx, cy -> result.windUTilesPerDay(cy * config.width + cx) } } ?: 0.0
+    else sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
+    override fun windVTilesPerDay(x: Int, y: Int) = if (hasRepresentativeFields)
+        climateResult?.let { result -> sample(x, y) { cx, cy -> result.windVTilesPerDay(cy * config.width + cx) } } ?: 0.0
+    else -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters
     override fun precipitationMmPerHour(x: Int, y: Int) = if (updateSeconds > 0) rainMmThisUpdate(x, y) * 3600 / updateSeconds else 0.0
     override fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) = climateResult?.field(0, index(x, y)) ?: surface.peakRainRate[index(x, y)]
     override fun rainMmThisUpdate(x: Int, y: Int) = climateResult?.field(1, index(x, y)) ?: surface.rain[index(x, y)]

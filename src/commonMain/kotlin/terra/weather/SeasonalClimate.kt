@@ -50,6 +50,17 @@ class SeasonalClimate(
         accumulate(seconds, surfaceTemperatureC, rainMm)
     }
 
+    /** Internal fast-path ingestion for a modeled phase; avoids copying five diagnostic arrays. */
+    internal fun observePhase(
+        startSeconds: Double, seconds: Double, temperatureIntegralC: DoubleArray, rainMm: DoubleArray,
+        minimumC: DoubleArray, maximumC: DoubleArray, peakRainMmPerHour: DoubleArray
+    ) {
+        require(startSeconds == elapsedSeconds) { "Climate phase must follow the last committed observation" }
+        require(seconds > 0.0 && temperatureIntegralC.size == count && rainMm.size == count)
+        accumulate(seconds, { temperatureIntegralC[it] / seconds }, { rainMm[it] },
+            { minimumC[it] }, { maximumC[it] }, { peakRainMmPerHour[it] }, modeled = true)
+    }
+
     /** Bulk ingestion keeps existing spin-up, seasonal splits and two-observed-year eligibility. */
     fun observeInterval(summary: ClimateIntervalSummary, modeled: Boolean = false) {
         require(summary.width == width && summary.height == height)
@@ -187,6 +198,34 @@ class SeasonalClimateSnapshot internal constructor(
         sampleTile(x, y, tileWidth, tileHeight, ::meanSurfaceTemperatureC)
     fun annualPrecipitationAtTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int): Double =
         sampleTile(x, y, tileWidth, tileHeight, ::annualPrecipitationMm)
+    fun seasonMeanSurfaceTemperatureAtTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int, season: Int): Double =
+        sampleTile(x, y, tileWidth, tileHeight) { seasonMeanSurfaceTemperatureC(season, it) }
+    fun seasonPrecipitationAtTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int, season: Int): Double =
+        sampleTile(x, y, tileWidth, tileHeight) { seasonPrecipitationMm(season, it) }
+    fun frostMinimumAtTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int): Double =
+        sampleTile(x, y, tileWidth, tileHeight, ::minimumSurfaceTemperatureC)
+
+    /** Growing-season warmth in degree-days above 5 °C, not an annual mean. */
+    fun growingSeasonWarmthAtTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int): Double {
+        var warmth = 0.0
+        for (season in 0..3) {
+            val temperature = seasonMeanSurfaceTemperatureAtTile(x, y, tileWidth, tileHeight, season)
+            warmth += max(0.0, temperature - 5.0) * SEASON_DAYS
+        }
+        return warmth
+    }
+
+    /** Seasonal water deficit in mm: warm-season demand not met by that season's rain. */
+    fun seasonalWaterDeficitAtTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int): Double {
+        var deficit = 0.0
+        for (season in 0..3) {
+            val temperature = seasonMeanSurfaceTemperatureAtTile(x, y, tileWidth, tileHeight, season)
+            val demandPerDay = 3.0 * ((temperature + 5) / 35).coerceIn(0.0, 1.5)
+            val days = SEASON_DAYS
+            deficit += max(0.0, demandPerDay * days - seasonPrecipitationAtTile(x, y, tileWidth, tileHeight, season))
+        }
+        return deficit
+    }
     fun stableAtTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int): Boolean {
         if (containsAggregateEstimates) return false
         val old = previous ?: return false
@@ -195,6 +234,11 @@ class SeasonalClimateSnapshot internal constructor(
         val recentRain = sampleTile(x, y, tileWidth, tileHeight, latest::precipitation)
         val oldRain = sampleTile(x, y, tileWidth, tileHeight, old::precipitation)
         return abs(temperatureChange) <= 2.0 && abs(rainChange) <= max(100.0, 0.35 * max(recentRain, oldRain))
+    }
+
+    private companion object {
+        /** Nominal growing-season length in days; independent of a compressed test calendar. */
+        const val SEASON_DAYS = 365.25 / 4
     }
 
     private inline fun sampleTile(x: Int, y: Int, tileWidth: Int, tileHeight: Int, field: (Int) -> Double): Double {

@@ -10,6 +10,8 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     val height: Int = topology.height
     private val count = width * height
     private val candidates = topology.lakeCandidates
+    /** One outlet/catchment identifier per land tile, derived once from D8 topology. */
+    internal val catchmentId = IntArray(count) { -1 }
     val lakeCount = candidates.size
     val oceanTileCount = (0 until count).count { !topology.isLandTile(it) }
     /** One finite well-mixed reservoir; temperatures remain spatially varying in the atmosphere. */
@@ -33,6 +35,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     private val pendingLakeRainMmTiles = DoubleArray(count)
     private val pendingLakePotentialEvaporationMmTiles = DoubleArray(count)
     private var pendingElapsedSeconds = 0.0
+    private var pendingExchange: HydrologyExchange? = null
     private val routedMmTiles = DoubleArray(count)
     private val dischargeMmTilesPerDay = DoubleArray(count)
 
@@ -102,6 +105,15 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     }
 
     init {
+        for (i in topology.processingOrder.indices.reversed()) {
+            val tile = topology.processingOrder[i]
+            val downstream = topology.downstreamIndex[tile]
+            catchmentId[tile] = when {
+                downstream < 0 -> tile
+                topology.isLandTile(downstream) -> catchmentId[downstream]
+                else -> downstream
+            }
+        }
         for (candidate in candidates) {
             val lakeId = candidate.id
             val sortedTiles = candidate.tileIndices.copyOf()
@@ -136,13 +148,22 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     /** Detailed/prescribed compatibility path retains its existing daily cadence. */
     fun acceptFluxBatch(batch: WaterFluxBatch) = acceptBatch(batch, forceRoute = false)
 
-    /** Route the actual representative phase once, including any pre-existing pending duration. */
-    fun acceptClimateFluxBatch(batch: WaterFluxBatch): Double {
+    /**
+     * Accept a representative climate phase. Routing occurs at a meaningful catchment
+     * cadence rather than once per atmospheric phase; a caller can force the final route.
+     * Returns the newly routed duration, or zero while water remains pending.
+     */
+    fun acceptClimateFluxBatch(batch: WaterFluxBatch, forceRoute: Boolean = true): Double {
         val representedSeconds = pendingElapsedSeconds + batch.durationSeconds
-        acceptBatch(batch, forceRoute = true)
+        pendingExchange = batch.exchange
+        val routed = pendingElapsedSeconds + batch.durationSeconds >= CLIMATE_ROUTING_CADENCE_SECONDS
+        acceptBatch(batch, forceRoute = forceRoute || routed, cadenceSeconds = CLIMATE_ROUTING_CADENCE_SECONDS)
         aggregatedClimateInterval = true
-        return representedSeconds
+        return if (forceRoute) representedSeconds else batch.durationSeconds
     }
+
+    /** Pending catchment water not yet routed; part of the authoritative inventory. */
+    val pendingDurationSeconds: Double get() = pendingElapsedSeconds
 
     /** Only publishes diagnostic throughput: never credits ocean or routes physical water again. */
     internal fun publishClimateThroughput(seconds: Double, throughput: DoubleArray, lakeInflow: DoubleArray, outlet: Double) {
@@ -157,12 +178,13 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         routedPeriodRevision++
     }
 
-    private fun acceptBatch(batch: WaterFluxBatch, forceRoute: Boolean) {
+    private fun acceptBatch(batch: WaterFluxBatch, forceRoute: Boolean,
+        cadenceSeconds: Double = HYDROLOGY_CADENCE_SECONDS) {
         require(batch.width == width && batch.height == height) { "Flux and hydrology dimensions must match" }
         batch.claim()
         val exchange = batch.exchange
         finishSurfaceExchange(exchange)
-        for (i in 0 until count) {
+        fun acceptTile(i: Int) {
             val runoff = batch.runoffMmAt(i)
             val rain = batch.directLakeRainMmAt(i)
             val evaporation = batch.potentialLakeEvaporationMmAt(i)
@@ -174,8 +196,10 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
             pendingLakeRainMmTiles[i] += rain
             pendingLakePotentialEvaporationMmTiles[i] += evaporation
         }
+        val active = batch.activeTiles
+        if (active != null) for (i in active) acceptTile(i) else for (i in 0 until count) acceptTile(i)
         pendingElapsedSeconds += batch.durationSeconds
-        if (forceRoute || pendingElapsedSeconds >= HYDROLOGY_CADENCE_SECONDS) routePendingPeriod(exchange)
+        if (forceRoute || pendingElapsedSeconds >= cadenceSeconds) routePendingPeriod(exchange)
         exchange.hydrologyAccepted()
     }
 
@@ -199,6 +223,8 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
             topology.upstreamLandTileCount[i] >= MIN_STREAM_CONTRIBUTING_AREA_TILES &&
             dischargeMmTilesPerDay[i] >= MIN_STREAM_DISCHARGE_MM_TILES_PER_DAY
     }
+
+    internal fun catchmentIdAt(tile: Int): Int = catchmentId[tile]
 
     fun lakeIdAt(x: Int, y: Int): Int = lakeIdByTile[index(x, y)]
 
@@ -277,6 +303,7 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
         pendingLakeRainMmTiles.fill(0.0)
         pendingLakePotentialEvaporationMmTiles.fill(0.0)
         pendingElapsedSeconds = 0.0
+        pendingExchange = null
         updateLakeWetMask(weather)
     }
 
@@ -415,6 +442,8 @@ class HydrologySimulation(private val topology: HydrologyTopology) {
     companion object {
         /** Game-tuning interval; overshooting batches are routed once over their actual duration. */
         const val HYDROLOGY_CADENCE_SECONDS = 24.0 * 60.0 * 60.0
+        /** Climate routing may accumulate several ten-day phases without erasing basin memory. */
+        const val CLIMATE_ROUTING_CADENCE_SECONDS = 30.0 * 24.0 * 60.0 * 60.0
         const val MIN_STREAM_CONTRIBUTING_AREA_TILES = 64
         /** A relative mm·tiles/day display cutoff, not an Earth-calibrated flow. */
         const val MIN_STREAM_DISCHARGE_MM_TILES_PER_DAY = 1.0

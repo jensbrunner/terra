@@ -11,6 +11,8 @@ class AtmosphereTileMapping(val tileWidth: Int, val tileHeight: Int, val config:
     val tiles: IntArray
     /** Fraction of one fine tile occupied by this intersection. */
     val tileFractions: DoubleArray
+    /** The atmosphere cell that contains this world tile (largest overlap). */
+    val cellOfTile: IntArray = IntArray(tileWidth * tileHeight) { -1 }
     val tilesPerCell = tileWidth.toDouble() * tileHeight / config.cellCount
     val tileAreaM2 = config.cellArea / tilesPerCell
 
@@ -37,6 +39,14 @@ class AtmosphereTileMapping(val tileWidth: Int, val tileHeight: Int, val config:
         offsets[config.cellCount] = indices.size
         tiles = indices.toIntArray()
         tileFractions = fractions.toDoubleArray()
+        // Inverse map for per-tile owners that need their containing atmosphere cell.
+        val best = DoubleArray(tileWidth * tileHeight)
+        for (cell in 0 until config.cellCount) {
+            for (j in offsets[cell] until offsets[cell + 1]) {
+                val tile = tiles[j]
+                if (tileFractions[j] > best[tile]) { best[tile] = tileFractions[j]; cellOfTile[tile] = cell }
+            }
+        }
     }
 
     inline fun forCell(cell: Int, action: (tile: Int, tileFraction: Double) -> Unit) {
