@@ -180,6 +180,9 @@ class DynamicalWeather(
     override fun surfaceTemperatureC(x: Int, y: Int) = if (isClimateMode) airTemperatureC(x, y) else sample(x, y, view::surfaceTemperatureKelvinAt) - 273.15
     override fun windUTilesPerDay(x: Int, y: Int) = if (isClimateMode) atlas.east[month][index(x, y)] * 86400 * width / config.domainWidthMeters else sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
     override fun windVTilesPerDay(x: Int, y: Int) = if (isClimateMode) atlas.south[month][index(x, y)] * 86400 * height / config.domainHeightMeters else -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters
+    override fun windSpeedMetersPerSecond(x: Int, y: Int) = kotlin.math.hypot(
+        windUTilesPerDay(x, y) * config.domainWidthMeters / width,
+        windVTilesPerDay(x, y) * config.domainHeightMeters / height) / 86400
     override fun precipitationMmPerHour(x: Int, y: Int) = if (isClimateMode) thirtyDayRainMmPerHour(x, y) else if (updateSeconds > 0) rainMmThisUpdate(x, y) * 3600 / updateSeconds else 0.0
     override fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) = if (isClimateMode) precipitationMmPerHour(x, y) else surface.peakRainRate[index(x, y)]
     override fun rainMmThisUpdate(x: Int, y: Int) = surface.rain[index(x, y)]

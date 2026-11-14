@@ -46,6 +46,7 @@ interface WeatherModel {
     fun airTemperatureC(x: Int, y: Int): Double
     fun windUTilesPerDay(x: Int, y: Int): Double
     fun windVTilesPerDay(x: Int, y: Int): Double
+    fun windSpeedMetersPerSecond(x: Int, y: Int): Double
     fun nightOpacity(x: Int, y: Int): Double
     fun atmosphericWaterMm(x: Int, y: Int): Double
     fun cloudWaterMm(x: Int, y: Int): Double

@@ -16,6 +16,7 @@ import korlibs.math.geom.Size
 import kotlin.math.pow
 import kotlin.time.TimeSource
 import terra.*
+import terra.render.WindGlyph
 import terra.render.TerrainMapView
 import terra.render.weatherLegend
 import terra.simulation.SimulationSpeed
@@ -76,6 +77,7 @@ class AtlasScene(
     private lateinit var selectionLabel: Text
     private lateinit var frameTimeLabel: Text
     private lateinit var helpPanel: Container
+    private lateinit var windLegendPanel: Container
     private lateinit var legendPanel: Container
     private var reviewStarted = false
     private val activeOverlays = mutableSetOf<WeatherLayer>(WeatherLayer.CLOUDS)
@@ -104,7 +106,8 @@ class AtlasScene(
         drawControls()
         drawAtmosphereControls()
         drawSelectionPanel()
-        legendPanel = container { }.xy(1112.0, 340.0)
+        legendPanel = container { }.xy(1112.0, 378.0)
+        drawWindLegend()
         refreshLegend()
         refreshOverlays()
         settingsPanel = TerrainSettingsPanel(this, uiFont, terrainSettings, ::updateTerrainSettings) {
@@ -124,8 +127,8 @@ class AtlasScene(
             justDown(Key.M) { showHelp() }
             justDown(Key.F) { if (!helpPanel.visible && !settingsPanel.hasOpenMenu()) toggleFidelity() }
             justDown(Key.A) { if (!helpPanel.visible && !settingsPanel.hasOpenMenu()) chooseFidelity(null) }
-            justDown(Key.SPACE) { if (!settingsPanel.hasOpenMenu()) togglePause() }
-            justDown(Key.HOME) { camera.home(); applyMapTransform() }
+            justDown(Key.SPACE) { if (!helpPanel.visible && !settingsPanel.hasOpenMenu()) togglePause() }
+            justDown(Key.HOME) { if (!helpPanel.visible && !settingsPanel.hasOpenMenu()) { camera.home(); applyMapTransform() } }
             justDown(Key.H) { toggleHelp() }
             justDown(Key.ESCAPE) { helpPanel.visible = false; speedMenu.visible = false; settingsPanel.closeMenus() }
             justDown(Key.LEFT) { if (!helpPanel.visible && !settingsPanel.hasOpenMenu()) cycleSpeed(-1) }
@@ -268,7 +271,7 @@ class AtlasScene(
                 atmosphereLabel.text = "$mode  /  $state"
                 footerLabel.text = buildList {
                     add(if (p.paused) "Paused" else "Actual ${WeatherDisplayText.rate(p.achievedSecondsPerWallSecond, snapshot.yearSeconds)}")
-                    if (representative) add("Cloud motion is illustrative · wind unresolved")
+                    if (representative) add("Monthly prevailing winds · climate means")
                     else add("Drag to pan · scroll to zoom · click to inspect")
                     if (!p.paused && p.pendingSeconds > p.quantumSeconds) add("Queued ${WeatherDisplayText.duration(p.pendingSeconds, snapshot.yearSeconds)}")
                 }.joinToString("   ·   ")
@@ -282,24 +285,24 @@ class AtlasScene(
 
     private fun SContainer.drawSelectionPanel() {
         container {
-            atlasCard(328.0, 494.0)
+            atlasCard(328.0, 450.0)
             atlasText(uiFont, "TILE INSPECTOR", 16.0, 18.0, 12.0, muted = true)
             inspectorHeader = atlasText(uiFont, "Explore the map", 16.0, 48.0, 23.0)
             inspectorContext = atlasText(uiFont, "Select a tile to see its conditions.", 16.0, 82.0, 12.0, muted = true)
             listOf("Overview", "Details").forEachIndexed { index, name ->
-                inspectorTabs += AtlasButton(this, uiFont, name, 16 + index * 152.0, 112.0, 144.0) {
+                inspectorTabs += AtlasButton(this, uiFont, name, 16 + index * 152.0, 100.0, 144.0, 32.0) {
                     inspectorDetailed = index == 1; updateSelectionInfo()
                 }
             }
-            selectionLabel = atlasText(uiFont, "Click a tile to inspect it.\n\nDrag to pan\nScroll to zoom\nHome to fit the map", 16.0, 170.0, 14.0, muted = true)
+            selectionLabel = atlasText(uiFont, "Click a tile to inspect it.\n\nDrag to pan\nScroll to zoom\nHome to fit the map", 16.0, 152.0, 14.0, muted = true)
             repeat(8) { index ->
-                val y = 166 + index * 32.0
+                val y = 152 + index * 26.0
                 inspectorRows += atlasText(uiFont, "", 16.0, y, 13.0, muted = true) to
                     atlasText(uiFont, "", 166.0, y, 14.0)
             }
-            inspectorClimate = atlasText(uiFont, "", 16.0, 438.0, 12.0, muted = true)
+            inspectorClimate = atlasText(uiFont, "", 16.0, 372.0, 12.0, muted = true)
             inspectorTabs.first().selected = true
-        }.xy(1096.0, 414.0)
+        }.xy(1096.0, 458.0)
     }
 
     private fun SContainer.drawFrameTimeCounter() {
@@ -309,6 +312,7 @@ class AtlasScene(
 
     private fun refreshLegend() {
         if (!::legendPanel.isInitialized) return
+        windLegendPanel.visible = WeatherLayer.WIND in activeOverlays
         legendPanel.removeChildren()
         val layer = activeOverlays.firstOrNull { weatherLegend(it) != null }
         val representative = presentation?.weather?.fieldSemantics?.quality == WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL
@@ -323,8 +327,8 @@ class AtlasScene(
                     legendPanel.atlasText(uiFont, "Texture shows cover and cloud-water depth.", 0.0, 24.0, 11.0, muted = true)
                 }
                 WeatherLayer.WIND in activeOverlays -> {
-                    legendPanel.atlasText(uiFont, "Wind · tiles/day", 0.0, 0.0, 12.0)
-                    legendPanel.atlasText(uiFont, "Arrow points downwind; longer means faster.", 0.0, 24.0, 11.0, muted = true)
+                    legendPanel.atlasText(uiFont, "Wind speed · m/s", 0.0, 0.0, 12.0)
+                    legendPanel.atlasText(uiFont, "Length and colour show speed. Key on the map.", 0.0, 24.0, 11.0, muted = true)
                 }
                 WeatherLayer.DAY_NIGHT in activeOverlays -> {
                     legendPanel.atlasText(uiFont, "Day and night", 0.0, 0.0, 12.0)
@@ -346,6 +350,23 @@ class AtlasScene(
         }
     }
 
+    private fun SContainer.drawWindLegend() {
+        windLegendPanel = container {
+            visible = false
+            atlasCard(376.0, 76.0)
+            atlasText(uiFont, "WIND SPEED · m/s", 14.0, 9.0, 11.0, muted = true)
+            val samples = listOf(2.0, 5.0, 10.0, 20.0)
+            graphics(renderer = GraphicsRenderer.GPU) {
+                samples.forEachIndexed { index, speed ->
+                    WindGlyph.draw(this, 48.0 + index * 92, 39.0, 1.0, 0.0, speed, scale = 3.0)
+                }
+            }
+            samples.forEachIndexed { index, speed ->
+                atlasText(uiFont, if (speed == 20.0) "20+" else speed.toInt().toString(), 42.0 + index * 92, 55.0, 11.0)
+            }
+        }.xy(32.0, 816.0)
+    }
+
     private fun SContainer.drawHelp() {
         helpPanel = container {
             visible = false
@@ -355,9 +376,9 @@ class AtlasScene(
                 atlasText(uiFont, "Controls & weather", 28.0, 28.0, 25.0)
                 AtlasButton(this, uiFont, "Close", 688.0, 24.0, 84.0) { helpPanel.visible = false }
                 atlasText(uiFont, "NAVIGATE", 28.0, 96.0, 12.0, muted = true)
-                atlasText(uiFont, "Drag             Pan the map\nScroll           Zoom at the pointer\nHome            Fit the map\nClick              Inspect a tile\n\nSpace            Pause / resume\nLeft / Right   Change speed\n1–9                Toggle map layers\nEsc                Close panels", 28.0, 130.0, 15.0)
+                atlasText(uiFont, "Drag             Pan the map\nScroll           Zoom at the pointer\nHome            Fit the map\nClick              Inspect a tile\n\nSpace            Pause / resume\nLeft / Right   Change speed\n1–9                Toggle map layers\nQ / T             Aridity / mean temperature\nP / V             Pressure / vorticity\nEsc                Close panels", 28.0, 130.0, 15.0)
                 atlasText(uiFont, "WEATHER & CLIMATE", 420.0, 96.0, 12.0, muted = true)
-                atlasText(uiFont, "Auto chooses fidelity for your speed.\nWeather resolves winds and clouds.\nClimate advances monthly soil and vegetation.\n\nRain intensity shows substep peaks;\nDetails compares them with the mean.\nFast cloud motion is illustrative.\n\nF switches fidelity · A restores Auto.", 420.0, 130.0, 14.0)
+                atlasText(uiFont, "Auto chooses fidelity for your speed.\nWeather resolves winds and clouds.\nClimate advances monthly soil and vegetation.\n\nRain intensity shows substep peaks;\nDetails compares them with the mean.\nWind arrows show speed in m/s.\n\nF switches fidelity · A restores Auto.", 420.0, 130.0, 14.0)
                 solidRect(744.0, 1.0, AtlasUi.line).xy(28.0, 362.0)
                 atlasText(uiFont, "Detailed weather resolves moving winds, clouds and rain.\nClimate samples a seasonal geography-based atlas.\nBoth modes share soil, snow and vegetation.", 28.0, 384.0, 13.0, muted = true)
                 lateinit var diagnostics: AtlasButton
@@ -440,7 +461,8 @@ class AtlasScene(
             "Air${if (estimate) " estimate" else ""}" to "${formatNumber(weather.airTemperatureC(tx, ty), 1)} °C",
             "Surface" to "${formatNumber(weather.surfaceTemperatureC(tx, ty), 1)} °C",
             "Humidity${if (estimate) " est." else ""}" to "${formatNumber(weather.relativeHumidity(tx, ty) * 100, 0)}%",
-            (if (estimate) "Mean annual temp" else "Cloud water") to (if (estimate) "${formatNumber(weather.meanClimateTemperatureC(tx, ty), 1)} °C" else "${formatNumber(weather.cloudWaterMm(tx, ty), 2)} mm"),
+            (if (WeatherLayer.WIND in activeOverlays) "Wind speed" else if (estimate) "Mean annual temp" else "Cloud water") to
+                (if (WeatherLayer.WIND in activeOverlays) "${formatNumber(weather.windSpeedMetersPerSecond(tx, ty), 1)} m/s" else if (estimate) "${formatNumber(weather.meanClimateTemperatureC(tx, ty), 1)} °C" else "${formatNumber(weather.cloudWaterMm(tx, ty), 2)} mm"),
             (if (estimate) "Monthly rain" else "Rain · mean / peak") to (if (estimate) "${formatNumber(weather.monthlyClimateRainMm(tx, ty), 0)} mm/month" else "${formatNumber(weather.precipitationMmPerHour(tx, ty), 3)} / ${formatNumber(weather.peakSubstepPrecipitationMmPerHour(tx, ty), 2)} mm/h"),
             "Soil moisture" to "${formatNumber(weather.soilMoisture(tx, ty) * 100, 0)}%",
             "Elevation" to "${formatNumber(cell.elevation * 100, 1)}%",
@@ -459,6 +481,7 @@ class AtlasScene(
             selectionLabel.text = "$source\nUpdate covers $represented\n\n" +
                 "Rain total   ${formatNumber(weather.rainMmThisUpdate(tx, ty), 3)} mm\n" +
                 "${if (estimate) "Monthly mean rate" else "Step peak"}   ${formatNumber(weather.peakSubstepPrecipitationMmPerHour(tx, ty), 3)} mm/h\n" +
+                "Wind speed   ${formatNumber(weather.windSpeedMetersPerSecond(tx, ty), 1)} m/s\n" +
                 "Monthly rain   ${formatNumber(weather.monthlyClimateRainMm(tx, ty), 0)} mm/month\n" +
                 "Annual rain   ${formatNumber(weather.annualizedRainMmPerYear(tx, ty), 0)} mm/year\n\n" +
                 (if (estimate) "Aridity   ${formatNumber(weather.climateAridity(tx, ty), 2)} rain/PET\n" else "Air water   ${formatNumber(weather.atmosphericWaterMm(tx, ty), 1)} mm\n") +
@@ -486,6 +509,7 @@ class AtlasScene(
         refreshLayerButtons()
         refreshLegend()
         refreshOverlays()
+        updateSelectionInfo()
     }
 
     private fun refreshOverlays() {
@@ -524,7 +548,7 @@ class AtlasScene(
             }
         }
         container {
-            atlasCard(328.0, 306.0)
+            atlasCard(328.0, 350.0)
             atlasText(uiFont, "MAP LAYERS", 16.0, 18.0, 12.0, muted = true)
             dynamicsMenuButton = AtlasButton(this, uiFont, "Dynamics", 124.0, 12.0, 100.0, 28.0) {
                 showingDynamics = !showingDynamics; refreshDynamicsMenu()
@@ -553,7 +577,7 @@ class AtlasScene(
             }
             listOf(WeatherLayer.CLOUDS to "2 Clouds", WeatherLayer.WIND to "9 Wind", WeatherLayer.DAY_NIGHT to "8 Light")
                 .forEachIndexed { index, (layer, label) ->
-                    layerButtons[layer] = AtlasButton(this, uiFont, label, 16 + index * 102.0, 204.0, 94.0, 32.0) { toggleLayer(layer) }
+                    layerButtons[layer] = AtlasButton(this, uiFont, label, 16 + index * 102.0, 236.0, 94.0, 32.0) { toggleLayer(layer) }
                 }
         }.xy(1096.0, 92.0)
         refreshLayerButtons(); refreshSpeedButtons()
@@ -618,21 +642,27 @@ class AtlasScene(
             "humidity" -> WeatherLayer.HUMIDITY
             "clouds" -> WeatherLayer.CLOUDS
             "rain" -> WeatherLayer.PRECIPITATION
-            "30-day-rain" -> WeatherLayer.CLIMATE_RAIN
+            "30-day-rain", "monthly-rain" -> WeatherLayer.CLIMATE_RAIN
+            "aridity" -> WeatherLayer.ARIDITY
+            "mean-temperature" -> WeatherLayer.MEAN_TEMPERATURE
             "annual-rain" -> WeatherLayer.ANNUAL_PRECIPITATION
             "air-temperature" -> WeatherLayer.AIR_TEMPERATURE
             "surface-temperature" -> WeatherLayer.SURFACE_TEMPERATURE
             "light" -> WeatherLayer.DAY_NIGHT
-            "wind" -> WeatherLayer.WIND
+            "wind", "wind-zoom", "wind-rain" -> WeatherLayer.WIND
             else -> null
         }
+        if (state == "wind-zoom") { camera.home(); zoomBy(3.0, camera.viewportWidth / 2, camera.viewportHeight / 2) }
+        else { camera.home(); applyMapTransform() }
         if (previewLayer != null) {
             activeOverlays.clear()
             activeOverlays.add(previewLayer)
             showingDynamics = false
             refreshDynamicsMenu(); refreshLayerButtons(); refreshLegend(); refreshOverlays()
         }
+        if (state == "wind-rain") toggleLayer(WeatherLayer.ANNUAL_PRECIPITATION)
         when (state) {
+            "dynamics" -> { showingDynamics = true; refreshDynamicsMenu() }
             "pressure", "vorticity" -> {
                 activeOverlays.remove(WeatherLayer.CLOUDS)
                 toggleLayer(if (state == "pressure") WeatherLayer.PRESSURE_ANOMALY else WeatherLayer.RELATIVE_VORTICITY)
@@ -653,6 +683,9 @@ class AtlasScene(
             "settings-edited" -> settingsPanel.prepareReview(0, edited = true)
             "help" -> showHelp()
         }
+        mapView.advanceVisuals(0.25)
+        refreshOverlays()
+        mapView.advanceVisuals(0.25)
         updateAtmosphereStatus()
     }
 }

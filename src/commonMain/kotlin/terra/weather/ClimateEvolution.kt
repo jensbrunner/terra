@@ -72,6 +72,8 @@ internal class ClimatePresentation(private val detailed: WeatherModel, private v
     override fun airTemperatureC(x: Int, y: Int) = if (climateMode) surfaceTemperatureC(x, y) else detailed.airTemperatureC(x, y)
     override fun windUTilesPerDay(x: Int, y: Int) = if (climateMode) atlas.east[month][i(x, y)] * 86400 * width / atlas.geography.config.domainWidthMeters else detailed.windUTilesPerDay(x, y)
     override fun windVTilesPerDay(x: Int, y: Int) = if (climateMode) atlas.south[month][i(x, y)] * 86400 * height / atlas.geography.config.domainHeightMeters else detailed.windVTilesPerDay(x, y)
+    override fun windSpeedMetersPerSecond(x: Int, y: Int) = if (climateMode)
+        hypot(atlas.east[month][i(x, y)], atlas.south[month][i(x, y)]) else detailed.windSpeedMetersPerSecond(x, y)
     override fun rainEventSummary(x: Int, y: Int): RainEventSummary? = if (climateMode) null else detailed.rainEventSummary(x, y)
     override fun precipitationMmPerHour(x: Int, y: Int) = if (climateMode) thirtyDayRainMmPerHour(x, y) else detailed.precipitationMmPerHour(x, y)
     override fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) = if (climateMode) precipitationMmPerHour(x, y) else detailed.peakSubstepPrecipitationMmPerHour(x, y)

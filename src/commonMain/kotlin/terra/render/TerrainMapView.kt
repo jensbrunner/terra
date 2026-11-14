@@ -14,7 +14,6 @@ import korlibs.korge.view.solidRect
 import korlibs.korge.view.tiles.tileMap
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import kotlin.math.sqrt
 import terra.weather.WeatherLayer
 import terra.weather.WeatherModel
 import terra.weather.WeatherFieldQuality
@@ -42,7 +41,7 @@ class TerrainMapView(
     private var nextOverlay = 0
     private var cloudFrame: RasterFrame? = null
     private val layerWeather = mutableMapOf<WeatherLayer, WeatherModel>()
-    private val overlayBitmaps = WeatherLayer.entries.associateWith { layer ->
+    private val overlayBitmaps = WeatherLayer.entries.filter { it != WeatherLayer.WIND }.associateWith { layer ->
         if (layer == WeatherLayer.CLOUDS) Bitmap32(world.width * CloudRenderer.PIXELS_PER_TILE, world.height * CloudRenderer.PIXELS_PER_TILE) else Bitmap32(world.width, world.height)
     }
     private val overlayFades = overlayBitmaps.mapValues { (layer, bitmap) -> LayerFade(Bitmap32(bitmap.width, bitmap.height),
@@ -56,8 +55,7 @@ class TerrainMapView(
     private val waterFade = LayerFade(Bitmap32(surfaceWaterBitmap.width, surfaceWaterBitmap.height))
     private val nightTint = Colors["#071321"]
     private val transparentPixel = Colors["#000000"].withA(0)
-    private val windArrowOutline = Colors["#101820"].withA(230)
-    private val windArrowStroke = Colors["#f3f1d4"].withA(245)
+    private val windOverlay = WindOverlay()
     private var overlayContainers: Map<WeatherLayer, Container>
     private val surfaceWaterContainer: Container
     private val selectionBorder: Container
@@ -87,6 +85,10 @@ class TerrainMapView(
         overlayContainers = WeatherLayer.entries.associateWith { layer ->
             parent.container {
                 visible = false
+                if (layer == WeatherLayer.WIND) {
+                    windOverlay.view.addTo(this)
+                    return@container
+                }
                 val fade = overlayFades.getValue(layer)
                 fade.image = RasterBlendImage(fade.previous, overlayBitmaps.getValue(layer)).addTo(this) {
                     val pixelsPerTile = if (layer == WeatherLayer.CLOUDS) CloudRenderer.PIXELS_PER_TILE else 1
@@ -114,6 +116,7 @@ class TerrainMapView(
             "Terrain map dimensions cannot change after the view is created"
         }
         val generationChanged = world.generation != newWorld.generation
+        val geometryChanged = world.geometryRevision != newWorld.geometryRevision
         world = newWorld
         if (generationChanged) {
             updateRelief()
@@ -125,6 +128,7 @@ class TerrainMapView(
             surfaceWaterBitmap.fill(transparentPixel); waterFade.reset()
             for (i in queuedTerrain.indices) enqueueTerrain(i)
         } else {
+            if (geometryChanged) updateRelief()
             for (i in 0 until world.changedTerrainCount) enqueueTerrain(world.changedTerrainIndex(i))
             if (canopyRevision != world.biomeRevision) updateCanopy()
         }
@@ -160,6 +164,15 @@ class TerrainMapView(
             val layer = WeatherLayer.entries[index]
             if (layer !in activeLayers) return@repeat
             if (layer.resolvedDynamicsOnly && !weather.hasResolvedDynamics) return@repeat
+            if (layer == WeatherLayer.WIND) {
+                if (layerWeather[layer] !== weather) {
+                    timings?.begin(SimulationWork.OTHER_OVERLAYS)
+                    windOverlay.update(weather)
+                    layerWeather[layer] = weather
+                    timings?.end(SimulationWork.OTHER_OVERLAYS)
+                }
+                return@repeat
+            }
             val bitmap = overlayBitmaps.getValue(layer)
             if (layer == WeatherLayer.CLOUDS) {
                 if (clouds != null && clouds !== cloudFrame) {
@@ -196,13 +209,6 @@ class TerrainMapView(
                 timings?.end(SimulationWork.OTHER_OVERLAYS)
                 return@repeat
             }
-            if (layer == WeatherLayer.WIND) {
-                timings?.begin(SimulationWork.OTHER_OVERLAYS)
-                updateWindOverlay(bitmap, weather)
-                overlayFades.getValue(layer).complete(bitmap)
-                timings?.end(SimulationWork.OTHER_OVERLAYS)
-                return@repeat
-            }
             timings?.begin(SimulationWork.OTHER_OVERLAYS)
             bitmap.lock {
                 for (y in 0 until world.height) {
@@ -216,97 +222,6 @@ class TerrainMapView(
             overlayFades.getValue(layer).complete(bitmap)
             timings?.end(SimulationWork.OTHER_OVERLAYS)
         }
-    }
-
-    private fun updateWindOverlay(bitmap: Bitmap32, weather: WeatherModel) {
-        bitmap.lock {
-            for (y in 0 until world.height) {
-                for (x in 0 until world.width) bitmap[x, y] = transparentPixel
-            }
-
-            for (y in WIND_ARROW_SPACING_Y / 2 until world.height step WIND_ARROW_SPACING_Y) {
-                for (x in WIND_ARROW_SPACING_X / 2 until world.width step WIND_ARROW_SPACING_X) {
-                    drawWindArrow(
-                        bitmap,
-                        x + 0.5,
-                        y + 0.5,
-                        weather.windUTilesPerDay(x, y),
-                        weather.windVTilesPerDay(x, y)
-                    )
-                }
-            }
-        }
-    }
-
-    private fun drawWindArrow(bitmap: Bitmap32, x: Double, y: Double, u: Double, v: Double) {
-        val speed = sqrt(u * u + v * v)
-        if (speed < MIN_VISIBLE_WIND_SPEED) return
-
-        val directionX = u / speed
-        val directionY = v / speed
-        val length = MIN_WIND_ARROW_LENGTH +
-            (MAX_WIND_ARROW_LENGTH - MIN_WIND_ARROW_LENGTH) *
-            (speed / WIND_SPEED_AT_MAX_ARROW_LENGTH).coerceIn(0.0, 1.0)
-        val tipX = x + directionX * length
-        val tipY = y + directionY * length
-        val headLength = WIND_ARROW_HEAD_LENGTH
-        val headCos = kotlin.math.cos(WIND_ARROW_HEAD_ANGLE)
-        val headSin = kotlin.math.sin(WIND_ARROW_HEAD_ANGLE)
-        val head1X = tipX - headLength * (directionX * headCos - directionY * headSin)
-        val head1Y = tipY - headLength * (directionY * headCos + directionX * headSin)
-        val head2X = tipX - headLength * (directionX * headCos + directionY * headSin)
-        val head2Y = tipY - headLength * (directionY * headCos - directionX * headSin)
-
-        drawWindLine(bitmap, x, y, tipX, tipY, outline = true)
-        drawWindLine(bitmap, tipX, tipY, head1X, head1Y, outline = true)
-        drawWindLine(bitmap, tipX, tipY, head2X, head2Y, outline = true)
-        drawWindLine(bitmap, x, y, tipX, tipY, outline = false)
-        drawWindLine(bitmap, tipX, tipY, head1X, head1Y, outline = false)
-        drawWindLine(bitmap, tipX, tipY, head2X, head2Y, outline = false)
-    }
-
-    private fun drawWindLine(
-        bitmap: Bitmap32,
-        startX: Double,
-        startY: Double,
-        endX: Double,
-        endY: Double,
-        outline: Boolean
-    ) {
-        var x = startX.roundToInt()
-        var y = startY.roundToInt()
-        val targetX = endX.roundToInt()
-        val targetY = endY.roundToInt()
-        val deltaX = abs(targetX - x)
-        val stepX = if (x < targetX) 1 else -1
-        val deltaY = -abs(targetY - y)
-        val stepY = if (y < targetY) 1 else -1
-        var error = deltaX + deltaY
-
-        while (true) {
-            if (outline) {
-                for (offsetY in -1..1) for (offsetX in -1..1) {
-                    setWindPixel(bitmap, x + offsetX, y + offsetY, windArrowOutline)
-                }
-            } else {
-                setWindPixel(bitmap, x, y, windArrowStroke)
-            }
-            if (x == targetX && y == targetY) break
-
-            val doubledError = 2 * error
-            if (doubledError >= deltaY) {
-                error += deltaY
-                x += stepX
-            }
-            if (doubledError <= deltaX) {
-                error += deltaX
-                y += stepY
-            }
-        }
-    }
-
-    private fun setWindPixel(bitmap: Bitmap32, x: Int, y: Int, color: korlibs.image.color.RGBA) {
-        if (x in 0 until world.width && y in 0 until world.height) bitmap[x, y] = color
     }
 
     fun selectTile(x: Int, y: Int) {
@@ -400,14 +315,7 @@ class TerrainMapView(
 
     private companion object {
         const val SURFACE_WATER_PIXELS_PER_TILE = SurfaceWaterRasterizer.PIXELS_PER_TILE
-        const val WIND_ARROW_SPACING_X = 16
-        const val WIND_ARROW_SPACING_Y = 12
-        const val MIN_VISIBLE_WIND_SPEED = 0.05
-        const val MIN_WIND_ARROW_LENGTH = 2.5
-        const val MAX_WIND_ARROW_LENGTH = 5.5
-        const val WIND_SPEED_AT_MAX_ARROW_LENGTH = 45.0
-        const val WIND_ARROW_HEAD_LENGTH = 1.8
-        const val WIND_ARROW_HEAD_ANGLE = 0.65
+
     }
 }
 

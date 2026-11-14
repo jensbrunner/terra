@@ -45,6 +45,9 @@ internal class DynamicalWeatherPresentation(
     override fun surfaceTemperatureC(x: Int, y: Int) = sample(x, y, view::surfaceTemperatureKelvinAt) - 273.15
     override fun windUTilesPerDay(x: Int, y: Int) = sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
     override fun windVTilesPerDay(x: Int, y: Int) = -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters
+    override fun windSpeedMetersPerSecond(x: Int, y: Int) = kotlin.math.hypot(
+        windUTilesPerDay(x, y) * config.domainWidthMeters / width,
+        windVTilesPerDay(x, y) * config.domainHeightMeters / height) / 86400
     override fun precipitationMmPerHour(x: Int, y: Int) = if (updateSeconds > 0) rainMmThisUpdate(x, y) * 3600 / updateSeconds else 0.0
     override fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) = fields[0][index(x, y)]
     override fun rainMmThisUpdate(x: Int, y: Int) = fields[1][index(x, y)]
