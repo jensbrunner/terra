@@ -6,7 +6,6 @@
 
 ## Output & Communication
 - **No fluff:** Less preambles, acknowledgments ("Sure, I can help"), or trailing summaries of what you just did.
-- **Diffs only:** Reply with unified diffs or changed blocks only. Less rewrite full files unless explicitly requested.
 - **Terse prose:** Limit explanations to a few bullet points or a few lines unless asked for deep analysis.
 - **Minimal code:** Write the simplest working solution. Do not add defensive abstractions, extra helpers, or unrequested tests. Old or unused code or helpers are cut aggressively.
 - **Silent execution:** Run verification commands quietly; only report output if a test or build fails.

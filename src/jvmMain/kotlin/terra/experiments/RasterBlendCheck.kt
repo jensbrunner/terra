@@ -20,8 +20,8 @@ suspend fun main() {
         val old = Bitmap32(8, 8)
         val next = Bitmap32(8, 8)
         val fixture = container { solidRect(8, 8, background) }
-        val cloud = RasterBlendImage(old, next).addTo(fixture)
-        val fade = LayerFade(old).also { it.image = cloud }
+        val raster = RasterBlendImage(old, next).addTo(fixture)
+        val fade = LayerFade(old).also { it.image = raster }
         views.onBeforeRender.once { ctx ->
             try {
                 val cases = listOf(
@@ -39,7 +39,7 @@ suspend fun main() {
                     next.lock { next.ints.fill(b.value) }
                     fade.complete(next)
                     for (fraction in listOf(0.0, 0.25, 0.5, 0.75, 1.0)) {
-                        cloud.fraction = fraction
+                        raster.fraction = fraction
                         val pixel = fixture.unsafeRenderToBitmapSync(ctx)[4, 4]
                         val alpha = (1 - fraction) * a.a / 255 + fraction * b.a / 255
                         fun expected(ca: Int, cb: Int, bg: Int) =

@@ -8,7 +8,7 @@ import korlibs.korge.view.BaseImage
 import korlibs.korge.internal.KorgeInternal
 
 /** Mix premultiplied raster samples, then composite ONCE.
- * Fading two source-over images separately makes even unchanged clouds pulse.
+ * Fading two source-over images separately makes even unchanged rasters pulse.
  */
 @OptIn(KorgeInternal::class)
 internal class RasterBlendImage(private val previous: Bitmap32, private val current: Bitmap32) : BaseImage(current) {

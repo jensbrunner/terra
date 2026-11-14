@@ -20,9 +20,9 @@ class DesktopPerformanceProbe private constructor(environment: String) : Perform
     private val warmup = System.getProperty("terra.profile.warmup", "0.5").toDouble()
     private val selectedSpeeds = System.getProperty("terra.profile.speeds", "").takeIf { it.isNotBlank() }
         ?.split(',')?.map { SimulationSpeed.valueOf(it.trim()) } ?: SimulationSpeed.entries
-    private val selectedClouds = System.getProperty("terra.profile.clouds", "").takeIf { it.isNotBlank() }
-        ?.let { listOf(it.toBooleanStrict()) } ?: listOf(false, true)
-    private val cases = selectedSpeeds.flatMap { speed -> selectedClouds.map { ProfileSettings(speed, it, System.getProperty("terra.profile.dayNight", "false").toBooleanStrict(), System.getProperty("terra.profile.wind", "false").toBooleanStrict()) } }
+    private val cases = selectedSpeeds.map { ProfileSettings(it,
+        System.getProperty("terra.profile.dayNight", "false").toBooleanStrict(),
+        System.getProperty("terra.profile.wind", "false").toBooleanStrict()) }
     private val frames = DoubleArray(10000)
     private var frameCount = 0
     private var caseIndex = -1
@@ -57,9 +57,9 @@ class DesktopPerformanceProbe private constructor(environment: String) : Perform
                 "No camera interaction. Short exploratory trials; JIT/order/thermal effects are not controlled.\n" +
                 "Stage times are render-thread wall time; FRAME_UPDATE includes other render stages. GPU/upload time is not isolated.\nGC uses JVM aggregate counters; heap endpoints are occupancy, not allocation or retained-size measurements.\n" +
                 "backend=single simulation worker; worker totals come from immutable publications. Render offered-time column is diagnostic, not worker demand.\n")
-        report.write("speed,clouds,frames,wall_seconds,completed_sim_seconds,achieved_days_per_second,requested_days_per_second,offered_sim_seconds,pending_start,pending_end,p50_ms,p95_ms,p99_ms,max_ms")
+        report.write("speed,frames,wall_seconds,completed_sim_seconds,achieved_days_per_second,requested_days_per_second,offered_sim_seconds,pending_start,pending_end,p50_ms,p95_ms,p99_ms,max_ms")
         for (work in SimulationWork.entries) report.write(",${work.name.lowercase()}_total_ms,${work.name.lowercase()}_calls,${work.name.lowercase()}_max_ms")
-        report.write(",worker_advance_ms,worker_publication_ms,worker_transactions,unserved_requested_seconds,rate_limited,automatic_fidelity,quantum_seconds,snapshot_publications,gc_collections,gc_ms,heap_start_bytes,heap_end_bytes")
+        report.write(",worker_advance_ms,worker_publication_ms,worker_transactions,unserved_requested_seconds,rate_limited,quantum_seconds,snapshot_publications,gc_collections,gc_ms,heap_start_bytes,heap_end_bytes")
         report.newLine()
     }
 
@@ -86,7 +86,7 @@ class DesktopPerformanceProbe private constructor(environment: String) : Perform
                 val sorted = frames.copyOf(frameCount).apply { sort() }
                 fun percentile(p: Double) = sorted[(ceil(p * frameCount).toInt() - 1).coerceIn(0, frameCount - 1)]
                 val completed = completedSeconds - startSim
-                report.write("${settings.speed.name},${settings.clouds},$frameCount,$elapsed,$completed,${completed / elapsed / 86400}," +
+                report.write("${settings.speed.name},$frameCount,$elapsed,$completed,${completed / elapsed / 86400}," +
                     "${settings.speed.simulatedSecondsPerRealSecond / 86400},$offered,$startPending,$pendingSeconds," +
                     "${percentile(0.5)},${percentile(0.95)},${percentile(0.99)},${sorted.last()}")
                 for (work in SimulationWork.entries) {
@@ -98,10 +98,10 @@ class DesktopPerformanceProbe private constructor(environment: String) : Perform
                 report.write(",${((worker?.advanceWallSeconds ?: 0.0) - (start?.advanceWallSeconds ?: 0.0)) * 1000}," +
                     "${((worker?.publicationWallSeconds ?: 0.0) - (start?.publicationWallSeconds ?: 0.0)) * 1000}," +
                     "${(worker?.completedTransactions ?: 0) - (start?.completedTransactions ?: 0)}," +
-                    "${(worker?.unservedRequestedSeconds ?: 0.0) - (start?.unservedRequestedSeconds ?: 0.0)},${worker?.rateLimited ?: false},${worker?.automaticFidelity ?: false},${worker?.quantumSeconds ?: 0.0}")
+                    "${(worker?.unservedRequestedSeconds ?: 0.0) - (start?.unservedRequestedSeconds ?: 0.0)},${worker?.rateLimited ?: false},${worker?.quantumSeconds ?: 0.0}")
                 report.write(",${(worker?.revision ?: 0) - (start?.revision ?: 0)},${gcCount() - startGcCount},${gcMillis() - startGcMillis},$startHeap,${heapBytes()}")
                 report.newLine(); report.flush()
-                println("PROFILE ${settings.speed.name} clouds=${settings.clouds} wind=${settings.wind}: p95=%.2fms, p99=%.2fms, achieved=%.4f days/s".format(
+                println("PROFILE ${settings.speed.name} wind=${settings.wind}: p95=%.2fms, p99=%.2fms, achieved=%.4f days/s".format(
                     percentile(0.95), percentile(0.99), completed / elapsed / 86400))
                 return nextCase(now)
             }

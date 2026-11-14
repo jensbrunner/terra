@@ -35,19 +35,10 @@ tasks.withType<JavaExec>().configureEach {
     systemProperty("terra.profile.speeds", providers.gradleProperty("profileSpeeds").orElse("").get())
     systemProperty("terra.profile.wind", providers.gradleProperty("profileWind").orElse("false").get())
     systemProperty("terra.profile.dayNight", providers.gradleProperty("profileDayNight").orElse("false").get())
-    systemProperty("terra.profile.clouds", providers.gradleProperty("profileClouds").orElse("").get())
     systemProperty("terra.profile.output", providers.gradleProperty("profileOutput").orElse("build/experiments/desktop-profile").get())
-    systemProperty("terra.atmosphereGeometry", providers.gradleProperty("atmosphereGeometry").orElse("LATITUDE_CHANNEL").get())
 }
 
 val experimentCompilation = kotlin.targets.getByName<KotlinJvmTarget>("jvm").compilations.getByName("main")
-tasks.register<JavaExec>("atmosphericEvolution") {
-    group = "application"
-    description = "Export one terrestrial atmosphere trajectory and circulation metrics; --native uses the game grid."
-    mainClass.set("terra.experiments.AtmosphericEvolutionReviewKt")
-    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
-    args(providers.gradleProperty("atmosphereArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
-}
 tasks.register<JavaExec>("atlasUiPreview") {
     group = "application"
     description = "Export actual game UI views for a short visual review."
@@ -56,44 +47,6 @@ tasks.register<JavaExec>("atlasUiPreview") {
     jvmArgs((tasks.named("runJvm").get() as JavaExec).jvmArgs)
     systemProperty("terra.uiReviewStates", providers.gradleProperty("uiReviewStates")
         .orElse("overview,inspection,details,speed,settings,advanced-settings,settings-edited,help").get())
-}
-tasks.register<JavaExec>("dryAtmospherePreview") {
-    group = "application"
-    description = "Open the dry rotating atmosphere's interactive 2D preview."
-    mainClass.set("terra.experiments.DryAtmospherePreviewKt")
-    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
-    systemProperty("java.awt.headless", "false")
-    systemProperty("terra.atmospherePreview.seconds", providers.gradleProperty("previewSeconds")
-        .orElse(providers.gradleProperty("dryPreviewSeconds")).orElse("0").get())
-}
-
-tasks.register<JavaExec>("dryAtmosphereExperiment") {
-    group = "application"
-    description = "Advance the dry atmosphere and export PNG/GIF previews. Pass -PdryAtmosphereArgs='--help'."
-    mainClass.set("terra.experiments.DryExperimentMainKt")
-    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
-    systemProperty("java.awt.headless", "true")
-    args(providers.gradleProperty("dryAtmosphereArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
-}
-
-tasks.register<JavaExec>("moistAtmospherePreview") {
-    group = "application"
-    description = "Open the moist atmosphere's cloud, rainfall and thermal preview."
-    mainClass.set("terra.experiments.DryAtmospherePreviewKt")
-    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
-    systemProperty("java.awt.headless", "false")
-    systemProperty("terra.moistPreview", "true")
-    systemProperty("terra.atmospherePreview.seconds", providers.gradleProperty("previewSeconds").orElse("0").get())
-}
-
-tasks.register<JavaExec>("moistAtmosphereExperiment") {
-    group = "application"
-    description = "Advance moist thermal dynamics and export a cloud/rain animation."
-    mainClass.set("terra.experiments.DryExperimentMainKt")
-    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
-    systemProperty("java.awt.headless", "true")
-    systemProperty("terra.moistExperiment", "true")
-    args(providers.gradleProperty("moistAtmosphereArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
 }
 
 tasks.register<JavaExec>("climateAtlas") {
@@ -106,7 +59,7 @@ tasks.register<JavaExec>("climateAtlas") {
 
 tasks.register<JavaExec>("climateBenchmark") {
     group = "verification"
-    description = "Measure atlas startup, monthly surface evolution and detailed reentry on the default world."
+    description = "Measure atlas startup and persistent landscape evolution on the default world."
     mainClass.set("terra.experiments.ClimateBenchmarkKt")
     classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
     args(providers.gradleProperty("climateBenchmarkArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
@@ -115,18 +68,10 @@ tasks.register<JavaExec>("climateBenchmark") {
 // Opt-in GPU regression for transparent raster interpolation; no numerical simulation.
 tasks.register<JavaExec>("rasterBlendCheck") {
     group = "verification"
-    description = "Check cloud crossfade brightness and interruption with 16 tiny native-GPU samples."
+    description = "Check raster crossfade brightness and interruption with 16 tiny native-GPU samples."
     jvmArgs((tasks.named("runJvm").get() as JavaExec).jvmArgs)
     mainClass.set("terra.experiments.RasterBlendCheckKt")
     classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     systemProperty("java.awt.headless", "false")
-}
-
-tasks.register<JavaExec>("weatherHandoffReview") {
-    group = "verification"
-    description = "Compare startup and climate reentry through the real automatic worker and renderer."
-    mainClass.set("terra.experiments.WeatherHandoffReviewKt")
-    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
-    args(providers.gradleProperty("handoffArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
 }

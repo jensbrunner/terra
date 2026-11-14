@@ -10,7 +10,7 @@ import korlibs.korge.view.getVisibleLocalArea
 import korlibs.korge.view.GraphicsRenderer
 import korlibs.math.geom.Point
 import korlibs.math.geom.vector.LineCap
-import terra.weather.WeatherModel
+import terra.climate.EnvironmentSnapshot
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -74,7 +74,7 @@ internal class WindOverlay {
     private val arrows = Graphics(renderer = GraphicsRenderer.GPU).addTo(view)
     private var samples = DoubleArray(0)
     fun viewportChanged() { view.invalidateRender() }
-    fun update(weather: WeatherModel) {
+    fun update(weather: EnvironmentSnapshot) {
         val columns = (8 until weather.width step 16).count()
         val rows = (6 until weather.height step 12).count()
         val size = columns * rows * 3

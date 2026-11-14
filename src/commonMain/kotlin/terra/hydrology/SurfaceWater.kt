@@ -162,7 +162,9 @@ internal class SurfaceWater(world: World, initialGroundwaterMm: Double = 0.0, in
 
     fun snapshot(): SurfaceWaterSnapshot {
         if (published == null || revision != publishedRevision) {
-            published = SurfaceWaterSnapshot(geography, wet.copyOf(), discharge.copyOf(), revision)
+            published = SurfaceWaterSnapshot(geography, wet.copyOf(), discharge.copyOf(),
+                DoubleArray(count) { groundwaterMmAt(it) }, channels.copyOf(),
+                DoubleArray(basins.size) { basins[it].water }, revision)
             publishedRevision = revision
         }
         return published!!
@@ -204,11 +206,15 @@ internal class SurfaceWaterGeography(
 
 class SurfaceWaterSnapshot internal constructor(
     private val geography: SurfaceWaterGeography, private val wet: BooleanArray,
-    private val discharge: DoubleArray, val revision: Long
+    private val discharge: DoubleArray, private val groundwater: DoubleArray,
+    private val channels: DoubleArray, private val lakes: DoubleArray, val revision: Long
 ) {
     val width get() = geography.width
     val height get() = geography.height
     private fun index(x: Int, y: Int) = y * width + x
+    fun groundwaterMm(x: Int, y: Int) = groundwater[index(x, y)]
+    fun channelWaterMm(x: Int, y: Int) = channels[index(x, y)]
+    fun lakeWaterMmTiles(id: Int) = lakes[id]
     fun isLandTile(x: Int, y: Int) = geography.land[index(x, y)]
     fun downstreamTileIndex(x: Int, y: Int) = geography.downstream[index(x, y)]
     fun upstreamLandTileCount(x: Int, y: Int) = geography.upstream[index(x, y)]

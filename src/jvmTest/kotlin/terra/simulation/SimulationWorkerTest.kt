@@ -4,11 +4,9 @@ import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
-import terra.atmosphere.DryAtmosphereConfig
-import terra.weather.DynamicalWeather
-import terra.weather.WeatherModel
+import terra.climate.ClimateConfig
+import terra.climate.ClimateSimulation
 import terra.world.World
 
 class SimulationWorkerTest {
@@ -22,7 +20,7 @@ class SimulationWorkerTest {
         assertEquals(0.0, demand.unservedSeconds)
     }
 
-    private val request = WorldRequest(generation = 1, width = 15, height = 11, atmosphere = DryAtmosphereConfig(width = 8, height = 6))
+    private val request = WorldRequest(generation = 1, width = 15, height = 11, climate = ClimateConfig(width = 8, height = 6))
 
     @Test
     fun demandIsBoundedAccountedAndPausedWithoutAdvancingPhysicalTime() {
@@ -46,48 +44,39 @@ class SimulationWorkerTest {
     }
 
     @Test
-    fun ownerCommitsIdenticalDetailedTransfersAndPublishesImmutableViews() {
+    fun ownerPublishesImmutableViewsAndMatchesSplitEvolution() {
         val owner = WorldSimulation(request)
         fun capture() = owner.snapshot(SimulationProgress(1, 1, 0, owner.completedSeconds,
-            SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, 920.0, false, 0.0, 0.0, 0))
+            SimulationSpeed.ONE_YEAR, 0.0, 0.0, 0.0, 920.0, false, 0.0, 0.0, 0))
         val initial = capture()
-        val initialVapor = initial.weather.atmosphericWaterMm(3, 3)
+        val initialSoil = initial.weather.soilWaterMm(3, 3)
         val directWorld = World(request.seed, request.width, request.height)
-
-        val direct = DynamicalWeather(directWorld, request.atmosphere)
-        repeat(4320) {
-            assertEquals(20.0, owner.advance(20.0))
-            direct.advanceBudgeted(20.0, 1)
-
+        val direct = ClimateSimulation(directWorld, request.climate)
+        val year = request.solar.yearSeconds
+        assertTrue(abs(owner.advance(3 * year).relativeWaterResidual) < 1e-10)
+        for (speed in SimulationSpeed.entries) {
+            val span = year / SimulationSpeed.entries.size
+            val batch = (speed.simulatedSecondsPerRealSecond * 0.05).coerceIn(1.0, span)
+            // Bound test work at realtime while retaining irregular monthly partitions.
+            var remaining = 3 * span
+            while (remaining > 1e-6) {
+                val seconds = minOf(remaining, maxOf(batch, 12345.0))
+                assertTrue(abs(direct.advance(seconds).relativeWaterResidual) < 1e-10)
+                remaining -= seconds
+            }
         }
-        val heldWater = capture()
-        assertTrue(heldWater.world === initial.world)
-        assertTrue(heldWater.drainage !== initial.drainage)
-        assertTrue(heldWater.surfaceWater !== initial.surfaceWater)
         val final = capture()
-        assertTrue(final.weather === heldWater.weather)
-        assertTrue(final.surfaceWater === heldWater.surfaceWater)
-        assertTrue(capture().surfaceWater === final.surfaceWater)
-        assertEquals(86400.0, final.progress.completedSeconds)
-        assertEquals(final.progress.completedSeconds, final.weather.elapsedSeconds)
-        fun fields(model: WeatherModel): List<(Int, Int) -> Double> = listOf(
-            model::relativeHumidity, model::cloudCover, model::precipitationMmPerHour,
-            model::peakSubstepPrecipitationMmPerHour, model::rainMmThisUpdate, model::drainageMmThisUpdate,
-            model::overflowMmThisUpdate,
-            model::thirtyDayRainMmPerHour, model::annualizedRainMmPerYear, model::solarInputFactor,
-            model::surfaceTemperatureC, model::airTemperatureC, model::windUTilesPerDay, model::windVTilesPerDay,
-            model::nightOpacity, model::atmosphericWaterMm, model::cloudWaterMm, model::soilWaterMm, model::soilMoisture)
-        val expected = fields(direct)
-        val published = fields(final.weather)
-        for (field in expected.indices) for (y in 0 until request.height) for (x in 0 until request.width)
-            assertEquals(expected[field](x, y), published[field](x, y), "Field $field at $x,$y")
-        assertEquals(initialVapor, initial.weather.atmosphericWaterMm(3, 3))
+        val expected = direct.snapshot()
+        for (y in 0 until request.height) for (x in 0 until request.width) {
+            assertEquals(expected.soilWaterMm(x, y), final.weather.soilWaterMm(x, y), 1e-8)
+            assertEquals(expected.snowWaterMm(x, y), final.weather.snowWaterMm(x, y), 1e-8)
+            assertEquals(directWorld.treeCover(x, y), final.world.treeCover(x, y), 1e-10)
+            assertEquals(direct.surfaceState.surfaceWater.groundwaterMmAt(y * request.width + x),
+                final.drainage.groundwaterMm(x, y), 1e-8)
+        }
+        assertEquals(initialSoil, initial.weather.soilWaterMm(3,3))
         assertEquals(0.0, initial.weather.elapsedSeconds)
-        assertTrue(initial.weather.presentationIdentity === final.weather.presentationIdentity)
-        assertTrue(abs(final.diagnostics!!.relativeWaterResidual) < 1e-10)
-        assertTrue(abs(final.diagnostics.unexplainedEnergyResidualJoules / final.diagnostics.totalModelEnergyJoules) < 1e-10)
-        assertFailsWith<IllegalStateException> { final.weather.step(20.0) }
-
+        assertTrue(capture().weather === final.weather)
     }
 
     @Test
@@ -99,13 +88,6 @@ class SimulationWorkerTest {
             val frozen = worker.latestSnapshot()!!
             Thread.sleep(30)
             assertEquals(frozen.progress.completedSeconds, worker.latestSnapshot()!!.progress.completedSeconds)
-            worker.setCloudsVisible(true)
-            await { worker.latestSnapshot()?.clouds != null }
-            assertEquals(frozen.progress.completedSeconds, worker.latestSnapshot()!!.progress.completedSeconds)
-            val pausedClouds = worker.latestSnapshot()!!.clouds
-            worker.setCloudsVisible(false)
-            await { worker.latestSnapshot()?.clouds == null }
-            assertTrue(pausedClouds != null)
             worker.updateControls(SimulationSpeed.ONE_DAY, false)
             await { (worker.latestSnapshot()?.progress?.completedSeconds ?: 0.0) > frozen.progress.completedSeconds }
             val paused = worker.updateControls(SimulationSpeed.ONE_HOUR, true)

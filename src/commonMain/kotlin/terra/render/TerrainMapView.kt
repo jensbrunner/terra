@@ -14,10 +14,8 @@ import korlibs.korge.view.solidRect
 import korlibs.korge.view.tiles.tileMap
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import terra.weather.WeatherLayer
-import terra.weather.WeatherModel
-import terra.weather.WeatherFieldQuality
-import terra.atmosphere.SolarConfig
+import terra.climate.ClimateLayer
+import terra.climate.EnvironmentSnapshot
 import terra.world.Terrain
 import terra.world.WorldSnapshot
 import terra.simulation.SimulationTimings
@@ -39,15 +37,10 @@ class TerrainMapView(
     private val canopyBitmap = Bitmap32(world.width, world.height)
     private var canopyRevision = -1L
     private var nextOverlay = 0
-    private var cloudFrame: RasterFrame? = null
-    private val layerWeather = mutableMapOf<WeatherLayer, WeatherModel>()
-    private val overlayBitmaps = WeatherLayer.entries.filter { it != WeatherLayer.WIND }.associateWith { layer ->
-        if (layer == WeatherLayer.CLOUDS) Bitmap32(world.width * CloudRenderer.PIXELS_PER_TILE, world.height * CloudRenderer.PIXELS_PER_TILE) else Bitmap32(world.width, world.height)
-    }
-    private val overlayFades = overlayBitmaps.mapValues { (layer, bitmap) -> LayerFade(Bitmap32(bitmap.width, bitmap.height),
-        if (layer == WeatherLayer.CLOUDS) CloudRenderer.REFRESH_SECONDS else 0.18) }
-    private var lightingWeather: WeatherModel? = null
-    private var seasonalLighting: SeasonalLighting? = null
+    private val layerWeather = mutableMapOf<ClimateLayer, EnvironmentSnapshot>()
+    private val overlayBitmaps = ClimateLayer.entries.filter { it != ClimateLayer.WIND }
+        .associateWith { Bitmap32(world.width, world.height) }
+    private val overlayFades = overlayBitmaps.mapValues { (_, bitmap) -> LayerFade(Bitmap32(bitmap.width, bitmap.height)) }
     private val surfaceWaterBitmap = Bitmap32(
         world.width * SURFACE_WATER_PIXELS_PER_TILE,
         world.height * SURFACE_WATER_PIXELS_PER_TILE
@@ -56,7 +49,7 @@ class TerrainMapView(
     private val nightTint = Colors["#071321"]
     private val transparentPixel = Colors["#000000"].withA(0)
     private val windOverlay = WindOverlay()
-    private var overlayContainers: Map<WeatherLayer, Container>
+    private var overlayContainers: Map<ClimateLayer, Container>
     private val surfaceWaterContainer: Container
     private val selectionBorder: Container
 
@@ -82,19 +75,19 @@ class TerrainMapView(
             }
         }
 
-        overlayContainers = WeatherLayer.entries.associateWith { layer ->
+        overlayContainers = ClimateLayer.entries.associateWith { layer ->
             parent.container {
                 visible = false
-                if (layer == WeatherLayer.WIND) {
+                if (layer == ClimateLayer.WIND) {
                     windOverlay.view.addTo(this)
                     return@container
                 }
                 val fade = overlayFades.getValue(layer)
                 fade.image = RasterBlendImage(fade.previous, overlayBitmaps.getValue(layer)).addTo(this) {
-                    val pixelsPerTile = if (layer == WeatherLayer.CLOUDS) CloudRenderer.PIXELS_PER_TILE else 1
+                    val pixelsPerTile = 1
                     scaleX = 1.0 / pixelsPerTile
                     scaleY = 1.0 / pixelsPerTile
-                    smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS || layer == WeatherLayer.CLIMATE_RAIN || layer == WeatherLayer.ANNUAL_PRECIPITATION || layer == WeatherLayer.ARIDITY || layer == WeatherLayer.MEAN_TEMPERATURE || layer.resolvedDynamicsOnly
+                    smoothing = layer == ClimateLayer.DAY_NIGHT || layer == ClimateLayer.CLIMATE_RAIN || layer == ClimateLayer.ANNUAL_PRECIPITATION || layer == ClimateLayer.ARIDITY || layer == ClimateLayer.MEAN_TEMPERATURE
                     alpha = 0.0
                 }
             }
@@ -121,9 +114,7 @@ class TerrainMapView(
         if (generationChanged) {
             updateRelief()
             updateCanopy()
-            cloudFrame = null
             layerWeather.clear()
-            lightingWeather = null
             for ((layer, bitmap) in overlayBitmaps) { bitmap.fill(transparentPixel); overlayFades.getValue(layer).reset() }
             surfaceWaterBitmap.fill(transparentPixel); waterFade.reset()
             for (i in queuedTerrain.indices) enqueueTerrain(i)
@@ -146,25 +137,18 @@ class TerrainMapView(
         bitmap.lock { frame.copyInto(bitmap.ints) }
     }
 
-    fun updateOverlays(weather: WeatherModel, activeLayers: Set<WeatherLayer>, clouds: RasterFrame?, solar: SolarConfig) {
-        for (layer in WeatherLayer.entries) {
-            val unavailable = layer.resolvedDynamicsOnly && !weather.hasResolvedDynamics
-            overlayContainers.getValue(layer).visible = layer in activeLayers && !unavailable
-            if (unavailable && layerWeather.remove(layer) != null) {
-                // Do not retain an obsolete detailed field through a climate/reentry interval.
-                overlayFades.getValue(layer).reset()
-                overlayBitmaps.getValue(layer).fill(transparentPixel)
-            }
+    fun updateOverlays(weather: EnvironmentSnapshot, activeLayers: Set<ClimateLayer>) {
+        for (layer in ClimateLayer.entries) {
+            overlayContainers.getValue(layer).visible = layer in activeLayers
         }
         // Round robin prevents later layers starving when publications arrive during a refresh.
         var renderedOverlay = false
         val firstOverlay = nextOverlay
-        repeat(WeatherLayer.entries.size) { offset ->
-            val index = (firstOverlay + offset) % WeatherLayer.entries.size
-            val layer = WeatherLayer.entries[index]
+        repeat(ClimateLayer.entries.size) { offset ->
+            val index = (firstOverlay + offset) % ClimateLayer.entries.size
+            val layer = ClimateLayer.entries[index]
             if (layer !in activeLayers) return@repeat
-            if (layer.resolvedDynamicsOnly && !weather.hasResolvedDynamics) return@repeat
-            if (layer == WeatherLayer.WIND) {
+            if (layer == ClimateLayer.WIND) {
                 if (layerWeather[layer] !== weather) {
                     timings?.begin(SimulationWork.OTHER_OVERLAYS)
                     windOverlay.update(weather)
@@ -174,35 +158,16 @@ class TerrainMapView(
                 return@repeat
             }
             val bitmap = overlayBitmaps.getValue(layer)
-            if (layer == WeatherLayer.CLOUDS) {
-                if (clouds != null && clouds !== cloudFrame) {
-                    timings?.begin(SimulationWork.CLOUD_BITMAP)
-                    overlayFades.getValue(layer).begin(bitmap)
-                    upload(bitmap, clouds)
-                    overlayFades.getValue(layer).complete(bitmap)
-                    cloudFrame = clouds
-                    timings?.end(SimulationWork.CLOUD_BITMAP)
-                }
-                return@repeat
-            }
             if (renderedOverlay || layerWeather[layer] === weather) return@repeat
             renderedOverlay = true
-            nextOverlay = (index + 1) % WeatherLayer.entries.size
+            nextOverlay = (index + 1) % ClimateLayer.entries.size
             layerWeather[layer] = weather
             overlayFades.getValue(layer).begin(bitmap)
-            val representative = weather.fieldSemantics.quality == WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL
-            if (layer == WeatherLayer.DAY_NIGHT && representative && lightingWeather !== weather) {
-                seasonalLighting = SeasonalLighting.capture(world.height, weather.fieldSemantics, solar)
-                lightingWeather = weather
-            }
-            if (layer == WeatherLayer.DAY_NIGHT) {
+            if (layer == ClimateLayer.DAY_NIGHT) {
                 timings?.begin(SimulationWork.OTHER_OVERLAYS)
                 bitmap.lock {
                     for (y in 0 until world.height) {
-                        if (representative) {
-                            val color = nightTint.withA((seasonalLighting!!.opacityAtRow(y) * 255).toInt()).value
-                            bitmap.ints.fill(color, y * world.width, (y + 1) * world.width)
-                        } else for (x in 0 until world.width) bitmap[x, y] = nightTint.withA((weather.nightOpacity(x, y) * 255).toInt())
+                        for (x in 0 until world.width) bitmap[x, y] = nightTint.withA((weather.nightOpacity(x, y) * 255).toInt())
                     }
                 }
                 overlayFades.getValue(layer).complete(bitmap)

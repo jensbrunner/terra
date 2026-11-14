@@ -6,8 +6,7 @@ import kotlin.math.*
 import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
-import terra.atmosphere.AtmosphereTileMapping
-import terra.weather.*
+import terra.climate.*
 import terra.world.*
 
 /** Review emergent circulation across seeds and fixed geographic counterfactuals. */
@@ -17,7 +16,7 @@ fun main(args: Array<String>) {
     fun export(name: String, world: World, wind: Double? = null, month: Int = 3): SeasonalClimateAtlas {
         val start = System.nanoTime()
         val atlas = ClimateAtlasBuilder(windOverride = wind).build(ClimateGeography(world))
-        val surface = TerrainMoistSurface(world, AtmosphereTileMapping(world.width, world.height, atlas.geography.config))
+        val surface = LandscapeWater(world, atlas.geography.config.domainWidthMeters * atlas.geography.config.domainHeightMeters / (world.width.toDouble() * world.height))
         surface.initializeClimate(atlas)
         world.evolveAtlasCover(atlas, 0.0, initialize = true, soilAvailability = surface.growingWaterAvailability)
         val millis = (System.nanoTime() - start) / 1e6
@@ -70,7 +69,7 @@ fun main(args: Array<String>) {
         if (name == "seed-31742" || name == "moisture-coast-ridge-interior") {
             val evolution = ClimateEvolution(world, surface, 0.0)
             writeLandscape(output, "$name-year0", world, surface)
-            repeat(5) { evolution.advance(atlas, 20 * atlas.solar.yearSeconds, 0) }
+            repeat(5) { evolution.advance(atlas, 20 * atlas.solar.yearSeconds) }
             writeLandscape(output, "$name-year100", world, surface)
         }
         return atlas
@@ -160,7 +159,7 @@ private fun writeMoistureTransect(output: File, world: World, atlas: SeasonalCli
     print(report)
 }
 
-private fun writeLandscape(output: File, name: String, world: World, surface: TerrainMoistSurface) {
+private fun writeLandscape(output: File, name: String, world: World, surface: LandscapeWater) {
     val image = BufferedImage(world.width * 3 * 3, (world.height * 3 + 26), BufferedImage.TYPE_INT_RGB)
     val g = image.createGraphics()
     val water = surface.surfaceWater.snapshot()

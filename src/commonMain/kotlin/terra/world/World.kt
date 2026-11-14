@@ -59,7 +59,7 @@ class World private constructor(
     /** Equilibrium at creation; thereafter cover responds over years and retains disturbances.
      * Growing-season root-zone availability controls water suitability when supplied by
      * hydrology. Annual aridity is a fallback for atlas-only diagnostic callers. */
-    internal fun evolveAtlasCover(atlas: terra.weather.SeasonalClimateAtlas, years: Double, initialize: Boolean = false,
+    internal fun evolveAtlasCover(atlas: terra.climate.SeasonalClimateAtlas, years: Double, initialize: Boolean = false,
         drought: DoubleArray? = null, soilAvailability: DoubleArray? = null) {
         trees.copyInto(canopyBefore)
         for (i in cells.indices) {
@@ -191,7 +191,6 @@ class World private constructor(
             "Desert ${percent(Terrain.DESERT)}% · Tundra ${percent(Terrain.TUNDRA)}% · " +
             "Mountains ${percent(Terrain.MOUNTAINS)}%"
     }
-
 
     internal companion object {
         /** Deterministic test/experiment hook; production worlds always come from the generator. */

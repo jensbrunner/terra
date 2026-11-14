@@ -1,10 +1,8 @@
 package terra.simulation
 
-import terra.atmosphere.DryAtmosphereConfig
-import terra.atmosphere.MoistAtmosphereDiagnostics
+import terra.climate.SolarConfig
 import terra.hydrology.SurfaceWaterSnapshot
-import terra.weather.*
-import terra.render.CloudRenderer
+import terra.climate.*
 import terra.render.RasterFrame
 import terra.render.SurfaceWaterRasterizer
 import terra.world.TerrainGenerationSettings
@@ -13,13 +11,10 @@ import terra.world.WorldSnapshot
 
 data class TerrainElevationEdit(val x: Int, val y: Int, val elevation: Double)
 
-enum class SimulationFidelity { DETAILED, CLIMATE }
-
 data class WorldRequest(
     val generation: Long = 0, val seed: Int = 31742, val width: Int = 283, val height: Int = 212,
     val terrain: TerrainGenerationSettings = TerrainGenerationSettings(),
-    // Native-grid six-hour comparison: 40 s retains accuracy with ample CFL margin at half the steps.
-    val atmosphere: DryAtmosphereConfig = DryAtmosphereConfig(stepSeconds = 40.0)
+    val climate: ClimateConfig = ClimateConfig(), val solar: SolarConfig = SolarConfig()
 )
 
 data class SimulationProgress(
@@ -27,120 +22,48 @@ data class SimulationProgress(
     val completedSeconds: Double, val selectedSpeed: SimulationSpeed, val achievedSecondsPerWallSecond: Double,
     val pendingSeconds: Double, val unservedRequestedSeconds: Double, val pendingLimitSeconds: Double,
     val paused: Boolean, val advanceWallSeconds: Double, val publicationWallSeconds: Double,
-    val completedTransactions: Long,
-    val automaticFidelity: Boolean = false, val quantumSeconds: Double = 20.0
+    val completedTransactions: Long, val quantumSeconds: Double = 1.0
 ) {
     val rateLimited: Boolean get() = pendingSeconds >= pendingLimitSeconds * 0.75 && !paused
 }
 
 data class WorldPresentationSnapshot(
-    val progress: SimulationProgress, val world: WorldSnapshot, val weather: WeatherPresentation,
-    val drainage: SurfaceWaterSnapshot,
-    val yearSeconds: Double, val diagnostics: MoistAtmosphereDiagnostics?,
-    val clouds: RasterFrame?, val surfaceWater: RasterFrame,
-    val fidelity: SimulationFidelity = SimulationFidelity.DETAILED, val fidelityRevision: Long = 0,
-    val lastHandoff: terra.atmosphere.AtmosphereHandoff? = null,
-    val solar: terra.atmosphere.SolarConfig = terra.atmosphere.SolarConfig()
+    val progress: SimulationProgress, val world: WorldSnapshot, val weather: EnvironmentSnapshot,
+    val drainage: SurfaceWaterSnapshot, val yearSeconds: Double, val surfaceWater: RasterFrame,
+    val solar: SolarConfig
 )
 
-/** Single-owner numerical state. Contains no graphics or threading; worker owns every call. */
+/** Single owner of the atlas and persistent landscape. Speed only changes batch size. */
 internal class WorldSimulation(val request: WorldRequest) {
     private val world = World(request.seed, request.width, request.height, request.terrain)
-    private val weather = DynamicalWeather(world, request.atmosphere)
+    private val climate = ClimateSimulation(world, request.climate, request.solar)
     private var worldView: WorldSnapshot? = null
-    private var weatherView: WeatherPresentation? = null
-    private var drainageView = weather.surfaceState.surfaceWater.snapshot()
+    private var weatherView: EnvironmentSnapshot? = null
+    private var drainageView = climate.surfaceState.surfaceWater.snapshot()
     private val waterRasterizer = SurfaceWaterRasterizer(request.width, request.height)
     private var waterFrame = waterRasterizer.render(drainageView)
     private var waterViewSeconds = 0.0
-    private val cloudRenderer by lazy { CloudRenderer(request.width, request.height, request.seed) }
-    private val weatherIdentity = Any()
-    private var climateQuantumSeconds = 365 * 86400.0 / 12
-    var fidelity = SimulationFidelity.DETAILED
-        private set
-    var fidelityRevision = 0L
-        private set
-    var completedSeconds = 0.0
-        private set
-    val stepSeconds: Double get() = if (fidelity == SimulationFidelity.CLIMATE) climateQuantumSeconds
-        else request.atmosphere.stepSeconds
-
+    val completedSeconds get() = climate.elapsedSeconds
     fun editTerrain(edits: List<TerrainElevationEdit>) {
-        for (edit in edits) {
-            require(edit.x in 0 until request.width && edit.y in 0 until request.height)
-            world.setElevation(edit.x, edit.y, edit.elevation)
-        }
-        weather.ensureAtlas()
+        for (edit in edits) world.setElevation(edit.x, edit.y, edit.elevation)
+        climate.ensureAtlas()
         worldView = null; weatherView = null
-        drainageView = weather.surfaceState.surfaceWater.snapshot()
+        drainageView = climate.surfaceState.surfaceWater.snapshot()
         waterFrame = waterRasterizer.render(drainageView)
     }
-
-    fun setClimateQuantum(seconds: Double) {
-        require(seconds.isFinite() && seconds >= 1.0 && seconds <= 20 * 365 * 86400.0)
-        climateQuantumSeconds = seconds
-    }
-
-    fun setFidelity(selected: SimulationFidelity) {
-        if (selected == fidelity) return
-        if (selected == SimulationFidelity.DETAILED) weather.resumeDetailed()
-        weather.dynamicsSuppressedForClimate = selected == SimulationFidelity.CLIMATE
-        fidelity = selected
-        fidelityRevision++
-        weatherView = null
-    }
-
-    /** Whole completed transactions only; discarded presentation snapshots never carry transfers. */
-    fun advance(pendingSeconds: Double): Double {
-        if (pendingSeconds < stepSeconds) return 0.0
-        if (fidelity == SimulationFidelity.CLIMATE) {
-            advanceClimateInterval(stepSeconds)
-            return stepSeconds
-        }
-        val advanced = weather.advanceBudgeted(pendingSeconds, 1, publishSnapshot = false)
-        completedSeconds += advanced
-        return advanced
-    }
-
-    /** Complete one explicitly requested climate interval; no worker speed policy is added here. */
-    internal fun advanceClimateInterval(seconds: Double): ClimateIntervalDiagnostics {
-        val detailed = weather
-        check(detailed.elapsedSeconds == completedSeconds)
-        val result = detailed.advanceClimateInterval(seconds)
-        if (fidelity != SimulationFidelity.CLIMATE) { fidelity = SimulationFidelity.CLIMATE; fidelityRevision++ }
-        completedSeconds = detailed.elapsedSeconds
-        return result
-    }
-
-    fun snapshot(progress: SimulationProgress, cloudsVisible: Boolean = false, visualElapsedSeconds: Double = 0.0): WorldPresentationSnapshot {
+    fun advance(seconds: Double): ClimateIntervalDiagnostics = climate.advance(seconds)
+    fun snapshot(progress: SimulationProgress): WorldPresentationSnapshot {
         check(progress.generation == request.generation && progress.completedSeconds == completedSeconds)
         if (worldView?.biomeRevision != world.biomeRevision) worldView = world.snapshot(request.generation, worldView)
-        if (weatherView?.elapsedSeconds != completedSeconds) {
-            weather.refreshSnapshot()
-            weatherView = WeatherPresentation.capture(weather, completedSeconds, weatherIdentity)
-        }
-        // Slow water presentation, at most twice per wall second at the selected
-        // speed. Mode changes and paused inspection still expose current stores.
+        if (weatherView?.elapsedSeconds != completedSeconds) weatherView = climate.snapshot()
+        drainageView = climate.surfaceState.surfaceWater.snapshot()
         if (progress.paused || completedSeconds - waterViewSeconds >=
             maxOf(21600.0, progress.selectedSpeed.simulatedSecondsPerRealSecond * 0.5)) {
-            val current = weather.surfaceState.surfaceWater.snapshot()
-            if (current !== drainageView) { drainageView = current; waterFrame = waterRasterizer.render(current) }
+            waterFrame = waterRasterizer.render(drainageView)
             waterViewSeconds = completedSeconds
         }
-        val cloudFrame = if (cloudsVisible) {
-            cloudRenderer.update(weatherView!!, if (progress.paused) 0.0 else visualElapsedSeconds,
-                detailedVisualSeconds = if (progress.paused || fidelity != SimulationFidelity.DETAILED) 0.0 else
-                    visualElapsedSeconds * progress.selectedSpeed.simulatedSecondsPerRealSecond,
-                maximumDetailedLeadSeconds = request.atmosphere.stepSeconds)
-            cloudRenderer.frame
-        } else null
-        return WorldPresentationSnapshot(progress, worldView!!,
-            weatherView!!, drainageView,
-            weather.physics.solar.yearSeconds,
-            weather.takeUnless { it.hasRepresentativeFields }?.diagnostics,
-            cloudFrame, waterFrame,
-            fidelity, fidelityRevision,
-            weather.lastHandoff, weather.physics.solar)
+        return WorldPresentationSnapshot(progress, worldView!!, weatherView!!, drainageView,
+            request.solar.yearSeconds, waterFrame, request.solar)
     }
 }
 
@@ -181,12 +104,9 @@ internal class SimulationDemand(private var stepSeconds: Double) {
     }
 }
 
-/** One dedicated JVM owner, coalesced controls, and a latest-only publication mailbox. */
+/** Dedicated JVM owner and latest-only immutable publication. */
 expect class SimulationWorker(request: WorldRequest) {
     fun updateControls(speed: SimulationSpeed, paused: Boolean, resetPending: Boolean = false): Long
-    fun setFidelity(fidelity: SimulationFidelity): Long
-    fun useAutomaticFidelity(): Long
-    fun setCloudsVisible(visible: Boolean)
     fun editTerrain(edits: List<TerrainElevationEdit>)
     fun regenerate(request: WorldRequest)
     fun latestSnapshot(): WorldPresentationSnapshot?

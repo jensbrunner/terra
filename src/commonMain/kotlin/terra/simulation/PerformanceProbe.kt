@@ -2,7 +2,7 @@ package terra.simulation
 
 /** Optional, single-threaded timing probe. Ordinary gameplay does not create one. */
 enum class SimulationWork {
-    INTEGRATION, SURFACE_BUCKET, CLIMATE_OBSERVATION, SNAPSHOT, CLOUD_BITMAP, OTHER_OVERLAYS, WATER_RASTER, TERRAIN_TILES, FRAME_UPDATE
+    OTHER_OVERLAYS, WATER_RASTER, TERRAIN_TILES, FRAME_UPDATE
 }
 
 class SimulationTimings(val nanoTime: () -> Long) {
@@ -21,7 +21,7 @@ class SimulationTimings(val nanoTime: () -> Long) {
     fun clear() { totals.fill(0); counts.fill(0); maxima.fill(0) }
 }
 
-data class ProfileSettings(val speed: SimulationSpeed, val clouds: Boolean, val dayNight: Boolean = false, val wind: Boolean = false)
+data class ProfileSettings(val speed: SimulationSpeed, val dayNight: Boolean = false, val wind: Boolean = false)
 
 interface PerformanceProbe {
     val timings: SimulationTimings
