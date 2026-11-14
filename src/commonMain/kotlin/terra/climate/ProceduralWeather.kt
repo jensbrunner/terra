@@ -3,7 +3,7 @@ package terra.climate
 import kotlin.math.*
 
 /** Instantaneous weather, evaluated directly at absolute time; no atmospheric history or RNG state.
- * Landscape water continues to use the conservative monthly climate budget. */
+ * Precipitation is the shared conservative landscape forcing. */
 class ProceduralWeather(private val atlas: SeasonalClimateAtlas, val elapsedSeconds: Double) {
     private val width = atlas.width
     private val height = atlas.height
@@ -19,155 +19,87 @@ class ProceduralWeather(private val atlas: SeasonalClimateAtlas, val elapsedSeco
     private val nextMonth = (month + 1) % 12
     private val monthFraction = monthPosition - monthFloor
     private val blend = (1 - cos(PI * monthFraction)) / 2
-    private val flowWindow = floor(days / 3).toLong()
-    private val flowBlend = smooth(0.0, 1.0, days / 3 - floor(days / 3))
-    private val travelWeights = Array(2) { windWeights((flowWindow - 1 + it) * 3.0) }
-    private val storms = buildStorms()
-    private val sampled = BooleanArray(width * height)
-    private val clouds = DoubleArray(width * height)
-    private val rain = DoubleArray(width * height)
-    private val humidity = DoubleArray(width * height)
-    private val temperature = DoubleArray(width * height)
+    private val flowWindow = floor(days / FLOW_DAYS).toLong()
+    private val flowBlend = smooth(0.0, 1.0, days / FLOW_DAYS - floor(days / FLOW_DAYS))
+    private val travelWeights = Array(2) { windWeights((flowWindow - 1 + it) * FLOW_DAYS) }
+    data class Sample(val cloud: Double, val precipitation: Double, val humidity: Double, val temperature: Double)
+    private val samples by lazy { arrayOfNulls<Sample>(width * height) }
 
     init {
         require(elapsedSeconds.isFinite())
     }
 
-    fun cloudCover(x: Int, y: Int) = clouds[index(x, y)]
-    fun precipitationMmPerHour(x: Int, y: Int) = rain[index(x, y)]
-    fun relativeHumidity(x: Int, y: Int) = humidity[index(x, y)]
-    fun temperatureC(x: Int, y: Int) = temperature[index(x, y)]
+    fun cloudCover(x: Int, y: Int) = tile(x, y).cloud
+    fun precipitationMmPerHour(x: Int, y: Int) = atlas.rainfall.rateMmPerHour(x, y, elapsedSeconds)
+    fun relativeHumidity(x: Int, y: Int) = tile(x, y).humidity
+    fun temperatureC(x: Int, y: Int) = tile(x, y).temperature
     fun windEastMetersPerSecond(x: Int, y: Int) = interpolate(atlas.east, y * width + x)
     fun windSouthMetersPerSecond(x: Int, y: Int) = interpolate(atlas.south, y * width + x)
 
-    private fun index(x: Int, y: Int): Int {
+    private fun tile(x: Int, y: Int): Sample {
         val i = y * width + x
-        if (!sampled[i]) { evaluate(x, y); sampled[i] = true }
-        return i
+        return samples[i] ?: sample(x + 0.5, y + 0.5).also { samples[i] = it }
     }
 
-    private data class Storm(val x: Double, val y: Double, val radius: Double, val strength: Double,
-        val angle: Double, val age: Double, val kind: Int, val spin: Double)
-
-    private fun buildStorms(): List<Storm> = buildList {
-        // Bounded overlap of independently seeded births. The envelope reaches zero at
-        // both ends, so dropping expired systems or adding new ones cannot pop a cloud.
-        val epoch = floor(days * 2).toLong()
-        for (birth in epoch - 12..epoch) for (slot in 0..2) {
-            fun random(channel: Int) = hash(birth, slot, channel)
-            val kind = when { random(0) < 0.08 -> 2; random(0) < 0.42 -> 1; else -> 0 }
-            val lifetime = when (kind) { 1 -> 0.35 + random(1) * 0.65; 2 -> 4 + random(1) * 2; else -> 2 + random(1) * 2 }
-            val age = days - birth * 0.5
-            if (age <= 0 || age >= lifetime) continue
-            val x = random(2) * spanX
-            val y = (0.06 + 0.88 * random(3)) * spanY
-            val tileX = (x / spanX * width).toInt().coerceIn(0, width - 1)
-            val tileY = (y / spanY * height).toInt().coerceIn(0, height - 1)
-            val i = tileY * width + tileX
-            val birthTime = birth * 43200.0
-            val birthPhase = (birthTime / atlas.solar.yearSeconds + atlas.solar.initialYearFraction) * 12 - 0.5
-            val birthMonth = wrapMonth(floor(birthPhase).toLong())
-            val f = (1 - cos(PI * (birthPhase - floor(birthPhase)))) / 2
-            fun atBirth(field: Array<DoubleArray>) = field[birthMonth][i] * (1 - f) + field[(birthMonth + 1) % 12][i] * f
-            val u = atBirth(atlas.east); val v = atBirth(atlas.south)
-            val wet = atBirth(atlas.humidity)
-            val warm = smooth(8.0, 28.0, atBirth(atlas.temperature))
-            val latitude = PlanetLatitude.terrainRowRadians(tileY, height)
-            val tropical = smooth(0.08, 0.22, abs(latitude)) * (1 - smooth(0.45, 0.85, abs(latitude)))
-            val suitability = when (kind) {
-                1 -> warm * wet
-                2 -> tropical * smooth(23.0, 29.0, atBirth(atlas.temperature)) * wet * if (atlas.geography.tileLand[i]) 0.12 else 1.0
-                else -> 0.35 + 0.65 * wet
-            }
-            val envelope = smooth(0.0, 0.2, age / lifetime) * (1 - smooth(0.65, 1.0, age / lifetime))
-            val radius = when (kind) { 1 -> 100 + 140 * random(4); 2 -> 450 + 350 * random(4); else -> 550 + 650 * random(4) }
-            add(Storm(x + u * age * 86.4, y + v * age * 86.4, radius,
-                envelope * suitability * (0.7 + random(5) * 0.6), atan2(v, u), age, kind,
-                if (latitude >= 0) -1.0 else 1.0))
-        }
-    }
-
-    private fun evaluate(x: Int, y: Int) {
-        val i = y * width + x
-        val px = (x + 0.5) / width * spanX
-        val py = (y + 0.5) / height * spanY
-        val wet = interpolate(atlas.humidity, i)
+    /** Fractional terrain coordinates: rendering can sample finer than the simulation grid. */
+    fun sample(x: Double, y: Double): Sample {
+        val tx = floor(x).toInt().mod(width)
+        val ty = floor(y).toInt().coerceIn(0, height - 1)
+        val i = ty * width + tx
+        val px = x / width * spanX
+        val py = y / height * spanY
+        val wet = interpolate(atlas.humidity, x, y)
         val temp = atlas.temperature[month][i] * (1 - blend) + atlas.temperature[nextMonth][i] * blend
-        val climateRain = interpolate(atlas.rain, i) * 12 * 3600 / atlas.solar.yearSeconds
-        val u = interpolate(atlas.east, i); val v = interpolate(atlas.south, i)
+        val u = interpolate(atlas.east, x, y); val v = interpolate(atlas.south, x, y)
         // Analytic integral of the periodic, cosine-interpolated seasonal winds.
         // Multiplying today's wind by absolute time would make season changes teleport clouds.
         // Overlapping flow windows bound shear even after centuries. Each window
         // uses its own seed and fades in/out with zero slope at the handoff.
-        var broad = 0.0; var billow = 0.0; var detail = 0.0
+        var broad = 0.0; var detail = 0.0
         for (packetIndex in 0..1) {
             val packet = flowWindow - 1 + packetIndex
             val weight = if (packetIndex == 1) flowBlend else 1 - flowBlend
-            val nx = px - windTravel(atlas.east, i, travelWeights[packetIndex])
-            val ny = py - windTravel(atlas.south, i, travelWeights[packetIndex])
+            val nx = px - windTravel(atlas.cloudFlow[0], x, y, travelWeights[packetIndex])
+            val ny = py - windTravel(atlas.cloudFlow[1], x, y, travelWeights[packetIndex])
             val salt = packet.toInt() * 1013
             val b = noise(nx, ny, 18, days / 7, 11 xor salt)
             val c = noise(nx + 90 * b, ny + 65 * b, 54, days / 2.5, 23 xor salt)
             val f = noise(nx + 40 * c, ny, 150, days / 1.2, 37 xor salt)
             broad += b * weight
-            billow += c * weight
             detail += (0.55 * b + 0.30 * c + 0.15 * f) * weight
         }
-        var lifting = 0.0
-        var convection = 0.0
-        var cooling = 0.0
-        for (storm in storms) {
-            val dx = wrap(px - storm.x + spanX / 2, spanX) - spanX / 2
-            val dy = py - storm.y
-            if (abs(dx) > storm.radius * 2.5 || abs(dy) > storm.radius * 2.5) continue
-            val along = (dx * cos(storm.angle) + dy * sin(storm.angle)) / storm.radius
-            val across = (-dx * sin(storm.angle) + dy * cos(storm.angle)) / storm.radius
-            val radius = hypot(along, across)
-            val shape = when (storm.kind) {
-                1 -> exp(-3 * radius * radius) * (0.6 + 0.4 * billow)
-                2 -> {
-                    val angle = atan2(dy, dx) + storm.spin * (storm.age * 1.4 - radius * 5)
-                    val bands = 0.45 + 0.55 * (0.5 + 0.5 * cos(3 * angle))
-                    exp(-radius * radius) * bands * smooth(0.07, 0.24, radius)
-                }
-                else -> {
-                    val front = across + 0.3 * sin(along * 2 + storm.age * 0.4)
-                    exp(-along * along * 0.35 - front * front * 15) * (0.65 + 0.35 * billow)
-                }
-            }
-            val force = shape * storm.strength * (1 - smooth(2.0, 2.5, radius))
-            lifting += force
-            if (storm.kind == 1) convection += force
-            cooling += force * if (storm.kind == 0) 2.5 else 1.0
-        }
-        val west = atlas.geography.tileElevation[y * width + (x + width - 1) % width]
-        val east = atlas.geography.tileElevation[y * width + (x + 1) % width]
-        val north = atlas.geography.tileElevation[max(0, y - 1) * width + x]
-        val south = atlas.geography.tileElevation[min(height - 1, y + 1) * width + x]
+        val precipitation = atlas.rainfall.rateMmPerHour(x, y, elapsedSeconds)
+        val lifting = 1 - exp(-precipitation * 0.8)
+        val west = atlas.geography.tileElevation[ty * width + (tx + width - 1) % width]
+        val east = atlas.geography.tileElevation[ty * width + (tx + 1) % width]
+        val north = atlas.geography.tileElevation[max(0, ty - 1) * width + tx]
+        val south = atlas.geography.tileElevation[min(height - 1, ty + 1) * width + tx]
         val ascent = u * (east - west) / (2 * config.domainWidthMeters / width) +
             v * (south - north) / (2 * config.domainHeightMeters / height)
         val terrainLift = (ascent * 1.5).coerceIn(-0.06, 0.12)
-        val moisture = smooth(0.12, 0.85, wet)
         val density = detail + wet * 0.50 + lifting * 0.65 + terrainLift - 0.60
-        clouds[i] = smooth(0.0, 0.55, density)
-        val rainCloud = smooth(0.50, 0.94, clouds[i])
-        rain[i] = rainCloud * moisture * (climateRain * (0.4 + 10 * lifting) +
-            9 * lifting + 24 * convection * smooth(8.0, 28.0, temp))
-        humidity[i] = (wet + clouds[i] * 0.16 + lifting * 0.12 - (1 - detail) * 0.08).coerceIn(0.0, 1.0)
-        temperature[i] = temp + (broad - 0.5) * 3 - cooling.coerceAtMost(5.0)
+        val cloud = max(smooth(0.0, 0.55, density),
+            smooth(0.0, 0.15, precipitation) * (0.60 + 0.25 * detail + 0.15 * lifting))
+        return Sample(cloud, precipitation,
+            (wet + cloud * 0.16 + lifting * 0.12 - (1 - detail) * 0.08).coerceIn(0.0, 1.0),
+            temp + (broad - 0.5) * 3 - lifting * 2.5)
     }
 
-    private fun interpolate(field: Array<DoubleArray>, i: Int) = spatial(field[month], i) * (1 - blend) + spatial(field[nextMonth], i) * blend
+    private fun interpolate(field: Array<DoubleArray>, i: Int) = interpolate(field, i % width + 0.5, i / width + 0.5)
+    private fun interpolate(field: Array<DoubleArray>, x: Double, y: Double) =
+        spatial(field[month], x, y) * (1 - blend) + spatial(field[nextMonth], x, y) * blend
 
     /** Reconstruct coarse atlas forcing continuously rather than advecting each
      * prolonged climate cell independently. Terrain lift remains a local effect. */
-    private fun spatial(field: DoubleArray, i: Int): Double {
-        val gx = (i % width + 0.5) * atlas.geography.width / width - 0.5
-        val gy = (i / width + 0.5) * atlas.geography.height / height - 0.5
+    private fun spatial(field: DoubleArray, x: Double, y: Double): Double {
+        val columns = atlas.geography.width
+        val rows = atlas.geography.height
+        val gx = x * columns / width - 0.5
+        val gy = y * rows / height - 0.5
         val left = floor(gx).toInt(); val top = floor(gy).toInt()
         fun at(x: Int, y: Int): Double {
-            val tx = floor((x + 0.5) * width / atlas.geography.width).toInt()
-            val ty = floor((y + 0.5) * height / atlas.geography.height).toInt().coerceIn(0, height - 1)
+            val tx = floor((x + 0.5) * width / columns).toInt()
+            val ty = floor((y + 0.5) * height / rows).toInt().coerceIn(0, height - 1)
             return field[ty * width + ((tx % width) + width) % width]
         }
         val fx = gx - floor(gx); val fy = gy - floor(gy)
@@ -176,10 +108,20 @@ class ProceduralWeather(private val atlas: SeasonalClimateAtlas, val elapsedSeco
         return a * (1 - fy) + b * fy
     }
 
-    private fun windTravel(field: Array<DoubleArray>, i: Int, weights: DoubleArray): Double {
+    private fun windTravel(field: Array<DoubleArray>, x: Double, y: Double, weights: DoubleArray): Double {
         var travel = 0.0
-        for (m in 0..11) if (abs(weights[m]) > 1e-9) travel += spatial(field[m], i) * weights[m]
+        for (m in 0..11) if (abs(weights[m]) > 1e-9) travel += flowSpatial(field[m], x, y) * weights[m]
         return travel
+    }
+
+    private fun flowSpatial(field: DoubleArray, x: Double, y: Double): Double {
+        val w = atlas.cloudFlowWidth; val h = atlas.cloudFlowHeight
+        val gx = x * w / width - 0.5; val gy = y * h / height - 0.5
+        val ix = floor(gx).toInt(); val iy = floor(gy).toInt()
+        val fx = gx - floor(gx); val fy = gy - floor(gy)
+        fun at(x: Int, y: Int) = field[y.coerceIn(0, h - 1) * w + x.mod(w)]
+        return (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
+            (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy
     }
 
     /** Exact integration weights shared by every tile in a flow window. */
@@ -217,7 +159,6 @@ class ProceduralWeather(private val atlas: SeasonalClimateAtlas, val elapsedSeco
         val a = plane(it); return a + (plane(it + 1) - a) * ft
     }
 
-    private fun hash(a: Long, b: Int, salt: Int) = hash(a, b.toLong(), salt)
     private fun hash(a: Long, b: Long, salt: Int): Double {
         var n = a * 374761393L + b * 668265263L + seed * 1442695041L + salt * 1274126177L
         n = (n xor (n ushr 30)) * -4658895280553007687L
@@ -231,4 +172,6 @@ class ProceduralWeather(private val atlas: SeasonalClimateAtlas, val elapsedSeco
         val t = ((value - low) / (high - low)).coerceIn(0.0, 1.0)
         return t * t * (3 - 2 * t)
     }
+    private companion object { const val FLOW_DAYS = 0.75 }
+
 }

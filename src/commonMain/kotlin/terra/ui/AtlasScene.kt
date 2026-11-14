@@ -13,6 +13,7 @@ import korlibs.korge.input.onScroll
 import korlibs.korge.scene.Scene
 import korlibs.korge.view.*
 import korlibs.math.geom.Size
+import kotlinx.coroutines.CoroutineScope
 import kotlin.math.pow
 import kotlin.time.TimeSource
 import terra.*
@@ -82,6 +83,7 @@ class AtlasScene(
     private var smoothedFrameTimeSeconds = 1.0 / 60.0
     private var frameTimeDisplayElapsed = 0.0
     private var statusDisplayElapsed = 0.1
+    private var weatherPublicationAge = 0.0
     private var previousFrameTime = TimeSource.Monotonic.markNow()
     private val camera = MapCamera(1064.0, 816.0, MAP_WIDTH_TILES, MAP_HEIGHT_TILES)
     private var dragStartPanX = 0.0
@@ -134,6 +136,11 @@ class AtlasScene(
                     selectSpeed(settings.speed)
                     if (settings.dayNight) activeOverlays.add(ClimateLayer.DAY_NIGHT) else activeOverlays.remove(ClimateLayer.DAY_NIGHT)
                     if (settings.wind) activeOverlays.add(ClimateLayer.WIND) else activeOverlays.remove(ClimateLayer.WIND)
+                    if (settings.weather) {
+                        activeOverlays.add(ClimateLayer.CLOUDS); activeOverlays.add(ClimateLayer.PRECIPITATION)
+                    } else {
+                        activeOverlays.remove(ClimateLayer.CLOUDS); activeOverlays.remove(ClimateLayer.PRECIPITATION)
+                    }
                     refreshLegend()
                     refreshLayerButtons()
                     simulation.updateControls(settings.speed, paused, resetPending = true)
@@ -141,14 +148,16 @@ class AtlasScene(
             }
             performanceProbe?.timings?.begin(SimulationWork.FRAME_UPDATE)
             updateFrameTimeCounter(realSeconds)
+            weatherPublicationAge += realSeconds
             val snapshot = simulation.latestSnapshot()
             if (snapshot != null && snapshot.progress.generation == requestedGeneration && snapshot !== presentation) {
                 val previous = presentation
+                if (previous?.weather !== snapshot.weather) weatherPublicationAge = 0.0
                 presentation = snapshot
                 performanceProbe?.workerProgress(snapshot.progress)
                 val changedWorld = previous?.world !== snapshot.world
                 if (!this@AtlasScene::mapView.isInitialized) {
-                    mapView = TerrainMapView(mapLayer, snapshot.world, terrainTextures, performanceProbe?.timings)
+                    mapView = TerrainMapView(mapLayer, snapshot.world, terrainTextures, performanceProbe?.timings, CoroutineScope(coroutineContext))
                     applyMapTransform()
                 } else if (changedWorld) mapView.updateWorld(snapshot.world)
                 if (changedWorld) settingsPanel.updateBiomeSummary(snapshot.world.landBiomeSummary())
@@ -453,7 +462,9 @@ class AtlasScene(
     }
 
     private fun refreshOverlays() {
-        if (presentation != null && this@AtlasScene::mapView.isInitialized) mapView.updateOverlays(weather, activeOverlays)
+        if (presentation != null && this@AtlasScene::mapView.isInitialized) mapView.updateOverlays(weather, activeOverlays,
+            weather.elapsedSeconds + if (!paused && simulationSpeed <= SimulationSpeed.ONE_WEEK)
+                weatherPublicationAge.coerceAtMost(0.25) * simulationSpeed.simulatedSecondsPerRealSecond else 0.0)
     }
 
     private fun refreshSurfaceWater() {
@@ -556,7 +567,7 @@ class AtlasScene(
     }
 
     /** Explicit development-preview states; never called during ordinary play. */
-    internal fun prepareUiReview(state: String) {
+    internal suspend fun prepareUiReview(state: String) {
         if (!paused) togglePause()
         helpPanel.visible = false; settingsPanel.closeMenus(); speedMenu.visible = false
         val previewLayer = when (state) {
@@ -595,6 +606,8 @@ class AtlasScene(
             "settings-edited" -> settingsPanel.prepareReview(0, edited = true)
             "help" -> showHelp()
         }
+        mapView.awaitWeather()
+        refreshOverlays()
         mapView.advanceVisuals(0.25)
         refreshOverlays()
         mapView.advanceVisuals(0.25)

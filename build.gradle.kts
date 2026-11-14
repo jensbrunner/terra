@@ -33,6 +33,7 @@ tasks.withType<JavaExec>().configureEach {
     systemProperty("terra.profile.seconds", providers.gradleProperty("profileSeconds").orElse("2.0").get())
     systemProperty("terra.profile.warmup", providers.gradleProperty("profileWarmup").orElse("0.5").get())
     systemProperty("terra.profile.speeds", providers.gradleProperty("profileSpeeds").orElse("").get())
+    systemProperty("terra.profile.weather", providers.gradleProperty("profileWeather").orElse("false").get())
     systemProperty("terra.profile.wind", providers.gradleProperty("profileWind").orElse("false").get())
     systemProperty("terra.profile.dayNight", providers.gradleProperty("profileDayNight").orElse("false").get())
     systemProperty("terra.profile.output", providers.gradleProperty("profileOutput").orElse("build/experiments/desktop-profile").get())

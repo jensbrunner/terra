@@ -11,7 +11,7 @@ class EnvironmentSnapshot internal constructor(
     val width = atlas.width
     val height = atlas.height
     private val month = atlas.monthAt(elapsedSeconds)
-    private val weather by lazy { ProceduralWeather(atlas, elapsedSeconds) }
+    val weather by lazy { ProceduralWeather(atlas, elapsedSeconds) }
     private val sunlight = PlanetarySunlight(width, height, atlas.solar, northUp = false).also { it.update(elapsedSeconds) }
     private fun i(x: Int, y: Int) = y * width + x
     fun relativeHumidity(x: Int, y: Int) = weather.relativeHumidity(x, y)

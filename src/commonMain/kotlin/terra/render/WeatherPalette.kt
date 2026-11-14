@@ -26,7 +26,7 @@ internal fun weatherLegend(layer: ClimateLayer): WeatherLegend? = when (layer) {
     ClimateLayer.MEAN_TEMPERATURE -> WeatherLegend("Mean annual temperature · °C", temperaturePalette, "−20", "7.5", "35+", smooth = true)
     ClimateLayer.HUMIDITY -> WeatherLegend("Relative humidity · %", humidityPalette, "0", "50", "100", smooth = true)
     ClimateLayer.PRECIPITATION -> WeatherLegend(
-        "Rain rate · mm/h",
+        "Precipitation · mm/h · snow in white",
         precipitationPalette, "0", "3", "12+", smooth = true
     )
     ClimateLayer.CLIMATE_RAIN -> WeatherLegend("Monthly rainfall · mm/month", climateRainPalette, "0", "150", "300+", smooth = true)
@@ -41,7 +41,8 @@ internal fun tileColor(layer: ClimateLayer, weather: EnvironmentSnapshot, x: Int
         ClimateLayer.MEAN_TEMPERATURE -> ramp((weather.meanClimateTemperatureC(x, y) + 20) / 55, temperaturePalette)
         ClimateLayer.CLOUDS -> Colors["#eef3fa"]
         ClimateLayer.HUMIDITY -> ramp(weather.relativeHumidity(x, y), humidityPalette)
-        ClimateLayer.PRECIPITATION -> precipitationColor(weather.precipitationMmPerHour(x, y))
+        ClimateLayer.PRECIPITATION -> precipitationColor(weather.precipitationMmPerHour(x, y),
+            weather.atlas.rainfall.snowFraction(x, y, weather.elapsedSeconds))
         ClimateLayer.CLIMATE_RAIN -> ramp(weather.monthlyClimateRainMm(x, y) / 300.0, climateRainPalette)
         ClimateLayer.TEMPERATURE -> ramp((weather.temperatureC(x, y) + 20.0) / 55.0, temperaturePalette)
         ClimateLayer.ANNUAL_PRECIPITATION -> ramp(weather.annualizedRainMmPerYear(x, y) / 2_500.0, annualPrecipitationPalette)
@@ -59,8 +60,12 @@ private fun interpolatePalette(value: Double, colors: List<String>): RGBA {
 }
 
 /** Display-only mapping: sqrt makes light rain visible while retaining room for heavy rates. */
-internal fun precipitationColor(rainMmPerHour: Double) =
-    ramp(sqrt((rainMmPerHour / MAX_RAIN_DISPLAY_MM_PER_HOUR).coerceIn(0.0, 1.0)), precipitationPalette)
+internal fun precipitationColor(rainMmPerHour: Double, snowFraction: Double = 0.0): RGBA {
+    val rain = ramp(sqrt((rainMmPerHour / MAX_RAIN_DISPLAY_MM_PER_HOUR).coerceIn(0.0, 1.0)), precipitationPalette)
+    val snow = snowFraction.coerceIn(0.0, 1.0)
+    return RGBA((rain.r + (222 - rain.r) * snow).roundToInt(),
+        (rain.g + (239 - rain.g) * snow).roundToInt(), (rain.b + (255 - rain.b) * snow).roundToInt(), 255)
+}
 
 internal fun precipitationOpacity(rainMmPerHour: Double): Double =
     smoothstep(0.0, 0.03, rainMmPerHour) * (0.62 + 0.32 * smoothstep(0.05, 3.0, rainMmPerHour))

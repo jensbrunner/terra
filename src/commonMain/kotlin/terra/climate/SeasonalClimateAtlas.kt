@@ -11,9 +11,19 @@ class SeasonalClimateAtlas internal constructor(
     val regionalAnnualMeanRainMm: Double, val maximumHumidityChangeMm: Double,
     val moistureSweeps: Int, val maximumMoistureResidualMmPerDay: Double
 ) {
+    val rainfall by lazy { RainfallDistribution(this) }
     val geometryRevision = geography.geometryRevision
     val width = geography.world.width
     val height = geography.world.height
+    internal val cloudFlowWidth = minOf(16, width)
+    internal val cloudFlowHeight = minOf(12, height)
+    /** Small derived wind raster prevents tile-scale shear from tearing cloud formations. */
+    internal val cloudFlow by lazy {
+        val grid = GridOverlap(width, height, cloudFlowWidth, cloudFlowHeight)
+        arrayOf(east, south).map { field -> Array(12) { month ->
+            DoubleArray(cloudFlowWidth * cloudFlowHeight).also { grid.restrict(field[month], it) }
+        } }
+    }
     private val count = width * height
     internal val annualRain = DoubleArray(count) { i -> rain.sumOf { it[i] } }
     internal val annualPet = DoubleArray(count) { i -> pet.sumOf { it[i] } }

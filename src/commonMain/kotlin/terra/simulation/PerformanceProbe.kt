@@ -21,7 +21,7 @@ class SimulationTimings(val nanoTime: () -> Long) {
     fun clear() { totals.fill(0); counts.fill(0); maxima.fill(0) }
 }
 
-data class ProfileSettings(val speed: SimulationSpeed, val dayNight: Boolean = false, val wind: Boolean = false)
+data class ProfileSettings(val speed: SimulationSpeed, val dayNight: Boolean = false, val wind: Boolean = false, val weather: Boolean = false)
 
 interface PerformanceProbe {
     val timings: SimulationTimings

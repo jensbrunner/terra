@@ -22,7 +22,8 @@ class DesktopPerformanceProbe private constructor(environment: String) : Perform
         ?.split(',')?.map { SimulationSpeed.valueOf(it.trim()) } ?: SimulationSpeed.entries
     private val cases = selectedSpeeds.map { ProfileSettings(it,
         System.getProperty("terra.profile.dayNight", "false").toBooleanStrict(),
-        System.getProperty("terra.profile.wind", "false").toBooleanStrict()) }
+        System.getProperty("terra.profile.wind", "false").toBooleanStrict(),
+        System.getProperty("terra.profile.weather", "false").toBooleanStrict()) }
     private val frames = DoubleArray(10000)
     private var frameCount = 0
     private var caseIndex = -1

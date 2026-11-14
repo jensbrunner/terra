@@ -12,6 +12,9 @@ import korlibs.korge.view.container
 import korlibs.korge.view.image
 import korlibs.korge.view.solidRect
 import korlibs.korge.view.tiles.tileMap
+import kotlinx.coroutines.*
+import terra.climate.ProceduralWeather
+import terra.climate.SeasonalClimateAtlas
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import terra.climate.ClimateLayer
@@ -26,7 +29,8 @@ class TerrainMapView(
     parent: Container,
     initialWorld: WorldSnapshot,
     private val terrainTextures: Map<Terrain, Bitmap32>,
-    private val timings: SimulationTimings? = null
+    private val timings: SimulationTimings?,
+    private val renderScope: CoroutineScope
 ) {
     private var world = initialWorld
     private val terrainTileSet = createTerrainTileSet()
@@ -38,9 +42,17 @@ class TerrainMapView(
     private var canopyRevision = -1L
     private var nextOverlay = 0
     private val layerWeather = mutableMapOf<ClimateLayer, EnvironmentSnapshot>()
+    private val weatherWidth = minOf(world.width * 2, 512)
+    private val weatherHeight = minOf(world.height * 2, 384)
+    private var weatherJob: Deferred<WeatherRaster>? = null
+    private var weatherAtlas: SeasonalClimateAtlas? = null
+    private var weatherTime = Double.NaN
+    private var weatherAge = 1.0
     private val overlayBitmaps = ClimateLayer.entries.filter { it != ClimateLayer.WIND }
-        .associateWith { Bitmap32(world.width, world.height) }
-    private val overlayFades = overlayBitmaps.mapValues { (_, bitmap) -> LayerFade(Bitmap32(bitmap.width, bitmap.height)) }
+        .associateWith { if (it == ClimateLayer.CLOUDS || it == ClimateLayer.PRECIPITATION)
+            Bitmap32(weatherWidth, weatherHeight) else Bitmap32(world.width, world.height) }
+    private val overlayFades = overlayBitmaps.mapValues { (layer, bitmap) -> LayerFade(Bitmap32(bitmap.width, bitmap.height),
+        if (layer == ClimateLayer.CLOUDS || layer == ClimateLayer.PRECIPITATION) 0.3 else 0.18) }
     private val surfaceWaterBitmap = Bitmap32(
         world.width * SURFACE_WATER_PIXELS_PER_TILE,
         world.height * SURFACE_WATER_PIXELS_PER_TILE
@@ -84,9 +96,8 @@ class TerrainMapView(
                 }
                 val fade = overlayFades.getValue(layer)
                 fade.image = RasterBlendImage(fade.previous, overlayBitmaps.getValue(layer)).addTo(this) {
-                    val pixelsPerTile = 1
-                    scaleX = 1.0 / pixelsPerTile
-                    scaleY = 1.0 / pixelsPerTile
+                    scaleX = world.width.toDouble() / overlayBitmaps.getValue(layer).width
+                    scaleY = world.height.toDouble() / overlayBitmaps.getValue(layer).height
                     smoothing = layer == ClimateLayer.CLOUDS || layer == ClimateLayer.PRECIPITATION || layer == ClimateLayer.DAY_NIGHT || layer == ClimateLayer.CLIMATE_RAIN || layer == ClimateLayer.ANNUAL_PRECIPITATION || layer == ClimateLayer.ARIDITY || layer == ClimateLayer.MEAN_TEMPERATURE
                     alpha = 0.0
                 }
@@ -115,6 +126,8 @@ class TerrainMapView(
             updateRelief()
             updateCanopy()
             layerWeather.clear()
+            weatherJob?.cancel(); weatherJob = null
+            weatherAtlas = null; weatherTime = Double.NaN
             for ((layer, bitmap) in overlayBitmaps) { bitmap.fill(transparentPixel); overlayFades.getValue(layer).reset() }
             surfaceWaterBitmap.fill(transparentPixel); waterFade.reset()
             for (i in queuedTerrain.indices) enqueueTerrain(i)
@@ -137,17 +150,18 @@ class TerrainMapView(
         bitmap.lock { frame.copyInto(bitmap.ints) }
     }
 
-    fun updateOverlays(weather: EnvironmentSnapshot, activeLayers: Set<ClimateLayer>) {
+    fun updateOverlays(weather: EnvironmentSnapshot, activeLayers: Set<ClimateLayer>, displaySeconds: Double = weather.elapsedSeconds) {
         for (layer in ClimateLayer.entries) {
             overlayContainers.getValue(layer).visible = layer in activeLayers
         }
+        updateWeatherRaster(weather.atlas, displaySeconds, activeLayers)
         // Round robin prevents later layers starving when publications arrive during a refresh.
         var renderedOverlay = false
         val firstOverlay = nextOverlay
         repeat(ClimateLayer.entries.size) { offset ->
             val index = (firstOverlay + offset) % ClimateLayer.entries.size
             val layer = ClimateLayer.entries[index]
-            if (layer !in activeLayers) return@repeat
+            if (layer !in activeLayers || layer == ClimateLayer.CLOUDS || layer == ClimateLayer.PRECIPITATION) return@repeat
             if (layer == ClimateLayer.WIND) {
                 if (layerWeather[layer] !== weather) {
                     timings?.begin(SimulationWork.OTHER_OVERLAYS)
@@ -186,6 +200,59 @@ class TerrainMapView(
             }
             overlayFades.getValue(layer).complete(bitmap)
             timings?.end(SimulationWork.OTHER_OVERLAYS)
+        }
+    }
+
+    internal suspend fun awaitWeather() { weatherJob?.await() }
+
+    private data class WeatherRaster(val atlas: SeasonalClimateAtlas, val seconds: Double,
+        val clouds: RasterFrame, val rain: RasterFrame)
+
+    /** One bounded job, no queue or catch-up. Only completed pixels cross to the UI thread. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun updateWeatherRaster(atlas: SeasonalClimateAtlas, seconds: Double, active: Set<ClimateLayer>) {
+        if (ClimateLayer.CLOUDS !in active && ClimateLayer.PRECIPITATION !in active) return
+        if (weatherAtlas !== atlas) {
+            weatherJob?.cancel(); weatherJob = null
+            weatherAtlas = atlas; weatherTime = Double.NaN
+            for (layer in listOf(ClimateLayer.CLOUDS, ClimateLayer.PRECIPITATION)) overlayFades.getValue(layer).reset()
+        }
+        weatherJob?.takeIf { it.isCompleted }?.let { job ->
+            val frame = job.getCompleted()
+            weatherJob = null
+            if (frame.atlas === atlas) {
+                for ((layer, raster) in listOf(ClimateLayer.CLOUDS to frame.clouds, ClimateLayer.PRECIPITATION to frame.rain)) {
+                    val bitmap = overlayBitmaps.getValue(layer)
+                    val fade = overlayFades.getValue(layer)
+                    fade.begin(bitmap); upload(bitmap, raster); fade.complete(bitmap)
+                }
+                weatherTime = frame.seconds
+            }
+        }
+        if (weatherJob != null || weatherAge < 0.12 || weatherTime == seconds) return
+        weatherAge = 0.0
+        val rasterWidth = weatherWidth; val rasterHeight = weatherHeight
+        weatherJob = renderScope.async(Dispatchers.Default) {
+            val field = ProceduralWeather(atlas, seconds)
+            val density = FloatArray(rasterWidth * rasterHeight)
+            val clouds = RasterCanvas(rasterWidth, rasterHeight)
+            val rain = RasterCanvas(rasterWidth, rasterHeight)
+            for (y in 0 until rasterHeight) {
+                ensureActive()
+                for (x in 0 until rasterWidth) {
+                    val sample = field.sample((x + 0.5) * atlas.width / rasterWidth, (y + 0.5) * atlas.height / rasterHeight)
+                    density[y * rasterWidth + x] = sample.cloud.toFloat()
+                    val snow = atlas.rainfall.snowFraction(x * atlas.width / rasterWidth, y * atlas.height / rasterHeight, seconds)
+                    rain[x, y] = precipitationColor(sample.precipitation, snow).withA((precipitationOpacity(sample.precipitation) * 255).toInt())
+                }
+            }
+            for (y in 0 until rasterHeight) for (x in 0 until rasterWidth) {
+                val cloud = density[y * rasterWidth + x]
+                val upwind = density[maxOf(0, y - 1) * rasterWidth + (x + rasterWidth - 1) % rasterWidth]
+                val light = (0.88 + (cloud - upwind) * 1.8).coerceIn(0.55, 1.0)
+                clouds[x, y] = RGBA((231 * light).toInt(), (240 * light).toInt(), (252 * light).toInt(), (cloud * 232).toInt())
+            }
+            WeatherRaster(atlas, seconds, clouds.finish(), rain.finish())
         }
     }
 
@@ -248,6 +315,7 @@ class TerrainMapView(
     /** Crossfade completed rasters; no visual fraction is ever written back to physical state. */
     fun advanceVisuals(realSeconds: Double) {
         val seconds = realSeconds.coerceIn(0.0, 0.25)
+        weatherAge += seconds
         for (fade in overlayFades.values) fade.advance(seconds)
         waterFade.advance(seconds)
         advanceTerrainUpdates()

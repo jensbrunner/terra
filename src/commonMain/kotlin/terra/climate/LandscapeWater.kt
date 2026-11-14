@@ -59,32 +59,20 @@ internal class LandscapeWater(private val world: World, val tileAreaM2: Double) 
         beginUpdate()
     }
 
-    /** Atlas forcing is an external water flux. Rain is concentrated into the first
-     * tenth of the calendar month; melt and PET span both wet and dry periods. This lets
-     * saturation/infiltration excess escape before later dry-period evaporation. */
+    /** Integrate the same traveling precipitation field used by the renderer. */
     internal fun evolveMonth(atlas: SeasonalClimateAtlas, month: Int, fraction: Double,
         startFraction: Double = 0.0): Double {
-        val wetFraction = (min(startFraction + fraction, CLIMATE_WET_FRACTION) -
-            min(startFraction, CLIMATE_WET_FRACTION)).coerceAtLeast(0.0)
-        var evaporation = 0.0
-        if (wetFraction > 0.0) evaporation += evolveClimatePeriod(atlas, month, wetFraction, wetFraction / CLIMATE_WET_FRACTION)
-        val dryFraction = fraction - wetFraction
-        if (dryFraction > 0.0) evaporation += evolveClimatePeriod(atlas, month, dryFraction, 0.0)
-        return evaporation
-    }
-
-    private fun evolveClimatePeriod(atlas: SeasonalClimateAtlas, month: Int, fraction: Double, rainFraction: Double): Double {
         var evaporated = 0.0
-        val days = fraction * 365 / 12
+        val days = fraction * atlas.solar.yearSeconds / (12 * 86400)
         val growthMemory = -expm1(-fraction / 6)
         val droughtMemory = -expm1(-fraction / 24)
         val drainageDecay = exp(-days * 86400 / DRAINAGE_SECONDS)
         for (i in 0 until count) {
-            val amount = atlas.rain[month][i] * rainFraction
+            val amount = atlas.rainfall.amountMm(month, i, startFraction, (startFraction + fraction).coerceAtMost(1.0))
             rain[i] += amount
             if (!land[i]) continue
             val temperature = atlas.temperature[month][i]
-            val frozen = ((1 - temperature) / 2).coerceIn(0.0, 1.0)
+            val frozen = atlas.rainfall.snowFraction(month, i)
             snow[i] += amount * frozen
             val melt = min(snow[i], max(0.0, temperature) * 3.2 * days)
             snow[i] -= melt
@@ -168,6 +156,5 @@ internal class LandscapeWater(private val world: World, val tileAreaM2: Double) 
     val exportedWaterKg get() = boundaryMmTiles * tileAreaM2
     private companion object {
         const val HYDROLOGY_SPINUP_YEARS = 4
-        const val CLIMATE_WET_FRACTION = 0.1
     }
 }

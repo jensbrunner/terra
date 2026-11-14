@@ -23,7 +23,7 @@ class MonthlyWaterAccountingTest {
         val before = surface.totalWaterKg
         val boundary = surface.exportedWaterKg
         val evaporation = surface.evolveMonth(atlas, 0, fraction)
-        val precipitation = land.sumOf { atlas.rain[0][it] * (fraction / 0.1).coerceAtMost(1.0) } * tileAreaM2
+        val precipitation = land.sumOf { atlas.rainfall.amountMm(0, it, 0.0, fraction) } * tileAreaM2
         assertEquals(before + precipitation,
             surface.totalWaterKg + evaporation + surface.exportedWaterKg - boundary,
             (before + precipitation).coerceAtLeast(1.0) * 1e-11)
@@ -35,13 +35,13 @@ class MonthlyWaterAccountingTest {
         return evaporation / tileAreaM2
     }
 
-    @Test fun concentratedRainProducesRunoffEvenWhenMonthlyPetExceedsRain() {
+    @Test fun heavyRainProducesRunoffAndRecharge() {
         val surface = LandscapeWater(world, tileAreaM2)
         for (i in land) surface.soil[i] = surface.soilCapacityMm[i] * 0.48
-        val evaporated = advance(surface, atlas(rain = 400.0, pet = 500.0), 1.0)
+        val evaporated = advance(surface, atlas(rain = 1200.0, pet = 500.0), 1.0)
         assertTrue(surface.overflow.sum() > 0.0)
         assertTrue(surface.drainage.sum() > 0.0)
-        assertTrue(evaporated < land.size * 500.0)
+        assertEquals(land.size * 500.0, evaporated, 1e-8)
         assertTrue(land.any { surface.surfaceWater.snapshot().dischargeMmTilesPerDay(it % width, it / width) > 0.0 })
     }
 
@@ -77,11 +77,17 @@ class MonthlyWaterAccountingTest {
                 for (i in land) surface.soil[i] = surface.soilCapacityMm[i] * 0.75
             }
             val monthSeconds = forcing.solar.yearSeconds / 12
+            // Independently integrate the visible rate, including a nonzero calendar offset.
+            val samples = 4096
+            val numerical = (0 until samples).sumOf { sample ->
+                forcing.rainfall.rateMmPerHour(1, 0, (startFraction + (1 - startFraction) * (sample + 0.5) / samples) * monthSeconds)
+            } * (1 - startFraction) * monthSeconds / (samples * 3600)
+            assertEquals(forcing.rainfall.amountMm(0, 1, startFraction, 1.0), numerical, 1e-3)
             val whole = initialized()
             val startSeconds = startFraction * monthSeconds
             val duration = (1 - startFraction) * monthSeconds
             ClimateEvolution(world, whole, startSeconds).advance(forcing, duration)
-            assertEquals(400.0 * (1 - startFraction / 0.1).coerceAtLeast(0.0), whole.rain[1], 1e-9)
+            assertEquals(forcing.rainfall.amountMm(0, 1, startFraction, 1.0), whole.rain[1], 1e-9)
             for (parts in listOf(listOf(0.5, 0.5), listOf(0.03, 0.04, 0.08, 0.22, 0.13, 0.5))) {
                 val split = initialized()
                 val evolution = ClimateEvolution(world, split, startSeconds)
