@@ -8,7 +8,8 @@ class WorldSnapshot internal constructor(
     private val grasses: DoubleArray = DoubleArray(width * height),
     private val bare: DoubleArray = DoubleArray(width * height),
     private val evergreen: DoubleArray = DoubleArray(width * height),
-    private val limitations: Array<GrowthLimitation> = Array(width * height) { GrowthLimitation.NONE }
+    private val limitations: Array<GrowthLimitation> = Array(width * height) { GrowthLimitation.NONE },
+    val geometryRevision: Long = 0
 ) {
     operator fun get(x: Int, y: Int): Cell = cells[y * width + ((x % width) + width) % width]
     fun treeCover(x: Int, y: Int): Double = trees[y * width + ((x % width) + width) % width]

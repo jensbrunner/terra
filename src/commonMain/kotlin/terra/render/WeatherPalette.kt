@@ -27,15 +27,17 @@ internal data class WeatherLegend(val title: String, val colors: List<String>, v
 
 /** Uses the same continuous palette and fixed scale as the map. */
 internal fun weatherLegend(layer: WeatherLayer, representative: Boolean = false): WeatherLegend? = when (layer) {
+    WeatherLayer.ARIDITY -> WeatherLegend("Aridity · annual rain / PET", climateRainPalette, "0", "1", "2+", smooth = true)
+    WeatherLayer.MEAN_TEMPERATURE -> WeatherLegend("Mean annual temperature · °C", temperaturePalette, "−20", "7.5", "35+", smooth = true)
     WeatherLayer.HUMIDITY -> WeatherLegend("Relative humidity · %", humidityPalette, "0", "50", "100", smooth = true)
     WeatherLayer.PRECIPITATION -> WeatherLegend(
-        if (representative) "Rain rate · wet-phase peak estimate · mm/h" else "Rain rate · substep peak · mm/h",
+        if (representative) "Monthly mean rain rate · mm/h" else "Rain rate · substep peak · mm/h",
         precipitationPalette, "0", "3", "12+", smooth = true
     )
-    WeatherLayer.CLIMATE_RAIN -> WeatherLegend("30-day mean rainfall · mm/h", climateRainPalette, "0", "6", "12+", smooth = true)
+    WeatherLayer.CLIMATE_RAIN -> WeatherLegend("Monthly rainfall · mm/month", climateRainPalette, "0", "150", "300+", smooth = true)
     WeatherLayer.AIR_TEMPERATURE -> WeatherLegend("Air temperature · °C", temperaturePalette, "−20", "7.5", "35+", smooth = true)
     WeatherLayer.SURFACE_TEMPERATURE -> WeatherLegend("Surface temperature · °C", temperaturePalette, "−20", "7.5", "35+", smooth = true)
-    WeatherLayer.ANNUAL_PRECIPITATION -> WeatherLegend("Annual rainfall EMA · mm/year", annualPrecipitationPalette, "0", "1250", "2500+", smooth = true)
+    WeatherLayer.ANNUAL_PRECIPITATION -> WeatherLegend("Annual climate rainfall · mm/year", annualPrecipitationPalette, "0", "1250", "2500+", smooth = true)
     WeatherLayer.PRESSURE_ANOMALY -> WeatherLegend("Model pressure anomaly · %", dynamicsPalette, "−5", "0", "+5", smooth = true)
     WeatherLayer.RELATIVE_VORTICITY -> WeatherLegend("Relative curl · 10⁻⁵ s⁻¹ · log", dynamicsPalette, "−10", "0", "+10", smooth = true)
     else -> null
@@ -43,10 +45,12 @@ internal fun weatherLegend(layer: WeatherLayer, representative: Boolean = false)
 
 internal fun tileColor(layer: WeatherLayer, weather: WeatherModel, x: Int, y: Int) =
     when (layer) {
+        WeatherLayer.ARIDITY -> ramp(weather.climateAridity(x, y) / 2, climateRainPalette)
+        WeatherLayer.MEAN_TEMPERATURE -> ramp((weather.meanClimateTemperatureC(x, y) + 20) / 55, temperaturePalette)
         WeatherLayer.HUMIDITY -> ramp(weather.relativeHumidity(x, y), humidityPalette)
         WeatherLayer.CLOUDS -> ramp(weather.cloudCover(x, y), cloudPalette)
         WeatherLayer.PRECIPITATION -> precipitationColor(weather.peakSubstepPrecipitationMmPerHour(x, y))
-        WeatherLayer.CLIMATE_RAIN -> ramp(weather.thirtyDayRainMmPerHour(x, y) / 12.0, climateRainPalette)
+        WeatherLayer.CLIMATE_RAIN -> ramp(weather.monthlyClimateRainMm(x, y) / 300.0, climateRainPalette)
         WeatherLayer.AIR_TEMPERATURE -> ramp((weather.airTemperatureC(x, y) + 20.0) / 55.0, temperaturePalette)
         WeatherLayer.SURFACE_TEMPERATURE -> ramp((weather.surfaceTemperatureC(x, y) + 20.0) / 55.0, temperaturePalette)
         WeatherLayer.ANNUAL_PRECIPITATION -> ramp(weather.annualizedRainMmPerYear(x, y) / 2_500.0, annualPrecipitationPalette)

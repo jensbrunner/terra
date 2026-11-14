@@ -11,6 +11,8 @@ import terra.world.TerrainGenerationSettings
 import terra.world.World
 import terra.world.WorldSnapshot
 
+data class TerrainElevationEdit(val x: Int, val y: Int, val elevation: Double)
+
 enum class SimulationFidelity { DETAILED, CLIMATE }
 
 data class WorldRequest(
@@ -47,8 +49,6 @@ data class WorldPresentationSnapshot(
 internal class WorldSimulation(val request: WorldRequest) {
     private val world = World(request.seed, request.width, request.height, request.terrain)
     private val weather = DynamicalWeather(world, request.atmosphere)
-    private var nextClimateSeconds = 3600.0
-    private var lastEcologySeconds = 0.0
     private var worldView: WorldSnapshot? = null
     private var weatherView: WeatherPresentation? = null
     private var drainageView = weather.surfaceState.surfaceWater.snapshot()
@@ -57,7 +57,7 @@ internal class WorldSimulation(val request: WorldRequest) {
     private var waterViewSeconds = 0.0
     private val cloudRenderer by lazy { CloudRenderer(request.width, request.height, request.seed) }
     private val weatherIdentity = Any()
-    private var climateQuantumSeconds = FastClimateStepper.DAY_SECONDS
+    private var climateQuantumSeconds = 365 * 86400.0 / 12
     var fidelity = SimulationFidelity.DETAILED
         private set
     var fidelityRevision = 0L
@@ -66,6 +66,17 @@ internal class WorldSimulation(val request: WorldRequest) {
         private set
     val stepSeconds: Double get() = if (fidelity == SimulationFidelity.CLIMATE) climateQuantumSeconds
         else request.atmosphere.stepSeconds
+
+    fun editTerrain(edits: List<TerrainElevationEdit>) {
+        for (edit in edits) {
+            require(edit.x in 0 until request.width && edit.y in 0 until request.height)
+            world.setElevation(edit.x, edit.y, edit.elevation)
+        }
+        weather.ensureAtlas()
+        worldView = null; weatherView = null
+        drainageView = weather.surfaceState.surfaceWater.snapshot()
+        waterFrame = waterRasterizer.render(drainageView)
+    }
 
     fun setClimateQuantum(seconds: Double) {
         require(seconds.isFinite() && seconds >= 1.0 && seconds <= 20 * 365 * 86400.0)
@@ -91,11 +102,6 @@ internal class WorldSimulation(val request: WorldRequest) {
             return stepSeconds
         }
         val advanced = weather.advanceBudgeted(pendingSeconds, 1, publishSnapshot = false)
-        if (weather.elapsedSeconds >= nextClimateSeconds) {
-            nextClimateSeconds = weather.elapsedSeconds + 3600.0
-            world.advanceClimateBiomes(weather.seasonalClimate, weather.elapsedSeconds - lastEcologySeconds)
-            lastEcologySeconds = weather.elapsedSeconds
-        }
         completedSeconds += advanced
         return advanced
     }
@@ -107,8 +113,6 @@ internal class WorldSimulation(val request: WorldRequest) {
         val result = detailed.advanceClimateInterval(seconds)
         if (fidelity != SimulationFidelity.CLIMATE) { fidelity = SimulationFidelity.CLIMATE; fidelityRevision++ }
         completedSeconds = detailed.elapsedSeconds
-        lastEcologySeconds = completedSeconds
-        nextClimateSeconds = completedSeconds + 3600.0
         return result
     }
 
@@ -188,6 +192,7 @@ expect class SimulationWorker(request: WorldRequest) {
     fun setFidelity(fidelity: SimulationFidelity): Long
     fun useAutomaticFidelity(): Long
     fun setCloudsVisible(visible: Boolean)
+    fun editTerrain(edits: List<TerrainElevationEdit>)
     fun regenerate(request: WorldRequest)
     fun latestSnapshot(): WorldPresentationSnapshot?
     val failure: String?

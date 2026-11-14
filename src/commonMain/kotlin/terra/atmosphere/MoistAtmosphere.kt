@@ -206,33 +206,39 @@ class MoistAtmosphere(
         return ColumnThermodynamics.saturationMm(temperatureKelvin, mass, config.gravity, physics)
     }
 
-    /** The same column water is the effective climate pool while detailed dynamics are dormant. */
+    /** Physical detailed column water (vapor plus condensate). */
     internal fun effectiveMoistureMmAt(cell: Int): Double = density * (columns.values[1][cell] + columns.values[2][cell])
     internal val atmosphericWaterKg: Double get() = (0 until config.cellCount).sumOf { effectiveMoistureMmAt(it) } * config.cellArea
-    /** Replace the effective column water directly; used by the conservative climate commit. */
-    internal fun setEffectiveMoistureMm(cell: Int, amount: Double) {
-        require(amount.isFinite() && amount >= 0.0)
-        columns.values[1][cell] = amount / density
-        columns.values[2][cell] = 0.0
+    /** Explicit climatological realization. Water introduced here is an initialization flux,
+     * not conservation of a diagnostic atlas humidity or the dormant detailed atmosphere. */
+    internal fun initializeAtlasRealization(atSeconds: Double, temperature: DoubleArray, humidity: DoubleArray,
+        east: DoubleArray, north: DoubleArray): AtmosphereHandoff {
+        val before = atmosphericWaterKg
+        val energyBefore = diagnostics().totalModelEnergyJoules
+        flow.initializeClimateCirculation(temperature)
+        flow.initializeAtlasWinds(east, north)
+        var vapor = 0.0
+        for (i in temperature.indices) {
+            val amount = saturatedVaporMmAt(i, temperature[i]) * humidity[i]
+            columns.values[0][i] = flow.depthAt(i) * temperature[i]
+            columns.values[1][i] = amount / density
+            columns.values[2][i] = 0.0
+            surfaceTemperature[i] = temperature[i]
+            vapor += amount
+        }
+        worldEpochSeconds = atSeconds - elapsedSeconds
+        rainRate.fill(0.0); rainActive.fill(false)
+        approximateHistory = true
+        val energyChange = diagnostics().totalModelEnergyJoules - energyBefore
+        initializationEnergy += energyChange
+        // Detailed accounting starts from this explicitly initialized realization.
+        initialWater = diagnostics().totalWaterKg + (surface?.exportedWaterKg ?: 0.0)
+        return AtmosphereHandoff(atSeconds, before, atmosphericWaterKg, vapor * config.cellArea, 0.0,
+            temperature.average(), energyChange, completedSteps, minimumAirTemperatureKelvin = temperature.min(),
+            maximumAirTemperatureKelvin = temperature.max(),
+            maximumWindMetersPerSecond = east.indices.maxOf { sqrt(east[it] * east[it] + north[it] * north[it]) },
+            rootMeanSquareWindMetersPerSecond = sqrt(east.indices.sumOf { east[it] * east[it] + north[it] * north[it] } / east.size))
     }
-
-    internal fun receiveEffectiveMoistureMm(cell: Int, amount: Double) {
-        require(amount.isFinite() && amount >= 0.0)
-        columns.values[1][cell] += amount / density
-    }
-    internal fun withdrawEffectiveMoistureMm(cell: Int, requested: Double): Double {
-        require(requested.isFinite() && requested >= 0.0)
-        if (requested == 0.0) return 0.0
-        val cloud = density * columns.values[2][cell]
-        val fromCloud = min(cloud, requested)
-        val vapor = density * columns.values[1][cell]
-        val fromVapor = min(vapor, max(0.0, requested - fromCloud))
-        columns.values[2][cell] = (cloud - fromCloud) / density
-        columns.values[1][cell] = (vapor - fromVapor) / density
-        return fromCloud + fromVapor
-    }
-
-    internal fun markClimateEvolution() { approximateHistory = true }
 
     /** Reconstruct from current climate temperatures, conserving atmospheric water.
      * Vapor/condensate partition at saturation; pressure is approximately balanced

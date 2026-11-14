@@ -149,26 +149,3 @@ internal class GridOverlap(sourceWidth: Int, sourceHeight: Int, targetWidth: Int
     }
 }
 
-/**
- * Shared reduced climate mesh. It is deliberately coarse in the horizontal
- * (at most 48x36) while the surface energetics and every physical reservoir stay
- * on their authoritative grids. Climate cells never own water or heat themselves.
- */
-internal class ClimateGrid(val fine: DryAtmosphereConfig) {
-    val config: DryAtmosphereConfig = fine.copy(
-        width = minOf(fine.width, MAX_CLIMATE_WIDTH),
-        height = minOf(fine.height, MAX_CLIMATE_HEIGHT)
-    )
-    val count: Int get() = config.cellCount
-    val overlap = GridOverlap(fine.width, fine.height, config.width, config.height)
-    val equalsFine: Boolean get() = config.width == fine.width && config.height == fine.height
-
-    fun restrict(source: DoubleArray, target: DoubleArray) = overlap.restrict(source, target)
-
-    fun prolongUniform(target: DoubleArray, source: DoubleArray) = overlap.prolongUniform(target, source)
-
-    companion object {
-        const val MAX_CLIMATE_WIDTH = 48
-        const val MAX_CLIMATE_HEIGHT = 36
-    }
-}

@@ -13,9 +13,10 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
     private val width = world.width
     private val height = world.height
     private val count = width * height
-    internal val worldForClimate get() = world
-    private val land = BooleanArray(count) { world[it % width, it / width].terrain != Terrain.OCEAN }
-    internal val surfaceWater = SurfaceWater(world)
+    private val land = BooleanArray(count) { world.isLand(it % width, it / width) }
+    internal var surfaceWater = SurfaceWater(world)
+        private set
+    internal val climateDrought = DoubleArray(count)
     val soil = DoubleArray(count) { if (land[it]) 120.0 else 0.0 }
     private val snow = DoubleArray(count)
     private val queuedRain = DoubleArray(count)
@@ -35,7 +36,7 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
         mapping.forCell(c) { i, f -> if (land[i]) amount += f }
         amount / mapping.tilesPerCell
     }
-    val terrain = AtmosphereTerrain(mapping, DoubleArray(count) {
+    var terrain = AtmosphereTerrain(mapping, DoubleArray(count) {
         max(0.0, world[it % width, it / width].elevation - world.seaLevel) * 10_000.0
     })
     private val infiltrationScale = DoubleArray(count) { tile ->
@@ -54,9 +55,69 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
     private var roughnessRevision = -1L
     val soilWaterMmTiles get() = soil.sum()
     val snowWaterMmTiles get() = snow.sum()
-    fun snowMmInCell(cell: Int): Double = snowWaterMm(cell)
     fun initialWaterAvailability(cell: Int) = (1 - landFraction[cell] + rootZoneMm(cell) / 250.0).coerceIn(0.0, 1.0)
     fun setCellTemperature(cell: Int, celsius: Double) { temperatureC[cell] = celsius }
+
+    /** Atlas forcing is an external water flux. Only soil/snow/runoff are accounted here. */
+    internal fun evolveMonth(atlas: SeasonalClimateAtlas, month: Int, fraction: Double): Double {
+        var evaporated = 0.0
+        val days = fraction * 365 / 12
+        val drainageResponse = -expm1(-days / 5)
+        for (i in 0 until count) {
+            val amount = atlas.rain[month][i] * fraction
+            rain[i] += amount
+            if (!land[i]) continue
+            val temperature = atlas.temperature[month][i]
+            val frozen = ((1 - temperature) / 2).coerceIn(0.0, 1.0)
+            snow[i] += amount * frozen
+            val melt = min(snow[i], max(0.0, temperature) * 3.2 * days)
+            snow[i] -= melt
+            val input = amount * (1 - frozen) + melt
+            val demand = atlas.pet[month][i] * fraction
+            if (surfaceWater.isLakeWet(i)) {
+                surfaceWater.receiveLakeRain(i, input)
+                evaporated += surfaceWater.evaporateLake(i, demand)
+                continue
+            }
+            val available = soil[i] + input
+            val actual = min(available, demand)
+            evaporated += actual
+            val afterEt = available - actual
+            val spill = max(0.0, afterEt - 250)
+            val drain = max(0.0, min(250.0, afterEt) - 120) * drainageResponse
+            soil[i] = afterEt - spill - drain
+            drainage[i] += drain; overflow[i] += spill
+            surfaceWater.receive(i, drain, spill)
+        }
+        export(surfaceWater.advance(days * 86400))
+        return evaporated * mapping.tileAreaM2
+    }
+
+    internal fun refreshGeometry() {
+        val replacement = SurfaceWater(world)
+        export(replacement.migrateFrom(surfaceWater))
+        surfaceWater = replacement
+        terrain = AtmosphereTerrain(mapping, DoubleArray(count) { world.elevationMeters(it % width, it / width) })
+        for (i in 0 until count) {
+            val next = world.isLand(i % width, i / width)
+            if (land[i] != next) {
+                // Conversion resets terrestrial stores; surviving land retains its inventories.
+                soil[i] = 0.0; snow[i] = 0.0; queuedRain[i] = 0.0; climateDrought[i] = 0.0
+                land[i] = next
+            }
+        }
+        for (i in infiltrationScale.indices) {
+            val x = i % width; val y = i / width
+            val slope = abs(world[x + 1, y].elevation - world[x - 1, y].elevation) +
+                abs(world[x, min(height - 1, y + 1)].elevation - world[x, max(0, y - 1)].elevation)
+            infiltrationScale[i] = (1 - 0.65 * (slope / 0.05).coerceIn(0.0, 1.0)).coerceIn(0.25, 1.0)
+        }
+        for (c in landFraction.indices) {
+            var sum = 0.0
+            mapping.forCell(c) { i, f -> if (land[i]) sum += f }
+            landFraction[c] = sum / mapping.tilesPerCell
+        }
+    }
 
     private fun tileAlbedo(tile: Int, cell: Int): Double {
         if (!land[tile]) return 0.07 * (1 - seaIceFraction[cell]) + 0.40 * seaIceFraction[cell]
@@ -140,8 +201,6 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
         return actual / mapping.tilesPerCell
     }
     override fun receiveRain(cell: Int, amountMm: Double, snowFraction: Double) = recordRain(cell, amountMm, 1.0, snowFraction)
-    fun receiveClimateRain(cell: Int, amountMm: Double, wetFraction: Double, snowFraction: Double) =
-        recordRain(cell, amountMm, wetFraction, snowFraction)
     private fun recordRain(cell: Int, amountMm: Double, wet: Double, frozen: Double) {
         require(amountMm.isFinite() && amountMm >= 0 && wet > 0 && wet <= 1 && frozen in 0.0..1.0)
         mapping.forCell(cell) { i, f ->
@@ -169,13 +228,12 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
     fun beginUpdate() {
         rain.fill(0.0); drainage.fill(0.0); overflow.fill(0.0); peakRainRate.fill(0.0)
     }
-    fun finishStep(seconds: Double) = finishClimateStep(seconds, energyLimitedSnowMelt = false)
-    fun finishClimateStep(seconds: Double, energyLimitedSnowMelt: Boolean = true, totals: ClimateFluxTotals? = null) {
+    fun finishStep(seconds: Double) {
         require(seconds.isFinite() && seconds > 0)
         val response = relaxationFraction(seconds / (30 * 86400.0))
         val decay = exp(-seconds / DRAINAGE_SECONDS)
         for (i in 0 until count) {
-            if (!energyLimitedSnowMelt && snow[i] > 0) {
+            if (snow[i] > 0) {
                 val c = mapping.cellOfTile[i]
                 val melt = min(snow[i], max(0.0, temperatureC[c]) * 3.2 * seconds / 86400)
                 snow[i] -= melt; queuedRain[i] += melt
@@ -190,12 +248,7 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
             val peak = rate / wet
             peakRainRate[i] = max(peakRainRate[i], peak)
             climateRainRate[i] += (rate - climateRainRate[i]) * response
-            totals?.let {
-                it.peakRain[i] = max(it.peakRain[i], peak)
-                it.rain[i] += rain[i]; it.drainage[i] += drainage[i]; it.overflow[i] += overflow[i]
-                it.wetSeconds[i] += if (stepRain[i] > 0) seconds * wet else 0.0
-                it.intenseRain[i] += max(0.0, stepRain[i] - 2 * seconds * wet / 3600)
-            }
+
         }
         export(surfaceWater.advance(seconds))
         stepRain.fill(0.0); weightedWet.fill(0.0)
@@ -274,3 +327,5 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
         const val INFILTRATION_MM_PER_HOUR = 10.0
     }
 }
+
+private fun relaxationFraction(x: Double) = -kotlin.math.expm1(-x)

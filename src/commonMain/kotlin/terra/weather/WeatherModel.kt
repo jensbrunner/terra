@@ -15,7 +15,7 @@ data class WeatherFieldSemantics(
 
 /** Tile-space view; water fluxes belong to one completed update, and wind V points down-map. */
 interface WeatherModel {
-    /** Reduced climate exposes representative fields rather than fabricated resolved dynamics. */
+    /** Seasonal climate exposes monthly means rather than resolved dynamics. */
     val hasResolvedDynamics: Boolean get() = false
     fun pressureAnomalyPercent(x: Int, y: Int): Double? = null
     fun relativeVorticityPerSecond(x: Int, y: Int): Double? = null
@@ -37,6 +37,9 @@ interface WeatherModel {
     fun drainageMmThisUpdate(x: Int, y: Int): Double
     fun overflowMmThisUpdate(x: Int, y: Int): Double
     fun thirtyDayRainMmPerHour(x: Int, y: Int): Double
+    fun monthlyClimateRainMm(x: Int, y: Int): Double = thirtyDayRainMmPerHour(x, y) * 24 * 365 / 12
+    fun climateAridity(x: Int, y: Int): Double = 0.0
+    fun meanClimateTemperatureC(x: Int, y: Int): Double = airTemperatureC(x, y)
     fun annualizedRainMmPerYear(x: Int, y: Int): Double
     fun solarInputFactor(x: Int, y: Int): Double
     fun surfaceTemperatureC(x: Int, y: Int): Double

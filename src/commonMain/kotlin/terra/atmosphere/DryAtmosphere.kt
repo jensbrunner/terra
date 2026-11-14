@@ -154,6 +154,10 @@ class DryAtmosphere internal constructor(
         return state
     }
 
+    internal fun initializeAtlasWinds(east: DoubleArray, north: DoubleArray) {
+        for (i in h.indices) { mx[i] = h[i] * east[i]; my[i] = h[i] * north[i] }
+    }
+
     fun step() {
         val dt = config.stepSeconds
         columns?.beginStep()

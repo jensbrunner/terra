@@ -97,7 +97,7 @@ tasks.register<JavaExec>("moistAtmosphereExperiment") {
 
 tasks.register<JavaExec>("climateAtlas") {
     group = "verification"
-    description = "Export the compact physical review atlas for the default world."
+    description = "Export seasonal climate maps for three seeds and controlled geographical comparisons."
     mainClass.set("terra.experiments.ClimateAtlasKt")
     classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
     args(providers.gradleProperty("climateAtlasArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
@@ -105,7 +105,7 @@ tasks.register<JavaExec>("climateAtlas") {
 
 tasks.register<JavaExec>("climateBenchmark") {
     group = "verification"
-    description = "Warm-started fast-climate cost and conservation benchmark on the default world."
+    description = "Measure atlas startup, monthly surface evolution and detailed reentry on the default world."
     mainClass.set("terra.experiments.ClimateBenchmarkKt")
     classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
     args(providers.gradleProperty("climateBenchmarkArgs").orElse("").get().split(' ').filter { it.isNotBlank() })

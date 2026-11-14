@@ -10,6 +10,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
     private data class WorkerFailure(val generation: Long, val message: String)
     private val running = AtomicBoolean(true)
     private val desiredWorld = AtomicReference(request)
+    private val terrainEdits = AtomicReference<Pair<Long, List<TerrainElevationEdit>>?>(null)
     private val desiredControls = AtomicReference(Controls(0, SimulationSpeed.ONE_HOUR, false))
     private val cloudsVisible = AtomicBoolean(false)
     private val mailbox = AtomicReference<WorldPresentationSnapshot?>()
@@ -43,6 +44,16 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
     }
     actual fun setCloudsVisible(visible: Boolean) {
         if (cloudsVisible.getAndSet(visible) != visible) signal()
+    }
+    /** Coalesce coordinates before the next owner transaction; stale generations are discarded. */
+    actual fun editTerrain(edits: List<TerrainElevationEdit>) {
+        val request = desiredWorld.get()
+        require(edits.all { it.x in 0 until request.width && it.y in 0 until request.height && it.elevation.isFinite() && it.elevation in 0.0..1.0 })
+        terrainEdits.updateAndGet { previous ->
+            val combined = (if (previous?.first == request.generation) previous.second else emptyList()) + edits
+            request.generation to combined.associateBy { it.y * request.width + it.x }.values.toList()
+        }
+        signal()
     }
     actual fun regenerate(request: WorldRequest) {
         while (true) {
@@ -96,6 +107,12 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     forcePublish = true
                 }
                 val simulation = owner!!
+                val edits = terrainEdits.getAndSet(null)
+                val geometryEdited = edits?.first == requested.generation && !edits.second.isEmpty()
+                if (geometryEdited) {
+                    simulation.editTerrain(edits!!.second)
+                    forcePublish = true
+                }
                 val now = System.nanoTime()
                 val command = desiredControls.get()
                 // Account elapsed work under the controls that were actually active.
@@ -157,7 +174,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     val previous = mailbox.get()
                     val snapshot = if (previous?.progress?.generation == requested.generation &&
                         previous.progress.completedSeconds == simulation.completedSeconds && previous.progress.paused == active.paused && previous.fidelityRevision == simulation.fidelityRevision && showClouds == publishedClouds &&
-                        !(showClouds && !active.paused))
+                        !geometryEdited && !(showClouds && !active.paused))
                         previous.copy(progress = progress)
                     else {
                         simulation.snapshot(progress, cloudsVisible = showClouds,

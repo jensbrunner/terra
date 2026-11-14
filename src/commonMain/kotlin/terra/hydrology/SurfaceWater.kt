@@ -47,6 +47,26 @@ internal class SurfaceWater(world: World) {
         refreshLakes()
     }
 
+    /** Rebuild drainage topology after edits, retaining tile inventories and redistributing
+     * old lakes onto their former tiles. Water on new ocean is an explicit export. */
+    fun migrateFrom(old: SurfaceWater): Double {
+        val inventories = DoubleArray(count) { old.groundwater[it] + old.channels[it] + old.recharge[it] + old.runoff[it] }
+        for (lake in old.basins) {
+            val tiles = lake.candidate.tileIndices
+            for (tile in tiles) inventories[tile] += lake.water / tiles.size
+        }
+        groundwater.fill(0.0); channels.fill(0.0); recharge.fill(0.0); runoff.fill(0.0)
+        for (lake in basins) lake.water = 0.0
+        var exported = 0.0
+        for (i in 0 until count) {
+            if (!geography.land[i]) exported += inventories[i]
+            else if (lakeIds[i] >= 0) basins[lakeIds[i]].water += inventories[i]
+            else groundwater[i] = inventories[i]
+        }
+        refreshLakes(); revision++
+        return exported
+    }
+
     val totalWaterMmTiles get() = groundwater.sum() + channels.sum() + recharge.sum() + runoff.sum() + basins.sumOf { it.water }
     fun groundwaterMmAt(tile: Int) = groundwater[tile] + recharge[tile]
     fun lakeWaterMmTiles(id: Int) = basins[id].water

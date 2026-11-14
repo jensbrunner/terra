@@ -66,7 +66,7 @@ class TerrainAtmosphereTest {
         assertTrue(weather.diagnostics.totalRainKg > 0)
         // Hydrology routes an entire accepted batch after it crosses the daily cadence.
         assertTrue(weather.elapsedSeconds >= 2 * 86400.0)
-        assertEquals(targetSeconds, weather.climateHistory.elapsedSeconds)
+        assertEquals(world.geometryRevision, weather.atlas.geometryRevision)
         assertEquals(0, weather.observedClimateYears)
 
     }

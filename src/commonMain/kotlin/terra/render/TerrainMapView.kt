@@ -92,7 +92,7 @@ class TerrainMapView(
                     val pixelsPerTile = if (layer == WeatherLayer.CLOUDS) CloudRenderer.PIXELS_PER_TILE else 1
                     scaleX = 1.0 / pixelsPerTile
                     scaleY = 1.0 / pixelsPerTile
-                    smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS || layer.resolvedDynamicsOnly
+                    smoothing = layer == WeatherLayer.DAY_NIGHT || layer == WeatherLayer.CLOUDS || layer == WeatherLayer.CLIMATE_RAIN || layer == WeatherLayer.ANNUAL_PRECIPITATION || layer == WeatherLayer.ARIDITY || layer == WeatherLayer.MEAN_TEMPERATURE || layer.resolvedDynamicsOnly
                     alpha = 0.0
                 }
             }

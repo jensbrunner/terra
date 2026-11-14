@@ -71,9 +71,8 @@ fun main(args: Array<String>) {
                 // Small hour-or-shorter handoffs keep lake/routing coupling bounded.
                 val batch = minOf(maxOf(1L, (3600 / config.stepSeconds).toLong()),
                     steps - completedSteps(), stride - completedSteps() % stride).toInt()
-                val advanced = coupled.advanceBudgeted(batch * config.stepSeconds, batch)
+                coupled.advanceBudgeted(batch * config.stepSeconds, batch)
 
-                world.advanceClimateBiomes(coupled.seasonalClimate, advanced)
             } else if (wetModel != null) wetModel.step() else model!!.step()
             if (completedSteps() % stride == 0L || completedSteps() == steps) {
                 val wet = wetSnapshot()

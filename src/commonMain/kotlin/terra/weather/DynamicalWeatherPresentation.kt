@@ -9,8 +9,8 @@ internal class DynamicalWeatherPresentation(
     override val width: Int, override val height: Int, private val config: DryAtmosphereConfig,
     physics: MoistPhysicsConfig, private val view: MoistAtmosphereSnapshot,
     override val elapsedSeconds: Double, private val updateSeconds: Double,
-    private val fields: Array<DoubleArray>, private val climate: FastClimateResult? = null,
-    override val hasResolvedDynamics: Boolean = climate == null
+    private val fields: Array<DoubleArray>,
+    override val hasResolvedDynamics: Boolean = true
 ) : WeatherModel {
     // Eager on the publishing worker; tile rendering only interpolates immutable coarse values.
     private val dynamics = if (hasResolvedDynamics) view.horizontalDynamics else null
@@ -20,8 +20,7 @@ internal class DynamicalWeatherPresentation(
     override fun relativeVorticityPerSecond(x: Int, y: Int): Double? = dynamics?.let {
         sample(x, y, it::relativeVorticityPerSecondAt)
     }
-    override fun rainEventSummary(x: Int, y: Int) = climate?.rainEvents(index(x, y))
-    override val fieldSemantics get() = climate?.semantics ?: WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW, elapsedSeconds - updateSeconds, updateSeconds)
+    override val fieldSemantics get() = WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW, elapsedSeconds - updateSeconds, updateSeconds)
     private val sunlight = PlanetarySunlight(width, height, physics.solar, northUp = false)
         .also { it.update(elapsedSeconds) }
     /** State interpolation is for display. Water transfers always use exact rectangle overlaps. */
@@ -38,22 +37,14 @@ internal class DynamicalWeatherPresentation(
     }
 
     private fun index(x: Int, y: Int) = y * width + x
-    override fun relativeHumidity(x: Int, y: Int) = climate?.let { result -> sample(x, y) { cx, cy -> result.relativeHumidity(cy * config.width + cx) } } ?: sample(x, y, view::relativeHumidityAt)
-    override fun cloudWaterMm(x: Int, y: Int) = climate?.let { result -> sample(x, y) { cx, cy -> result.cloudMm(cy * config.width + cx) } } ?: sample(x, y, view::cloudWaterMmAt)
+    override fun relativeHumidity(x: Int, y: Int) = sample(x, y, view::relativeHumidityAt)
+    override fun cloudWaterMm(x: Int, y: Int) = sample(x, y, view::cloudWaterMmAt)
     override fun cloudCover(x: Int, y: Int) = 1 - exp(-cloudWaterMm(x, y) / 0.15)
-    override fun atmosphericWaterMm(x: Int, y: Int) = sample(x, y) { cx, cy ->
-        view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy)
-    }
-    override fun airTemperatureC(x: Int, y: Int) = if (climate != null)
-        sample(x, y) { cx, cy -> climate.airTemperatureC(cy * config.width + cx) }
-    else sample(x, y, view::temperatureKelvinAt) - 273.15
+    override fun atmosphericWaterMm(x: Int, y: Int) = sample(x, y) { cx, cy -> view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy) }
+    override fun airTemperatureC(x: Int, y: Int) = sample(x, y, view::temperatureKelvinAt) - 273.15
     override fun surfaceTemperatureC(x: Int, y: Int) = sample(x, y, view::surfaceTemperatureKelvinAt) - 273.15
-    override fun windUTilesPerDay(x: Int, y: Int) = climate?.let { result ->
-        sample(x, y) { cx, cy -> result.windUTilesPerDay(cy * config.width + cx) }
-    } ?: sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
-    override fun windVTilesPerDay(x: Int, y: Int) = climate?.let { result ->
-        sample(x, y) { cx, cy -> result.windVTilesPerDay(cy * config.width + cx) }
-    } ?: -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters
+    override fun windUTilesPerDay(x: Int, y: Int) = sample(x, y, view.dynamics::eastWindAt) * 86400 * width / config.domainWidthMeters
+    override fun windVTilesPerDay(x: Int, y: Int) = -sample(x, y, view.dynamics::northWindAt) * 86400 * height / config.domainHeightMeters
     override fun precipitationMmPerHour(x: Int, y: Int) = if (updateSeconds > 0) rainMmThisUpdate(x, y) * 3600 / updateSeconds else 0.0
     override fun peakSubstepPrecipitationMmPerHour(x: Int, y: Int) = fields[0][index(x, y)]
     override fun rainMmThisUpdate(x: Int, y: Int) = fields[1][index(x, y)]

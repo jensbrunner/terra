@@ -1,28 +1,41 @@
 package terra.weather
 
-import terra.atmosphere.AtmosphereTerrain
-import terra.atmosphere.AtmosphereTileMapping
-import terra.world.Terrain
+import terra.atmosphere.DryAtmosphereConfig
 import terra.world.World
-import kotlin.math.max
+import kotlin.math.*
 
-/** Static climate geography uses the same above-sea terrain and directional uplift
- * as detailed weather. Submerged relief cannot produce atmospheric rain shadows.
- */
-internal class ClimateGeography(world: World, grid: ClimateGrid) {
-    private val mapping = AtmosphereTileMapping(world.width, world.height, grid.config)
-    private val terrain = AtmosphereTerrain(mapping, DoubleArray(world.width * world.height) {
-        max(0.0, world[it % world.width, it / world.width].elevation - world.seaLevel) * 10_000.0
-    })
-    val landFraction = DoubleArray(grid.count) { cell ->
-        var amount = 0.0
-        mapping.forCell(cell) { tile, fraction ->
-            if (world[tile % world.width, tile / world.width].terrain != Terrain.OCEAN) amount += fraction
+/** Immutable physical snapshot. All arrays use map order (north at row zero). */
+class ClimateGeography(internal val world: World, val config: DryAtmosphereConfig = DryAtmosphereConfig()) {
+    val geometryRevision = world.geometryRevision
+    val width = config.width
+    val height = config.height
+    val count = width * height
+    internal val overlap = GridOverlap(world.width, world.height, width, height)
+    internal val tileElevation = DoubleArray(world.width * world.height) { world.elevationMeters(it % world.width, it / world.width) }
+    internal val tileLand = BooleanArray(tileElevation.size) { world.isLand(it % world.width, it / world.width) }
+    internal val elevationMeters = DoubleArray(count).also { overlap.restrict(tileElevation, it) }
+    internal val landFraction = DoubleArray(count).also { a -> overlap.restrict(DoubleArray(tileLand.size) { if (tileLand[it]) 1.0 else 0.0 }, a) }
+    internal val coastDistanceMeters = DoubleArray(count) { if (landFraction[it] < 0.5) 0.0 else config.domainWidthMeters + config.domainHeightMeters }
+    internal val slopeEast = DoubleArray(count)
+    internal val slopeSouth = DoubleArray(count)
+    init {
+        // Two directional distance-transform passes repeated for wrapped longitude.
+        repeat(3) {
+            for (i in 0 until count) relax(i)
+            for (i in count - 1 downTo 0) relax(i)
         }
-        amount / mapping.tilesPerCell
+        for (i in 0 until count) {
+            val x = i % width; val y = i / width
+            slopeEast[i] = (elevationMeters[y * width + (x + 1) % width] - elevationMeters[y * width + (x + width - 1) % width]) / (2 * config.dx)
+            slopeSouth[i] = (elevationMeters[min(height - 1, y + 1) * width + x] - elevationMeters[max(0, y - 1) * width + x]) / (2 * config.dy)
+        }
     }
-    val elevationMeters get() = terrain.meanElevationMeters
-    val slopeEast get() = terrain.slopeEast
-    val slopeNorth get() = terrain.slopeNorth
-    fun upliftMetersPerSecond(cell: Int, east: Double, north: Double) = terrain.upliftMetersPerSecond(cell, east, north)
+    private fun relax(i: Int) {
+        val x = i % width; val y = i / width
+        coastDistanceMeters[i] = minOf(coastDistanceMeters[i],
+            coastDistanceMeters[y * width + (x + 1) % width] + config.dx,
+            coastDistanceMeters[y * width + (x + width - 1) % width] + config.dx,
+            coastDistanceMeters[max(0, y - 1) * width + x] + config.dy,
+            coastDistanceMeters[min(height - 1, y + 1) * width + x] + config.dy)
+    }
 }

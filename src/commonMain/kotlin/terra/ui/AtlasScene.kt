@@ -261,7 +261,7 @@ class AtlasScene(
                 val representative = snapshot.weather.fieldSemantics.quality == WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL
                 calendarLabel.text = WeatherDisplayText.date(p.completedSeconds, snapshot.yearSeconds)
                 val mode = when {
-                    representative -> "Fast climate · interval estimates"
+                    representative -> "Seasonal climate atlas"
                     else -> "Detailed weather"
                 }
                 val state = if (paused && !p.paused) "Pausing…" else if (p.paused) "Paused" else if (p.rateLimited) "Catching up" else "Running"
@@ -357,9 +357,9 @@ class AtlasScene(
                 atlasText(uiFont, "NAVIGATE", 28.0, 96.0, 12.0, muted = true)
                 atlasText(uiFont, "Drag             Pan the map\nScroll           Zoom at the pointer\nHome            Fit the map\nClick              Inspect a tile\n\nSpace            Pause / resume\nLeft / Right   Change speed\n1–9                Toggle map layers\nEsc                Close panels", 28.0, 130.0, 15.0)
                 atlasText(uiFont, "WEATHER & CLIMATE", 420.0, 96.0, 12.0, muted = true)
-                atlasText(uiFont, "Auto chooses fidelity for your speed.\nWeather resolves winds and clouds.\nClimate estimates longer intervals.\n\nRain intensity shows substep peaks;\nDetails compares them with the mean.\nFast cloud motion is illustrative.\n\nF switches fidelity · A restores Auto.", 420.0, 130.0, 14.0)
+                atlasText(uiFont, "Auto chooses fidelity for your speed.\nWeather resolves winds and clouds.\nClimate advances monthly soil and vegetation.\n\nRain intensity shows substep peaks;\nDetails compares them with the mean.\nFast cloud motion is illustrative.\n\nF switches fidelity · A restores Auto.", 420.0, 130.0, 14.0)
                 solidRect(744.0, 1.0, AtlasUi.line).xy(28.0, 362.0)
-                atlasText(uiFont, "Detailed weather resolves moving winds, clouds and rain.\nFast climate evolves seasonal heat and transported moisture.\nBoth modes share soil, snow and vegetation.", 28.0, 384.0, 13.0, muted = true)
+                atlasText(uiFont, "Detailed weather resolves moving winds, clouds and rain.\nClimate samples a seasonal geography-based atlas.\nBoth modes share soil, snow and vegetation.", 28.0, 384.0, 13.0, muted = true)
                 lateinit var diagnostics: AtlasButton
                 diagnostics = AtlasButton(this, uiFont, "Frame time", 558.0, 486.0, 214.0, 38.0) {
                     frameTimeLabel.visible = !frameTimeLabel.visible
@@ -440,8 +440,8 @@ class AtlasScene(
             "Air${if (estimate) " estimate" else ""}" to "${formatNumber(weather.airTemperatureC(tx, ty), 1)} °C",
             "Surface" to "${formatNumber(weather.surfaceTemperatureC(tx, ty), 1)} °C",
             "Humidity${if (estimate) " est." else ""}" to "${formatNumber(weather.relativeHumidity(tx, ty) * 100, 0)}%",
-            "Cloud${if (estimate) " estimate" else " water"}" to "${formatNumber(weather.cloudWaterMm(tx, ty), 2)} mm",
-            "Rain · mean / peak" to "${formatNumber(weather.precipitationMmPerHour(tx, ty), 3)} / ${formatNumber(weather.peakSubstepPrecipitationMmPerHour(tx, ty), 2)} mm/h",
+            (if (estimate) "Mean annual temp" else "Cloud water") to (if (estimate) "${formatNumber(weather.meanClimateTemperatureC(tx, ty), 1)} °C" else "${formatNumber(weather.cloudWaterMm(tx, ty), 2)} mm"),
+            (if (estimate) "Monthly rain" else "Rain · mean / peak") to (if (estimate) "${formatNumber(weather.monthlyClimateRainMm(tx, ty), 0)} mm/month" else "${formatNumber(weather.precipitationMmPerHour(tx, ty), 3)} / ${formatNumber(weather.peakSubstepPrecipitationMmPerHour(tx, ty), 2)} mm/h"),
             "Soil moisture" to "${formatNumber(weather.soilMoisture(tx, ty) * 100, 0)}%",
             "Elevation" to "${formatNumber(cell.elevation * 100, 1)}%",
             "Lake" to if (hydrology.isLakeTileWet(tx, ty)) "Under water" else if (lake >= 0) "Dry basin" else "None"
@@ -451,17 +451,17 @@ class AtlasScene(
         val ecology = "Canopy ${formatNumber(world.treeCover(tx, ty) * 100, 0)}% · grass ${formatNumber(world.grassCover(tx, ty) * 100, 0)}% · bare ${formatNumber(world.bareCover(tx, ty) * 100, 0)}%\n" +
             "Limit: ${world.growthLimitation(tx, ty).name.lowercase()}"
         inspectorClimate.text = if (seasonal?.hasAnnualCoverage == true)
-            "Annual climate · ${formatNumber(seasonal.annualPrecipitationAtTile(tx, ty, world.width, world.height), 0)} mm/year\n$ecology\n${if (seasonal.containsAggregateEstimates) "Includes climate estimates" else "Observed climate window"}"
+            "Annual climate · ${formatNumber(seasonal.annualPrecipitationAtTile(tx, ty, world.width, world.height), 0)} mm/year\n$ecology\n${if (seasonal.containsAggregateEstimates) "Diagnostic seasonal atlas" else "Observed climate window"}"
             else "Annual climate still collecting\n$ecology\nLand cover is provisional."
         if (inspectorDetailed) {
             val represented = WeatherDisplayText.period(period, year)
             val source = WeatherDisplayText.quality(period)
             selectionLabel.text = "$source\nUpdate covers $represented\n\n" +
                 "Rain total   ${formatNumber(weather.rainMmThisUpdate(tx, ty), 3)} mm\n" +
-                "${if (estimate) "Wet-phase mean" else "Step peak"}   ${formatNumber(weather.peakSubstepPrecipitationMmPerHour(tx, ty), 3)} mm/h\n" +
-                "30-day EMA   ${formatNumber(weather.thirtyDayRainMmPerHour(tx, ty), 3)} mm/h\n" +
-                "Rain EMA   ${formatNumber(weather.annualizedRainMmPerYear(tx, ty), 0)} mm/year\n\n" +
-                "Air water   ${formatNumber(weather.atmosphericWaterMm(tx, ty), 1)} mm\n" +
+                "${if (estimate) "Monthly mean rate" else "Step peak"}   ${formatNumber(weather.peakSubstepPrecipitationMmPerHour(tx, ty), 3)} mm/h\n" +
+                "Monthly rain   ${formatNumber(weather.monthlyClimateRainMm(tx, ty), 0)} mm/month\n" +
+                "Annual rain   ${formatNumber(weather.annualizedRainMmPerYear(tx, ty), 0)} mm/year\n\n" +
+                (if (estimate) "Aridity   ${formatNumber(weather.climateAridity(tx, ty), 2)} rain/PET\n" else "Air water   ${formatNumber(weather.atmosphericWaterMm(tx, ty), 1)} mm\n") +
                 "Soil water   ${formatNumber(weather.soilWaterMm(tx, ty), 1)} mm\n" +
                 "Drainage   ${formatNumber(weather.drainageMmThisUpdate(tx, ty), 2)} mm/update\n" +
                 "Overflow   ${formatNumber(weather.overflowMmThisUpdate(tx, ty), 2)} mm/update\n\n" +
@@ -536,7 +536,8 @@ class AtlasScene(
             weatherLayerGroup = container {
                 listOf(WeatherLayer.HUMIDITY to "1  Humidity", WeatherLayer.PRECIPITATION to "3  Rain intensity",
                 WeatherLayer.AIR_TEMPERATURE to "5  Air temp", WeatherLayer.SURFACE_TEMPERATURE to "7  Surface temp",
-                WeatherLayer.CLIMATE_RAIN to "4  30-day rain", WeatherLayer.ANNUAL_PRECIPITATION to "6  Annual rainfall")
+                WeatherLayer.CLIMATE_RAIN to "4  Monthly rain", WeatherLayer.ANNUAL_PRECIPITATION to "6  Annual rainfall",
+                    WeatherLayer.ARIDITY to "Q  Aridity", WeatherLayer.MEAN_TEMPERATURE to "T  Mean temp")
                 .forEachIndexed { index, (layer, label) ->
                     layerButtons[layer] = AtlasButton(this, uiFont, label, 16 + index % 2 * 152.0,
                         76 + index / 2 * 40.0, 144.0) { toggleLayer(layer) }
