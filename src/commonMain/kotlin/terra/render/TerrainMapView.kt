@@ -83,7 +83,7 @@ class TerrainMapView(
             waterFade.image = RasterBlendImage(waterFade.previous, surfaceWaterBitmap).addTo(this) {
                 scaleX = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
                 scaleY = 1.0 / SURFACE_WATER_PIXELS_PER_TILE
-                smoothing = false; alpha = 0.0
+                smoothing = true; alpha = 0.0
             }
         }
 

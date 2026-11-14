@@ -623,7 +623,7 @@ class AtlasScene(
             "wind", "wind-zoom", "wind-rain" -> ClimateLayer.WIND
             else -> null
         }
-        if (state == "wind-zoom") { camera.home(); zoomBy(3.0, camera.viewportWidth / 2, camera.viewportHeight / 2) }
+        if (state == "wind-zoom" || state == "rivers-zoom") { camera.home(); zoomBy(3.0, camera.viewportWidth / 2, camera.viewportHeight / 2) }
         else { camera.home(fill = state == "overview"); applyMapTransform() }
         if (previewLayer != null) {
             activeOverlays.clear()
