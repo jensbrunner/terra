@@ -121,3 +121,11 @@ tasks.register<JavaExec>("rasterBlendCheck") {
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     systemProperty("java.awt.headless", "false")
 }
+
+tasks.register<JavaExec>("weatherHandoffReview") {
+    group = "verification"
+    description = "Compare startup and climate reentry through the real automatic worker and renderer."
+    mainClass.set("terra.experiments.WeatherHandoffReviewKt")
+    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
+    args(providers.gradleProperty("handoffArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
+}

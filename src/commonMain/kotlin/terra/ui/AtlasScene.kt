@@ -465,10 +465,8 @@ class AtlasScene(
                 "Soil water   ${formatNumber(weather.soilWaterMm(tx, ty), 1)} mm\n" +
                 "Drainage   ${formatNumber(weather.drainageMmThisUpdate(tx, ty), 2)} mm/update\n" +
                 "Overflow   ${formatNumber(weather.overflowMmThisUpdate(tx, ty), 2)} mm/update\n\n" +
-                "Flow   ${formatNumber(hydrology.dischargeMmTilesPerDay(tx, ty), 2)} mm·tiles/day\n" +
                 "Upstream land   ${hydrology.upstreamLandTileCount(tx, ty)} tiles\n" +
-                "Flow reflects recent rain and soil wetness\n" +
-                "Water view   ${WeatherDisplayText.date(presentation!!.drainageCompletedSeconds, year)}\n" +
+                "Rivers and lakes are fixed at generation\n" +
                 (weather.pressureAnomalyPercent(tx, ty)?.let { "Pressure anomaly   ${formatNumber(it, 2)}%" } ?: "Pressure anomaly   unavailable") + "\n" +
                 (weather.relativeVorticityPerSecond(tx, ty)?.let { "Relative curl   ${formatNumber(it / 1e-5, 2)} ×10⁻⁵ s⁻¹" } ?: "Relative curl   unavailable")
         }

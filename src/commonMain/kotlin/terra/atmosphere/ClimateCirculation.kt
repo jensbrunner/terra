@@ -7,12 +7,12 @@ internal data class ReconstructedCirculation(
     val maximumSpeed: Double, val rmsSpeed: Double, val pressureExponent: Double
 )
 
-/** Stateless reentry from the evolved thermal geography. Thermally conditioned wave disturbances and compatible balanced velocities.
+/** Stateless reentry from evolved thermal geography and seeded synoptic lows.
  * Uses this model's force -(1/h) grad(g h² T / 2Tref), not the dry g grad(h) law.
  */
 internal object ClimateCirculation {
     fun reconstruct(config: DryAtmosphereConfig, referenceTemperature: Double,
-        temperature: DoubleArray, carrierDepthSum: Double, weatherPhase: Double? = null): ReconstructedCirculation {
+        temperature: DoubleArray, carrierDepthSum: Double, weatherPhase: Double? = null, seed: Int = 0): ReconstructedCirculation {
         val width = config.width; val height = config.height
         var smooth = temperature.copyOf()
         var scratch = DoubleArray(config.cellCount)
@@ -42,24 +42,24 @@ internal object ClimateCirculation {
                 zonal[y] + rotationalWeight[y] * wallEnvelope * ln(smooth[i] / mean[y])
             }
         }
-        if (weatherPhase != null) for (y in 1 until height - 1) {
-            // Thermal contrast sets initial disturbance amplitude. Perturb pressure shape
-            // first, then derive balanced winds with the actual thermal pressure law.
-            val gradient = abs(mean[minOf(height - 1, y + 1)] - mean[maxOf(0, y - 1)])
-            val activity = (gradient / 8).coerceIn(0.0, 1.0) * rotationalWeight[y]
-            val envelope = sin(PI * (y + 0.5) / height).pow(2)
-            for (x in 0 until width) {
-                val longitude = 2 * PI * (x + 0.5) / width
-                shape[y * width + x] += 0.035 * activity * envelope *
-                    (sin(5 * longitude + weatherPhase + 0.6 * y) +
-                        0.5 * cos(3 * longitude - weatherPhase + 0.4 * y))
+        if (weatherPhase != null) {
+            // A shallow layer cannot convert full surface coastal temperature jumps
+            // into atmospheric pressure contrasts: those would demand >100 m/s
+            // jets and force the limiter to erase every synoptic low with them.
+            for (i in shape.indices) shape[i] *= 0.15
+            // Use the same smooth synoptic lows as a new world, rather than weak
+            // latitude waves whose amplitude vanishes after thermal equilibration.
+            val pattern = SynopticPattern(seed xor (weatherPhase * 997).toInt())
+            for (y in 0 until height) for (x in 0 until width) {
+                val vortex = pattern.flow(config, (x + 0.5) * config.dx, (y + 0.5) * config.dy)
+                shape[y * width + x] += 2 * ln(vortex.heightMeters / config.meanHeightMeters)
             }
         }
         val depth = DoubleArray(config.cellCount)
         val pressure = DoubleArray(config.cellCount)
         val east = DoubleArray(config.cellCount)
         val north = DoubleArray(config.cellCount)
-        var exponent = 0.7
+        var exponent = if (weatherPhase == null) 0.7 else 1.0
         repeat(8) {
             var sum = 0.0
             for (i in depth.indices) {
@@ -80,6 +80,18 @@ internal object ClimateCirculation {
                 val py = (pressure[config.northRow(y) * width + x] - pressure[config.southRow(y) * width + x]) / (2 * config.dy)
                 east[i] = -py * inverse
                 north[i] = if (!config.periodicY && (y == 0 || y == height - 1)) 0.0 else px * inverse
+                if (weatherPhase != null) {
+                    // Cyclonic gradient-wind balance includes centripetal acceleration.
+                    // Pure geostrophy overestimates tropical vortex speeds, causing a
+                    // single tail near the equator to shrink every pressure system.
+                    val acceleration = hypot(px, py) / depth[i]
+                    val radius = config.domainWidthMeters * 0.065
+                    val balancedSpeed = 2 * acceleration /
+                        (abs(f) + sqrt(f * f + 4 * acceleration / radius) + 1e-20)
+                    val geostrophicSpeed = hypot(east[i], north[i])
+                    val response = min(1.0, balancedSpeed / max(1e-12, geostrophicSpeed))
+                    east[i] *= response; north[i] *= response
+                }
                 val speed2 = east[i] * east[i] + north[i] * north[i]
                 maximum = max(maximum, sqrt(speed2)); sumSpeed2 += speed2
             }

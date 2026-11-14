@@ -67,7 +67,6 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
         var revision = 0L
         var previousWall = System.nanoTime()
         var publishedAt = 0L
-        var drainagePublishedAt = 0L
         var publishedClouds = false
         var rateStarted = previousWall
         var rateStartSim = 0.0
@@ -92,7 +91,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     demand.controls(active.speed, active.paused, stepSeconds = created.stepSeconds)
                     previousWall = System.nanoTime()
                     rateStarted = previousWall; rateStartSim = 0.0; achieved = 0.0
-                    publishedAt = 0L; drainagePublishedAt = 0L; revision = 0L
+                    publishedAt = 0L; revision = 0L
                     advanceNanos = 0L; publicationNanos = 0L; transactions = 0L
                     forcePublish = true
                 }
@@ -156,17 +155,13 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                         active.automatic, simulation.quantum(active.speed))
                     val started = System.nanoTime()
                     val previous = mailbox.get()
-                    val refreshWater = drainagePublishedAt == 0L || finished - drainagePublishedAt >= 500_000_000L
                     val snapshot = if (previous?.progress?.generation == requested.generation &&
                         previous.progress.completedSeconds == simulation.completedSeconds && previous.fidelityRevision == simulation.fidelityRevision && showClouds == publishedClouds &&
-                        !(refreshWater && previous.drainageCompletedSeconds != simulation.completedSeconds) &&
                         !(showClouds && !active.paused))
                         previous.copy(progress = progress)
                     else {
-                        simulation.snapshot(progress, refreshDrainage = refreshWater, cloudsVisible = showClouds,
-                            visualElapsedSeconds = if (publishedAt == 0L) 0.0 else ((finished - publishedAt) / 1e9).coerceIn(0.0, 0.25)).also {
-                            if (refreshWater) drainagePublishedAt = finished
-                        }
+                        simulation.snapshot(progress, cloudsVisible = showClouds,
+                            visualElapsedSeconds = if (publishedAt == 0L) 0.0 else ((finished - publishedAt) / 1e9).coerceIn(0.0, 0.25))
                     }
                     publishedClouds = showClouds
                     publicationNanos += System.nanoTime() - started

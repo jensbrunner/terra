@@ -6,7 +6,7 @@ snow, surface temperature, atmospheric water, calendar and vegetation.
 
 `ReducedClimate` contains the seasonal physical closures. `FastClimateStepper`
 coordinates calendar-aligned phases, local surface exchange and seasonal history.
-The climate mesh is at most 36 × 27; terrain-aware rainfall deposition and surface
+The climate mesh is at most 48 × 36; terrain-aware rainfall deposition and surface
 state retain the atmospheric and terrain grids.
 
 - Daily-mean sunlight drives an effective slab with land/ocean thermal inertia,
@@ -39,18 +39,22 @@ is a moisture boundary; surplus soil water is runoff to that boundary. A signed,
 compensated exchange ledger keeps the remaining water budget auditable:
 `atmosphere + soil + snow + net boundary export` is conserved.
 
-`SurfaceWater` diagnoses river discharge and lake wetness from immutable drainage
-terrain, recent rain, soil wetness and evaporative demand when publishing a view.
-Its flows and lake footprints are illustrative, not additional water reservoirs.
+Rivers and lakes are fixed geography generated once from drainage terrain.
+Upstream catchment area determines river width; basin spill heights determine
+lake footprints. Weather and vegetation never change their paths, widths or
+coverage, and the immutable water raster is reused throughout the world's life.
 
 ## Returning to weather
 
-Reentry preserves atmospheric water in each 4 × 4 region, concentrating some of it
-into pressure-conditioned moist sectors. It reconstructs balanced pressure/winds
-from the evolved temperature and partitions vapor/cloud using the same saturated
-parcel closure as detailed microphysics. Initialization energy is explicitly
-reported. No physical steps, soil changes or calendar advancement are hidden in
-handoff; the rebuilt physical fields are immediately visible, even while paused.
+Reentry conserves atmospheric water through smooth local exchanges that concentrate
+moisture in low-pressure sectors. There are no rectangular redistribution regions.
+It shares startup's seeded synoptic lows, conditioned on evolved temperatures,
+with rotating gradient-balanced winds. Vapor/cloud partition uses the same humid
+parcel closure as detailed microphysics; nonprecipitating cloud can remain below
+the rain threshold. Initialization energy is explicitly reported. No physical
+steps, soil changes or calendar advancement are hidden in handoff. Rebuilt fields
+are immediately visible while paused; mode changes reset decorative cloud texture
+and clear the completed climate interval's rain/animation duration.
 
 The single thermal shallow-water layer supports moving rotating disturbances but
 not resolved baroclinic instability. Initialized eddies decay; cloud persistence
@@ -62,6 +66,7 @@ Climate cloud fields remain interval statistics rather than resolved storms.
 - `gradle compileKotlinJvm jvmTest`
 - `gradle climateAtlas -PclimateAtlasArgs='--years=100 --seed=31742'`
 - `gradle climateBenchmark -PclimateBenchmarkArgs='--warmup=5 --years=10'`
+- `gradle weatherHandoffReview -PhandoffArgs='--years=100'`
 - `gradle atmosphericEvolution -PatmosphereArgs='--climate-years=255 --days=3'`
 - `gradle runJvm -PperformanceProfile=true -PprofileSpeeds=TEN_YEARS -PprofileClouds=true -PprofileSeconds=20 -PprofileWarmup=5`
 
@@ -69,24 +74,31 @@ The worker chooses detailed/reduced fidelity from measured costs but keeps bound
 calendar-sized climate transactions. It reports actual achieved speed, backlog
 and unserved demand. Long climate transactions do not truncate elapsed demand.
 
-## Measured review (default desktop, 283 × 212 world)
+## Measured review
 
-The final 20-second desktop trial, after five seconds of warmup with clouds on,
-completed 200 simulated years: 9.996 years/s, 120 frame updates/s, p95 frame
-interval 10.34 ms, and zero unserved demand during the measured interval. The
-120 Hz display was vsynced; this measures updater intervals, not GPU presents.
-Raw output is under `build/experiments/simplified-sustained/`.
+Measurements below use the default 283 × 212 world and the finer climate mesh.
+The mesh has 1,728 cells, compared with the previous 972 (78% more).
 
-The matching short climate benchmark (one warmup year, two measured years)
-improved from 4.18 to 9.42 years/s. The longer default century atlas ran at
-13.21 years/s. After a century it had 47% woodland and 29% desert among land
-biomes; moving the continent shifted its rainfall anomaly by the same longitude,
-and reversing wind reversed the controlled mountain rain shadow.
+The clouds-enabled desktop trial completed 200 simulated years in 20.006 seconds
+(9.997 years/s), with 120 frame updates/s, p95 update interval 11.17 ms, and zero
+unserved demand. These are updater intervals on a vsynced display, not GPU
+presentation measurements. Raw output is in
+`build/experiments/higher-resolution-live/`. The grid aligns two by two with the
+96 × 72 atmosphere, avoiding fractional overlap overhead. Larger 60 × 45 and
+72 × 54 trials achieved only 9.35 and 7.90 years/s respectively.
 
-After 255 climate years, a three-day detailed trajectory retained clouds,
-pressure anomalies and nonzero curl with water residual around 3e-14. Eddy
-kinetic energy fell from 19.64 to 1.29 m²/s²: activity survives, but sustained
-storm generation remains a limitation. Extreme local orographic rain and the
-choice of climate phase can still affect individual cells; monthly versus
-annual requests differed by about 20 mm RMS in instantaneous soil water and
-2.1 percentage points RMS in canopy after twenty years.
+All 84 JVM tests pass. The default-world automatic worker review advanced a
+century, returned to detailed weather, and retained evolving pressure and clouds
+for eight modeled hours: pressure RMS was 1.44% versus 1.64% at startup, curl RMS
+1.92e-5/s versus 2.23e-5/s, and visible cloud pixels covered 20% versus 53%.
+54,841 cloud pixels changed appreciably between the first and eighth returned
+hours. This is active weather, with less cloud than the deliberately moist startup.
+A separate 48 × 36 atmosphere trajectory retained 0.164 mm cloud, 0.668% pressure
+RMS and 16.5 m/s maximum wind after three days; water residual was 1.3e-13.
+The native-world 255-year transition test also checks fixed lake footprints,
+static raster identity, conserved water and evolving resolved pressure.
+
+Detailed weather still uses one thermal shallow-water layer. It can evolve seeded
+rotating disturbances but cannot resolve baroclinic storm generation. Cloud cover
+also depends on the evolved moisture inventory, so startup and century-old worlds
+need not have identical coverage.

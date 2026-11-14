@@ -37,7 +37,7 @@ data class WorldPresentationSnapshot(
     val drainage: SurfaceWaterSnapshot,
     val seasonalClimate: SeasonalClimateSnapshot?, val observedClimateYears: Int,
     val yearSeconds: Double, val diagnostics: MoistAtmosphereDiagnostics?,
-    val clouds: RasterFrame?, val surfaceWater: RasterFrame, val drainageCompletedSeconds: Double,
+    val clouds: RasterFrame?, val surfaceWater: RasterFrame,
     val climateDiagnostics: ClimateIntervalDiagnostics? = null,
     val fidelity: SimulationFidelity = SimulationFidelity.DETAILED, val fidelityRevision: Long = 0,
     val lastHandoff: terra.atmosphere.AtmosphereHandoff? = null,
@@ -47,16 +47,13 @@ data class WorldPresentationSnapshot(
 /** Single-owner numerical state. Contains no graphics or threading; worker owns every call. */
 internal class WorldSimulation(val request: WorldRequest) {
     private val world = World(request.seed, request.width, request.height, request.terrain)
-    private val drainage = SurfaceWater(world)
+    private val drainageView = SurfaceWater(world).snapshot
     private val weather = DynamicalWeather(world, request.atmosphere)
     private var nextClimateSeconds = 3600.0
     private var lastEcologySeconds = 0.0
     private var worldView: WorldSnapshot? = null
     private var weatherView: WeatherPresentation? = null
-    private var drainageView: SurfaceWaterSnapshot? = null
-    private var drainageViewSeconds = 0.0
-    private var waterFrame: RasterFrame? = null
-    private val waterRasterizer = SurfaceWaterRasterizer(request.width, request.height)
+    private val waterFrame = SurfaceWaterRasterizer(request.width, request.height).render(drainageView)
     private val cloudRenderer by lazy { CloudRenderer(request.width, request.height, request.seed) }
     private val weatherIdentity = Any()
     private var climateQuantumSeconds = FastClimateStepper.DAY_SECONDS
@@ -114,18 +111,13 @@ internal class WorldSimulation(val request: WorldRequest) {
         return result
     }
 
-    fun snapshot(progress: SimulationProgress, refreshDrainage: Boolean = true, cloudsVisible: Boolean = false, visualElapsedSeconds: Double = 0.0): WorldPresentationSnapshot {
+    fun snapshot(progress: SimulationProgress, cloudsVisible: Boolean = false, visualElapsedSeconds: Double = 0.0): WorldPresentationSnapshot {
         check(progress.generation == request.generation && progress.completedSeconds == completedSeconds)
         if (worldView?.biomeRevision != world.biomeRevision) worldView = world.snapshot(request.generation, worldView)
         if (weatherView?.elapsedSeconds != completedSeconds) {
             weather.refreshSnapshot()
             weatherView = WeatherPresentation.capture(weather, completedSeconds, weatherIdentity)
         }
-        if (drainageView == null || refreshDrainage && drainageViewSeconds != completedSeconds) {
-            drainageView = drainage.snapshot(weather)
-            waterFrame = waterRasterizer.render(drainageView!!)
-        }
-        if (refreshDrainage) drainageViewSeconds = completedSeconds
         val cloudFrame = if (cloudsVisible) {
             cloudRenderer.update(weatherView!!, if (progress.paused) 0.0 else visualElapsedSeconds,
                 detailedVisualSeconds = if (progress.paused || fidelity != SimulationFidelity.DETAILED) 0.0 else
@@ -134,11 +126,11 @@ internal class WorldSimulation(val request: WorldRequest) {
             cloudRenderer.frame
         } else null
         return WorldPresentationSnapshot(progress, worldView!!,
-            weatherView!!, drainageView!!,
+            weatherView!!, drainageView,
             weather.seasonalClimate, weather.observedClimateYears,
             weather.physics.solar.yearSeconds,
             weather.takeUnless { it.hasRepresentativeFields }?.diagnostics,
-            cloudFrame, waterFrame!!, drainageViewSeconds, weather.climateDiagnostics,
+            cloudFrame, waterFrame, weather.climateDiagnostics,
             fidelity, fidelityRevision,
             weather.lastHandoff, weather.physics.solar)
     }

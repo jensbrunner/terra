@@ -33,7 +33,7 @@ data class MoistPhysicsConfig(
     // Rainfall is episodic: once precipitation begins, condensate rains out much
     // faster than the cloud-autoconversion timescale used by the old drizzle model.
     val rainoutSeconds: Double = 480.0,
-    val rainCloudThresholdKgM2: Double = 0.1,
+    val rainCloudThresholdKgM2: Double = 0.2,
     val rainOnsetKgM2: Double = 0.30,
     /** Diagnostic parcel residence/ascent; no extra atmospheric layer or cloud inventory. */
     val liftResidenceSeconds: Double = 600.0,
@@ -154,6 +154,7 @@ class MoistAtmosphere(
 
     private val columns = MoistColumnTransport(config, physics)
     private val flow = DryAtmosphere(config, columns, initializeFlow ?: DryScenarios.initializer(scenario, config, seed))
+    private val reconstructionSeed = seed
     private val density = physics.referenceDryColumnKgM2 / config.meanHeightMeters
     val surfaceThermalState = SurfaceThermalState(config.cellCount)
     private val surfaceTemperature = surfaceThermalState.kelvin
@@ -217,7 +218,7 @@ class MoistAtmosphere(
 
     internal fun markClimateEvolution() { approximateHistory = true }
 
-    /** Reconstruct from current climate temperatures, preserving every column's water.
+    /** Reconstruct from current climate temperatures, conserving atmospheric water.
      * Vapor/condensate partition at saturation; pressure is approximately balanced
      * without new-world moisture, old storms or hidden physical advancement.
      */
@@ -229,27 +230,31 @@ class MoistAtmosphere(
         val temperature = evolvedAirTemperatureKelvin?.also {
             require(it.size == config.cellCount && it.all { kelvin -> kelvin.isFinite() && kelvin > 0.0 })
         }?.copyOf() ?: DoubleArray(config.cellCount) { surfaceTemperature[it] - CLIMATE_AIR_SURFACE_OFFSET_K }
-        val circulation = flow.initializeClimateCirculation(temperature, atWorldSeconds / (7 * 86400.0))
-        // Resolve some of each local moisture inventory into low-pressure moist
-        // sectors and dry sectors. No storm history or new water is required.
+        val circulation = flow.initializeClimateCirculation(temperature, atWorldSeconds / (7 * 86400.0), reconstructionSeed)
+        // Smooth local conservative exchange resolves moist low-pressure sectors.
+        // Pairwise relaxation preserves water and positivity without block boundaries
+        // or a global moisture funding pool. It is initialization, not elapsed time.
         val pressure = DoubleArray(config.cellCount) { i ->
             val h = flow.depthAt(i)
             h * h * temperature[i]
         }
-        for (by in 0 until config.height step 4) for (bx in 0 until config.width step 4) {
-            var inventory = 0.0; var weighted = 0.0; var meanPressure = 0.0; var cells = 0
-            for (y in by until min(config.height, by + 4)) for (x in bx until min(config.width, bx + 4)) {
-                val i = y * config.width + x
-                inventory += water[i]; meanPressure += pressure[i]; cells++
+        val meanPressure = pressure.average()
+        val weight = DoubleArray(config.cellCount) { i ->
+            exp(((meanPressure - pressure[i]) / (0.015 * meanPressure)).coerceIn(-1.5, 1.5))
+        }
+        repeat(32) { sweep ->
+            for (index in water.indices) {
+                val i = if (sweep % 2 == 0) index else water.lastIndex - index
+                val x = i % config.width; val y = i / config.width
+                fun exchange(j: Int) {
+                    val target = (water[i] + water[j]) * weight[i] / (weight[i] + weight[j])
+                    val amount = 0.45 * (target - water[i])
+                    water[i] += amount; water[j] -= amount
+                }
+                exchange(y * config.width + (x + 1) % config.width)
+                if (y + 1 < config.height) exchange(i + config.width)
+                else if (config.periodicY) exchange(x)
             }
-            meanPressure /= cells
-            for (y in by until min(config.height, by + 4)) for (x in bx until min(config.width, bx + 4)) {
-                val i = y * config.width + x
-                val weight = exp(((meanPressure - pressure[i]) / (0.01 * meanPressure)).coerceIn(-0.6, 0.6))
-                water[i] *= weight; weighted += water[i]
-            }
-            if (weighted > 0) for (y in by until min(config.height, by + 4)) for (x in bx until min(config.width, bx + 4))
-                water[y * config.width + x] *= inventory / weighted
         }
         val vaporTarget = 1.0
         var vaporTotal = 0.0

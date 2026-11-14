@@ -140,11 +140,11 @@ class DryAtmosphere internal constructor(
     }
 
     /** Reconstruct pressure and compatible circulation from evolved thermal geography. */
-    internal fun initializeClimateCirculation(temperature: DoubleArray, weatherPhase: Double? = null): ReconstructedCirculation {
+    internal fun initializeClimateCirculation(temperature: DoubleArray, weatherPhase: Double? = null, seed: Int = 0): ReconstructedCirculation {
         require(temperature.size == count)
         val reference = columns?.physics?.referenceTemperatureKelvin ?: error("Thermal rest needs moist columns")
         require(temperature.all { it.isFinite() && it > 0 })
-        val state = ClimateCirculation.reconstruct(config, reference, temperature, h.sum(), weatherPhase)
+        val state = ClimateCirculation.reconstruct(config, reference, temperature, h.sum(), weatherPhase, seed)
         for (i in h.indices) {
             h[i] = state.depth[i]
             mx[i] = h[i] * state.east[i]; my[i] = h[i] * state.north[i]

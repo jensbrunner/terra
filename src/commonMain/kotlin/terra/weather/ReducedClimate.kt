@@ -24,6 +24,13 @@ internal class ReducedClimate(
     private val pressure = DoubleArray(grid.count)
     private val next = DoubleArray(grid.count)
     private val capacity = DoubleArray(grid.count)
+    private val eastCell = IntArray(grid.count) { it / config.width * config.width + (it % config.width + 1) % config.width }
+    private val northCell = IntArray(grid.count) { if (it / config.width + 1 < config.height) it + config.width else -1 }
+    private val eastPositive = DoubleArray(grid.count)
+    private val eastNegative = DoubleArray(grid.count)
+    private val northPositive = DoubleArray(grid.count)
+    private val northNegative = DoubleArray(grid.count)
+    private val latentResponse = DoubleArray(grid.count)
     private val rain = DoubleArray(grid.count)
     private val fineRain = DoubleArray(fine.cellCount)
     private val fineWeight = DoubleArray(fine.cellCount)
@@ -133,7 +140,11 @@ internal class ReducedClimate(
             val old = atmosphere.surfaceThermalState[i]
             val c = grid.overlap.targetOfSource[i]
             val sat = ColumnThermodynamics.saturationMm(fineAir[i], physics.referenceDryColumnKgM2, fine.gravity, physics)
-            val humidity = (atmosphere.effectiveMoistureMmAt(i) / max(1e-9, sat)).coerceIn(0.0, 1.0)
+            // Evaporation responds to the water-surface vapor deficit, as in the
+            // detailed solver, not relative humidity at the colder cloud level.
+            val surfaceSaturation = physics.referenceDryColumnKgM2 * physics.humidColumnFraction *
+                FastSaturation.mixingRatio(old, physics.referenceDryColumnKgM2 * fine.gravity)
+            val humidity = (min(atmosphere.effectiveMoistureMmAt(i), sat) / max(1e-9, surfaceSaturation)).coerceIn(0.0, 1.0)
             val cloud = ColumnThermodynamics.cloudMm(atmosphere.effectiveMoistureMmAt(i), sat)
             val cover = 1 - exp(-cloud / 0.15)
             val sw = physics.solarPeakWm2 * sun.dailyMeanInputFactor(i / fine.width) *
@@ -234,10 +245,15 @@ internal class ReducedClimate(
             val outgoing = (max(0.0, (east[i] + east[e]) / 2) + max(0.0, -(east[i] + east[w]) / 2) + 2 * exchangeVelocity) / config.dx +
                 (max(0.0, (north[i] + north[n]) / 2) + max(0.0, -(north[i] + north[s]) / 2) + 2 * exchangeVelocity) / config.dy
             rate = max(rate, outgoing)
+            val u = (east[i] + east[e]) / 2
+            val v = if (northCell[i] >= 0) (north[i] + north[n]) / 2 else 0.0
+            eastPositive[i] = max(0.0, u); eastNegative[i] = min(0.0, u)
+            northPositive[i] = max(0.0, v); northNegative[i] = min(0.0, v)
+            latentResponse[i] = physics.latentHeatJkg / coarseCapacity[i]
             val ascent = geography.upliftMetersPerSecond(i, east[i], north[i])
             val residence = min(86400.0, min(config.dx, config.dy) / max(1.0, hypot(east[i], north[i])))
             val convergence = -((east[e] - east[w]) / (2 * config.dx) + (north[n] - north[s]) / (2 * config.dy))
-            val convectiveLift = max(0.0, airTemperatureK[i] - 273.15) * 25.0
+            val convectiveLift = max(0.0, airTemperatureK[i] - 273.15) * 10.0
             val lift = min(2500.0, ascent * residence + max(0.0, convergence) * residence * 1500.0 + convectiveLift)
             capacity[i] = ColumnThermodynamics.saturationMm((airTemperatureK[i] - 0.0065 * lift).coerceAtLeast(180.0),
                 physics.referenceDryColumnKgM2, config.gravity, physics)
@@ -249,25 +265,29 @@ internal class ReducedClimate(
         rain.fill(0.0)
         repeat(transportSteps) {
             water.copyInto(next)
-            for (y in 0 until config.height) for (x in 0 until config.width) {
-                val i = y * config.width + x
-                fun face(j: Int, velocity: Double, distance: Double) {
-                    val amount = (max(0.0, velocity) * water[i] + min(0.0, velocity) * water[j] +
-                        exchangeVelocity * (water[i] - water[j])) * dt / distance
-                    next[i] -= amount; next[j] += amount
+            val zonalStep = dt / config.dx; val meridionalStep = dt / config.dy
+            for (i in water.indices) {
+                val e = eastCell[i]
+                val zonal = (eastPositive[i] * water[i] + eastNegative[i] * water[e] +
+                    exchangeVelocity * (water[i] - water[e])) * zonalStep
+                next[i] -= zonal; next[e] += zonal
+                val n = northCell[i]
+                if (n >= 0) {
+                    val meridional = (northPositive[i] * water[i] + northNegative[i] * water[n] +
+                        exchangeVelocity * (water[i] - water[n])) * meridionalStep
+                    next[i] -= meridional; next[n] += meridional
                 }
-                val e = y * config.width + (x + 1) % config.width
-                face(e, (east[i] + east[e]) / 2, config.dx)
-                if (y + 1 < config.height) face(i + config.width, (north[i] + north[i + config.width]) / 2, config.dy)
             }
             for (i in water.indices) {
                 check(next[i] >= -1e-10) { "Negative transported water: ${next[i]}" }
                 // Latent warming raises the capacity while rain forms, rather than
                 // raining against a stale cold column for an entire seasonal phase.
-                val feedback = capacity[i] * 0.065 * physics.latentHeatJkg / coarseCapacity[i]
-                val condensed = max(0.0, next[i] - capacity[i]) * response / (1 + feedback)
-                capacity[i] *= exp(min(1.0, condensed * physics.latentHeatJkg / coarseCapacity[i] * 0.065))
-                rain[i] += condensed; water[i] = max(0.0, next[i] - condensed)
+                if (next[i] > capacity[i]) {
+                    val feedback = capacity[i] * 0.065 * latentResponse[i]
+                    val condensed = (next[i] - capacity[i]) * response / (1 + feedback)
+                    capacity[i] *= exp(min(1.0, condensed * latentResponse[i] * 0.065))
+                    rain[i] += condensed; water[i] = next[i] - condensed
+                } else water[i] = max(0.0, next[i])
             }
         }
         // Directional fine slopes retain windward/lee differences inside a coarse cell.

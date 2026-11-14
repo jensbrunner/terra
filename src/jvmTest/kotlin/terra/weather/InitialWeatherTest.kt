@@ -1,5 +1,7 @@
 package terra.weather
 
+import terra.atmosphere.SynopticPattern
+
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals

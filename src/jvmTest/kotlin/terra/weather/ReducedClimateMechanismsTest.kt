@@ -11,6 +11,20 @@ class ReducedClimateMechanismsTest {
         regionalStrength = 0.0, detailStrength = 0.0)
 
     @Test
+    fun nativeClimateUsesTheFinerConservativeMesh() {
+        val grid = ClimateGrid(DryAtmosphereConfig())
+        assertEquals(48, grid.config.width)
+        assertEquals(36, grid.config.height)
+        val fine = DoubleArray(grid.fine.cellCount) { 1.0 + (it % 17) }
+        val coarse = DoubleArray(grid.count)
+        grid.restrict(fine, coarse)
+        assertEquals(fine.average(), coarse.average(), 1e-12)
+        val restored = DoubleArray(fine.size)
+        grid.prolongUniform(coarse, restored)
+        assertEquals(fine.average(), restored.average(), 1e-12)
+    }
+
+    @Test
     fun reversingWindReversesTheMountainRainShadowAndTransportConservesWater() {
         fun run(ridge: Boolean, direction: Double): Pair<DoubleArray, DoubleArray> {
             val z = DoubleArray(config.cellCount) { i ->

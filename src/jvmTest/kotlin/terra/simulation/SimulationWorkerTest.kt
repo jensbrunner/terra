@@ -48,8 +48,8 @@ class SimulationWorkerTest {
     @Test
     fun ownerCommitsIdenticalDetailedTransfersAndPublishesImmutableViews() {
         val owner = WorldSimulation(request)
-        fun capture(refreshWater: Boolean = true) = owner.snapshot(SimulationProgress(1, 1, 0, owner.completedSeconds,
-            SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, 920.0, false, 0.0, 0.0, 0), refreshDrainage = refreshWater)
+        fun capture() = owner.snapshot(SimulationProgress(1, 1, 0, owner.completedSeconds,
+            SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, 920.0, false, 0.0, 0.0, 0))
         val initial = capture()
         val initialVapor = initial.weather.atmosphericWaterMm(3, 3)
         val directWorld = World(request.seed, request.width, request.height)
@@ -57,22 +57,18 @@ class SimulationWorkerTest {
         val direct = DynamicalWeather(directWorld, request.atmosphere)
         repeat(4320) {
             assertEquals(20.0, owner.advance(20.0, SimulationSpeed.ONE_HOUR))
-            val advanced = direct.advanceBudgeted(20.0, 1)
+            direct.advanceBudgeted(20.0, 1)
 
         }
-        val heldWater = capture(refreshWater = false)
+        val heldWater = capture()
         assertTrue(heldWater.world === initial.world)
         assertTrue(heldWater.drainage === initial.drainage)
         assertTrue(heldWater.surfaceWater === initial.surfaceWater)
-        assertEquals(0.0, heldWater.drainageCompletedSeconds)
         val final = capture()
         assertTrue(final.weather === heldWater.weather)
-        assertTrue(final.surfaceWater !== initial.surfaceWater)
-        assertEquals(final.progress.completedSeconds, final.drainageCompletedSeconds)
+        assertTrue(final.surfaceWater === initial.surfaceWater)
         assertTrue(capture().surfaceWater === final.surfaceWater)
         assertEquals(86400.0, final.progress.completedSeconds)
-        assertTrue(final.drainage.revision > initial.drainage.revision)
-        assertEquals(1L, initial.drainage.revision)
         assertEquals(final.progress.completedSeconds, final.weather.elapsedSeconds)
         fun fields(model: WeatherModel): List<(Int, Int) -> Double> = listOf(
             model::relativeHumidity, model::cloudCover, model::precipitationMmPerHour,

@@ -113,6 +113,28 @@ class CloudRendererTest {
     }
 
     @Test
+    fun returnToResolvedWeatherResetsClimateTextureWithoutAdvectingTheOldInterval() {
+        val weather = CloudFixture(uniform = true, representative = true)
+        val renderer = CloudRenderer(weather.width, weather.height, 31742)
+        renderer.update(weather)
+        weather.elapsedSeconds = 20 * 365 * 86400.0
+        renderer.update(weather, visualElapsedSeconds = 0.4)
+        // Fidelity can change while paused, at exactly the same physical clock.
+        weather.representative = false
+        assertTrue(renderer.update(weather))
+        val fresh = CloudRenderer(weather.width, weather.height, 31742)
+        fresh.update(weather)
+        for (y in 0 until fresh.frame.height) for (x in 0 until fresh.frame.width)
+            assertEquals(fresh.frame[x, y], renderer.frame[x, y])
+        assertFalse(renderer.update(weather))
+        weather.elapsedSeconds += 1800.0
+        val before = renderer.frame
+        assertTrue(renderer.update(weather))
+        assertTrue((0 until before.height).any { y -> (0 until before.width).any { x ->
+            before[x, y] != renderer.frame[x, y] } })
+    }
+
+    @Test
     fun uniformCloudInputsHaveNoEquatorialVisibilityPenalty() {
         for (representative in listOf(false, true)) {
             val totals = DoubleArray(3)
@@ -177,7 +199,7 @@ class CloudRendererTest {
     }
 }
 
-private class CloudFixture(private val uniform: Boolean = false, private val representative: Boolean = false,
+private class CloudFixture(private val uniform: Boolean = false, var representative: Boolean = false,
     override val width: Int = 96, override val height: Int = 72) : WeatherModel by testWeather(World(31742, width, height)) {
     override val fieldSemantics get() = if (representative)
         WeatherFieldSemantics(WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL, 0.0, 20 * 365 * 86400.0)

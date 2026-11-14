@@ -19,10 +19,14 @@ class FidelityTransitionTest {
         fun capture() = owner.snapshot(SimulationProgress(0, 1, 0, owner.completedSeconds,
             SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, day, false, 0.0, 0.0, 0))
         owner.advance(owner.stepSeconds, SimulationSpeed.ONE_HOUR)
-        val water = capture().diagnostics!!.let { it.totalWaterKg + it.exportedWaterKg }
+        val initial = capture()
+        val water = initial.diagnostics!!.let { it.totalWaterKg + it.exportedWaterKg }
+        assertTrue((0 until initial.world.height).any { y -> (0 until initial.world.width).any { x ->
+            initial.drainage.isLakeTileWet(x, y) } }, "Generated lakes must have visible fixed footprints")
         repeat(12) { owner.advanceClimateInterval(20 * 365 * day) }
         owner.advanceClimateInterval(15 * 365 * day)
         val coarse = capture()
+        assertTrue(initial.drainage === coarse.drainage && initial.surfaceWater === coarse.surfaceWater)
         owner.setFidelity(SimulationFidelity.DETAILED)
         val pending = capture()
         assertEquals(coarse.progress.completedSeconds, pending.progress.completedSeconds)
@@ -32,6 +36,8 @@ class FidelityTransitionTest {
         assertTrue(pending.lastHandoff.maximumWindMetersPerSecond <= 35)
         assertEquals(1L, pending.lastHandoff.physicalStepsAtHandoff)
         assertTrue(pending.weather.hasResolvedDynamics)
+        assertEquals(0.0, pending.weather.fieldSemantics.intervalDurationSeconds)
+        assertTrue(pending.surfaceWater === initial.surfaceWater)
         for (y in 0 until pending.world.height) for (x in 0 until pending.world.width) {
             assertEquals(coarse.weather.soilWaterMm(x, y), pending.weather.soilWaterMm(x, y))
             assertEquals(coarse.weather.surfaceTemperatureC(x, y), pending.weather.surfaceTemperatureC(x, y))
@@ -40,6 +46,20 @@ class FidelityTransitionTest {
         val resolved = capture()
         assertEquals(coarse.progress.completedSeconds + 3600, owner.completedSeconds)
         assertTrue(resolved.weather.hasResolvedDynamics)
+        assertTrue(resolved.surfaceWater === initial.surfaceWater && resolved.drainage === initial.drainage)
+        var pressureChange = 0.0
+        var pressureAmplitude = 0.0
+        var cloud = 0.0
+        for (y in 0 until resolved.world.height step 4) for (x in 0 until resolved.world.width step 4) {
+            val p = resolved.weather.pressureAnomalyPercent(x, y)!!
+            pressureAmplitude += p * p
+            pressureChange += abs(p - pending.weather.pressureAnomalyPercent(x, y)!!)
+            cloud += resolved.weather.cloudWaterMm(x, y)
+            assertEquals(0.0, pending.weather.rainMmThisUpdate(x, y))
+        }
+        assertTrue(pressureAmplitude > 100.0, "Reentry must restore visible pressure disturbances")
+        assertTrue(pressureChange > 1.0, "Pressure systems must evolve after return")
+        assertTrue(cloud > 1.0, "Resolved cloud water must survive the first hour")
         assertTrue(resolved.weather.pressureAnomalyPercent(160, 100)!!.isFinite())
         assertTrue(resolved.weather.relativeVorticityPerSecond(160, 100)!!.isFinite())
         assertEquals(water, resolved.diagnostics!!.let { it.totalWaterKg + it.exportedWaterKg }, water * 1e-10)

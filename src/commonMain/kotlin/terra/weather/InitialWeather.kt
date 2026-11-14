@@ -1,14 +1,11 @@
 package terra.weather
 
 import kotlin.math.floor
-import kotlin.math.abs
-import kotlin.math.sin
+import terra.atmosphere.SynopticPattern
 import terra.atmosphere.DryAtmosphereConfig
 import terra.atmosphere.DryCell
 import terra.atmosphere.DryScenarios
 import terra.atmosphere.DryScenario
-import terra.atmosphere.PlanetLatitude
-import kotlin.math.exp
 
 /** Seeded, longitude-periodic moist/dry air masses and circulation at world creation.
  * No spin-up, time advancement or continuing humidity forcing is hidden here.
@@ -22,26 +19,10 @@ internal class InitialWeather(private val seed: Int, private val config: DryAtmo
      */
     fun flow(x: Double, y: Double): DryCell {
         val base = jet(x, y)
-        var depth = config.meanHeightMeters + (base.heightMeters - config.meanHeightMeters) * 0.18
-        var east = base.eastMetersPerSecond * 0.18
-        var north = base.northMetersPerSecond * 0.18
-        val radius = config.domainWidthMeters * 0.065
-        for (hemisphere in 0..1) for (system in 0..1) {
-            val cx = pattern.centerX(hemisphere, system) * config.domainWidthMeters
-            val cy = pattern.centerNorth(hemisphere, system) * config.domainHeightMeters
-            val dx = x - cx - floor((x - cx) / config.domainWidthMeters + 0.5) * config.domainWidthMeters
-            val dy = y - cy
-            val f = if (config.periodicY) config.coriolisPerSecond else
-                2 * config.rotationRateRadiansPerSecond * sin(PlanetLatitude.radians(pattern.centerNorth(hemisphere, system)))
-            if (abs(f) < 1e-8) continue
-            val amplitude = 28 * abs(f) * radius * exp(0.5) / config.gravity
-            val bell = exp(-(dx * dx + dy * dy) / (2 * radius * radius))
-            depth -= amplitude * bell
-            val gradient = amplitude * bell / (radius * radius)
-            east -= config.gravity / f * gradient * dy
-            north += config.gravity / f * gradient * dx
-        }
-        return DryCell(depth, east, north)
+        val vortex = pattern.flow(config, x, y)
+        return DryCell(vortex.heightMeters + (base.heightMeters - config.meanHeightMeters) * 0.18,
+            vortex.eastMetersPerSecond + base.eastMetersPerSecond * 0.18,
+            vortex.northMetersPerSecond + base.northMetersPerSecond * 0.18)
     }
     // Independent of the low positions: any longitude/latitude can start moist.
     fun moistFraction(east: Double, north: Double, waterAvailability: Double): Double {

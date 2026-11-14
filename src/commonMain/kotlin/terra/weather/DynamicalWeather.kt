@@ -110,6 +110,9 @@ class DynamicalWeather(
         val engine = fastClimate ?: return null
         val handoff = model.initializeFromClimate(engine.completedSeconds, engine.reentryAirTemperatureKelvin())
         fastClimate = null
+        // The reduced interval is over: it is not a detailed rain/animation step.
+        updateSeconds = 0.0
+        surface.beginUpdate()
         lastHandoff = handoff
         refreshSnapshot()
         return handoff

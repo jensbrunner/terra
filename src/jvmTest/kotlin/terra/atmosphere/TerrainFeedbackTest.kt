@@ -17,7 +17,7 @@ class TerrainFeedbackTest {
         val grid = config.copy(geometry = AtmosphereGeometry.PERIODIC_F_PLANE, coriolisPerSecond = 0.0)
         val model = MoistAtmosphere(grid, closed, initializeFlow = { x, _ ->
             DryCell(grid.meanHeightMeters, -15 * kotlin.math.sin(2 * kotlin.math.PI * x / grid.domainWidthMeters), 0.0)
-        }, initializeColumns = { _, _ -> MoistCell(relativeHumidity = 0.998, cloudWaterKgM2 = 0.08) })
+        }, initializeColumns = { _, _ -> MoistCell(relativeHumidity = 0.998, cloudWaterKgM2 = 0.20) })
         val before = model.snapshot()
         model.step()
         val after = model.snapshot()
