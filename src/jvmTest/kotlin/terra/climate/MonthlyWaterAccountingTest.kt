@@ -71,23 +71,25 @@ class MonthlyWaterAccountingTest {
     }
 
     @Test fun calendarMonthHydrologyIsIndependentOfTransactionBoundaries() {
+        for (calendarMonth in listOf(0L, 17L, 1205L))
         for (temperature in listOf(-10.0, 0.5, 20.0)) for (startFraction in listOf(0.0, 0.05, 0.3)) {
             val forcing = atlas(400.0, 500.0, temperature)
             fun initialized() = LandscapeWater(world, tileAreaM2).also { surface ->
                 for (i in land) surface.soil[i] = surface.soilCapacityMm[i] * 0.75
             }
             val monthSeconds = forcing.solar.yearSeconds / 12
+            val month = calendarMonth.mod(12)
             // Independently integrate the visible rate, including a nonzero calendar offset.
             val samples = 4096
             val numerical = (0 until samples).sumOf { sample ->
-                forcing.rainfall.rateMmPerHour(1, 0, (startFraction + (1 - startFraction) * (sample + 0.5) / samples) * monthSeconds)
+                forcing.rainfall.rateMmPerHour(1, 0, (calendarMonth + startFraction + (1 - startFraction) * (sample + 0.5) / samples) * monthSeconds)
             } * (1 - startFraction) * monthSeconds / (samples * 3600)
-            assertEquals(forcing.rainfall.amountMm(0, 1, startFraction, 1.0), numerical, 1e-3)
+            assertEquals(forcing.rainfall.amountMm(month, 1, startFraction, 1.0, calendarMonth), numerical, 1e-3)
             val whole = initialized()
-            val startSeconds = startFraction * monthSeconds
+            val startSeconds = (calendarMonth + startFraction) * monthSeconds
             val duration = (1 - startFraction) * monthSeconds
             ClimateEvolution(world, whole, startSeconds).advance(forcing, duration)
-            assertEquals(forcing.rainfall.amountMm(0, 1, startFraction, 1.0), whole.rain[1], 1e-9)
+            assertEquals(forcing.rainfall.amountMm(month, 1, startFraction, 1.0, calendarMonth), whole.rain[1], 1e-9)
             for (parts in listOf(listOf(0.5, 0.5), listOf(0.03, 0.04, 0.08, 0.22, 0.13, 0.5))) {
                 val split = initialized()
                 val evolution = ClimateEvolution(world, split, startSeconds)

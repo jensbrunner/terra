@@ -45,7 +45,7 @@ internal class ClimateEvolution(private val world: World, private val surface: L
             for (f in fluxes.indices) fluxes[f].copyInto(updateFlux[f])
             surface.restoreClimateState(anchor!!)
             surface.beginUpdate()
-            val nextEvaporation = surface.evolveMonth(atlas, month, endFraction - anchorFraction, anchorFraction)
+            val nextEvaporation = surface.evolveMonth(atlas, month, endFraction - anchorFraction, anchorFraction, monthIndex)
             evaporation += nextEvaporation - prefixEvaporation
             prefixEvaporation = nextEvaporation
             for (f in fluxes.indices) for (i in drought.indices) {

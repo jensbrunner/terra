@@ -6,9 +6,8 @@ import kotlin.math.*
  * envelope vanishes at month boundaries; all nonconstant harmonics integrate to zero.
  * No storm history, numerical quadrature, or visual noise is needed for water budgets. */
 class RainfallDistribution internal constructor(private val atlas: SeasonalClimateAtlas) {
-    private val phases = Array(12) { month -> lazy {
-        DoubleArray(atlas.width * atlas.height) { phase(month, it % atlas.width + 0.5, it / atlas.width + 0.5) }
-    } }
+    private val phaseMonths = LongArray(12) { Long.MIN_VALUE }
+    private val phases = arrayOfNulls<DoubleArray>(12)
     private val seed = atlas.geography.world.seed.toDouble()
     private val windTilt = DoubleArray(12) { m ->
         val u = atlas.east[m].average(); val v = atlas.south[m].average()
@@ -19,12 +18,14 @@ class RainfallDistribution internal constructor(private val atlas: SeasonalClima
     private fun cycles(month: Int) = 4 + (month % 3)
 
     /** Coordinates are in terrain tiles, including fractional positions for rendering. */
-    private fun phase(month: Int, x: Double, y: Double): Double {
+    private fun phase(calendarMonth: Long, x: Double, y: Double): Double {
+        val month = calendarMonth.mod(12)
+        val system = calendarMonth.toDouble()
         val longitude = x / atlas.width * 2 * PI
         val latitude = y / atlas.height
-        val tilt = sin(seed * 0.73 + month * 1.7)
+        val tilt = sin(seed * 0.73 + system * 1.7)
         // A periodic, warped front with a cyclone embedded in each hemisphere.
-        val centerX = seed * 0.17 + month * 2.4
+        val centerX = seed * 0.17 + system * 2.4
         val dx = atan2(sin(longitude - centerX), cos(longitude - centerX))
         val centerY = if (latitude < 0.5) 0.27 else 0.73
         val dy = (latitude - centerY) * 2 * PI
@@ -32,7 +33,7 @@ class RainfallDistribution internal constructor(private val atlas: SeasonalClima
         val spiral = 2 * atan2(dy, dx) + radius * 5
         val cyclone = exp(-radius * radius * 1.8)
         val front = travelDirection[month] * 3 * longitude + latitude * (9 + tilt * 5 + windTilt[month] * 6) +
-            1.8 * sin(longitude * 2 + latitude * 5 + month) + seed
+            1.8 * sin(longitude * 2 + latitude * 5 + system) + seed
         // Blend complex phases, avoiding a branch-cut seam at the cyclone's angle.
         return atan2((1 - cyclone) * sin(front) + cyclone * sin(spiral),
             (1 - cyclone) * cos(front) + cyclone * cos(spiral))
@@ -48,7 +49,7 @@ class RainfallDistribution internal constructor(private val atlas: SeasonalClima
         val fraction = position - whole
         val tileX = floor(x).toInt().mod(atlas.width)
         val tileY = floor(y).toInt().coerceIn(0, atlas.height - 1)
-        val angle = 2 * PI * cycles(month) * fraction + phase(month, x, y)
+        val angle = 2 * PI * cycles(month) * fraction + phase(whole.toLong(), x, y)
         val pulse = 1 + cos(angle)
         val weight = (1 - cos(2 * PI * fraction)) * pulse * pulse * pulse * pulse / MEAN
         return atlas.rain[month][tileY * atlas.width + tileX] * weight * 12 * 3600 / atlas.solar.yearSeconds
@@ -60,9 +61,15 @@ class RainfallDistribution internal constructor(private val atlas: SeasonalClima
 
     internal fun snowFraction(month: Int, tile: Int) = ((1 - atlas.temperature[month][tile]) / 2).coerceIn(0.0, 1.0)
 
-    internal fun amountMm(month: Int, tile: Int, start: Double, end: Double): Double {
+    internal fun amountMm(month: Int, tile: Int, start: Double, end: Double, calendarMonth: Long = month.toLong()): Double {
         if (start == 0.0 && end == 1.0) return atlas.rain[month][tile]
-        val phase = phases[month].value[tile]
+        if (phaseMonths[month] != calendarMonth) {
+            phases[month] = DoubleArray(atlas.width * atlas.height) {
+                phase(calendarMonth, it % atlas.width + 0.5, it / atlas.width + 0.5)
+            }
+            phaseMonths[month] = calendarMonth
+        }
+        val phase = phases[month]!![tile]
         return atlas.rain[month][tile] * (integral(month, phase, end) - integral(month, phase, start)).coerceAtLeast(0.0)
     }
 

@@ -229,7 +229,7 @@ class TerrainMapView(
                 weatherTime = frame.seconds
             }
         }
-        if (weatherJob != null || weatherAge < 0.12 || weatherTime == seconds) return
+        if (weatherJob != null || weatherAge < 0.12 || abs(weatherTime - seconds) < 30.0) return
         weatherAge = 0.0
         val rasterWidth = weatherWidth; val rasterHeight = weatherHeight
         weatherJob = renderScope.async(Dispatchers.Default) {
@@ -240,9 +240,11 @@ class TerrainMapView(
             for (y in 0 until rasterHeight) {
                 ensureActive()
                 for (x in 0 until rasterWidth) {
-                    val sample = field.sample((x + 0.5) * atlas.width / rasterWidth, (y + 0.5) * atlas.height / rasterHeight)
+                    val tileX = (x + 0.5) * atlas.width / rasterWidth
+                    val tileY = (y + 0.5) * atlas.height / rasterHeight
+                    val sample = field.sample(tileX, tileY)
                     density[y * rasterWidth + x] = sample.cloud.toFloat()
-                    val snow = atlas.rainfall.snowFraction(x * atlas.width / rasterWidth, y * atlas.height / rasterHeight, seconds)
+                    val snow = atlas.rainfall.snowFraction(tileX.toInt(), tileY.toInt(), seconds)
                     rain[x, y] = precipitationColor(sample.precipitation, snow).withA((precipitationOpacity(sample.precipitation) * 255).toInt())
                 }
             }
