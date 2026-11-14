@@ -13,8 +13,8 @@ internal class ClimateEvolution(private val world: World, private val surface: L
     var completedSeconds = startSeconds
         private set
     private val drought = surface.climateDrought
-    // Re-evaluate a partial month's prefix from one anchor. Routing and root uptake
-    // are nonlinear too, so merely moving the rain pulse does not ensure invariance.
+    // Re-evaluate a partial month's prefix from one anchor so nonlinear routing
+    // and root uptake remain independent of transaction boundaries.
     private var anchor: LandscapeWater.ClimateState? = null
     private var anchorAtlas: SeasonalClimateAtlas? = null
     private var anchorMonth = Long.MIN_VALUE
@@ -45,7 +45,7 @@ internal class ClimateEvolution(private val world: World, private val surface: L
             for (f in fluxes.indices) fluxes[f].copyInto(updateFlux[f])
             surface.restoreClimateState(anchor!!)
             surface.beginUpdate()
-            val nextEvaporation = surface.evolveMonth(atlas, month, endFraction - anchorFraction, anchorFraction, monthIndex)
+            val nextEvaporation = surface.evolveMonth(atlas, month, endFraction - anchorFraction, anchorFraction)
             evaporation += nextEvaporation - prefixEvaporation
             prefixEvaporation = nextEvaporation
             for (f in fluxes.indices) for (i in drought.indices) {

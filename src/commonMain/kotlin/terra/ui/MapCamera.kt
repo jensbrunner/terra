@@ -4,10 +4,14 @@ import kotlin.math.floor
 
 /** Viewport-local camera. Small maps stay centered; enlarged maps retain reachable edges. */
 internal class MapCamera(
-    val viewportWidth: Double, val viewportHeight: Double,
+    viewportWidth: Double, viewportHeight: Double,
     val mapWidth: Int, val mapHeight: Int
 ) {
-    val fitScale = minOf(viewportWidth / mapWidth, viewportHeight / mapHeight)
+    var viewportWidth = viewportWidth
+        private set
+    var viewportHeight = viewportHeight
+        private set
+    val fitScale get() = minOf(viewportWidth / mapWidth, viewportHeight / mapHeight)
     var scale = fitScale
         private set
     var x = 0.0
@@ -20,7 +24,23 @@ internal class MapCamera(
         home()
     }
 
-    fun home() { scale = fitScale; moveTo(0.0, 0.0) }
+    fun resize(width: Double, height: Double) {
+        val fitted = kotlin.math.abs(scale - fitScale) < 1e-6 ||
+            kotlin.math.abs(scale - maxOf(viewportWidth / mapWidth, viewportHeight / mapHeight)) < 1e-6
+        val centerX = (viewportWidth / 2 - x) / scale
+        val centerY = (viewportHeight / 2 - y) / scale
+        val zoom = scale / fitScale
+        viewportWidth = width; viewportHeight = height
+        if (fitted) home(fill = true) else {
+            scale = fitScale * zoom
+            moveTo(width / 2 - centerX * scale, height / 2 - centerY * scale)
+        }
+    }
+
+    fun home(fill: Boolean = false) {
+        scale = if (fill) maxOf(viewportWidth / mapWidth, viewportHeight / mapHeight) else fitScale
+        moveTo((viewportWidth - mapWidth * scale) / 2, (viewportHeight - mapHeight * scale) / 2)
+    }
 
     fun moveTo(left: Double, top: Double) {
         fun bound(offset: Double, extent: Double, viewport: Double) =

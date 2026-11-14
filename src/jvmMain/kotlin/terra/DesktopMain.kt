@@ -1,6 +1,7 @@
 package terra
 
 import korlibs.image.color.Colors
+import korlibs.korge.KorgeDisplayMode
 import korlibs.korge.Korge
 import korlibs.korge.scene.sceneContainer
 import korlibs.math.geom.Size
@@ -12,6 +13,7 @@ import javax.swing.JFrame
 
 suspend fun main() {
     Korge(
+        displayMode = KorgeDisplayMode.TOP_LEFT_NO_CLIP,
         windowSize = Size(WINDOW_WIDTH.toInt(), WINDOW_HEIGHT.toInt()),
         backgroundColor = Colors["#0d1719"]
     ) {

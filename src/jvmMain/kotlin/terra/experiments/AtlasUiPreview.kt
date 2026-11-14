@@ -5,17 +5,19 @@ import java.io.File
 import javax.imageio.ImageIO
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import korlibs.korge.KorgeDisplayMode
 import korlibs.korge.Korge
 import korlibs.korge.scene.sceneContainer
 import korlibs.korge.view.renderToBitmap
-import korlibs.math.geom.Rectangle
 import korlibs.math.geom.Size
 import terra.ui.AtlasScene
 import kotlin.system.exitProcess
 
 /** Opt-in export of actual game views for visual review; not run during ordinary play. */
 suspend fun main() {
-    Korge(windowSize = Size(1440, 960)) {
+    val dimensions = System.getProperty("terra.uiReviewSize", "1440x960").split('x').map(String::toInt)
+    val size = Size(dimensions[0], dimensions[1])
+    Korge(windowSize = size, displayMode = KorgeDisplayMode.TOP_LEFT_NO_CLIP) {
         val output = File("build/reports/ui").apply { mkdirs() }
         val previewViews = views
         sceneContainer().changeTo {
@@ -25,7 +27,7 @@ suspend fun main() {
                         val states = System.getProperty("terra.uiReviewStates", "overview,inspection,details,speed,settings,advanced-settings,settings-edited,help").split(',')
                         for (state in states) {
                             scene.prepareUiReview(state)
-                            val bitmap = root.renderToBitmap(previewViews, Rectangle(0, 0, 1440, 960))
+                            val bitmap = root.renderToBitmap(previewViews, previewViews.bp.actualVirtualBounds)
                             val image = BufferedImage(bitmap.width, bitmap.height, BufferedImage.TYPE_INT_ARGB)
                             for (y in 0 until bitmap.height) for (x in 0 until bitmap.width) {
                                 val pixel = bitmap[x, y]

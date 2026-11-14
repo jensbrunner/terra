@@ -55,7 +55,7 @@ class ProceduralWeather(private val atlas: SeasonalClimateAtlas, val elapsedSeco
         // Multiplying today's wind by absolute time would make season changes teleport clouds.
         // Overlapping flow windows bound shear even after centuries. Each window
         // uses its own seed and fades in/out with zero slope at the handoff.
-        var broad = 0.0; var detail = 0.0
+        var detail = 0.0
         for (packetIndex in 0..1) {
             val packet = flowWindow - 1 + packetIndex
             val weight = if (packetIndex == 1) flowBlend else 1 - flowBlend
@@ -65,11 +65,9 @@ class ProceduralWeather(private val atlas: SeasonalClimateAtlas, val elapsedSeco
             val b = noise(nx, ny, 18, days / 7, 11 xor salt)
             val c = noise(nx + 90 * b, ny + 65 * b, 54, days / 2.5, 23 xor salt)
             val f = noise(nx + 40 * c, ny, 150, days / 1.2, 37 xor salt)
-            broad += b * weight
             detail += (0.55 * b + 0.30 * c + 0.15 * f) * weight
         }
         val precipitation = atlas.rainfall.rateMmPerHour(x, y, elapsedSeconds)
-        val lifting = 1 - exp(-precipitation * 0.8)
         val west = atlas.geography.tileElevation[ty * width + (tx + width - 1) % width]
         val east = atlas.geography.tileElevation[ty * width + (tx + 1) % width]
         val north = atlas.geography.tileElevation[max(0, ty - 1) * width + tx]
@@ -77,12 +75,9 @@ class ProceduralWeather(private val atlas: SeasonalClimateAtlas, val elapsedSeco
         val ascent = u * (east - west) / (2 * config.domainWidthMeters / width) +
             v * (south - north) / (2 * config.domainHeightMeters / height)
         val terrainLift = (ascent * 1.5).coerceIn(-0.06, 0.12)
-        val density = detail + wet * 0.50 + lifting * 0.65 + terrainLift - 0.60
-        val cloud = max(smooth(0.0, 0.55, density),
-            smooth(0.0, 0.15, precipitation) * (0.60 + 0.25 * detail + 0.15 * lifting))
-        return Sample(cloud, precipitation,
-            (wet + cloud * 0.16 + lifting * 0.12 - (1 - detail) * 0.08).coerceIn(0.0, 1.0),
-            temp + (broad - 0.5) * 3 - lifting * 2.5)
+        val density = detail + wet * 0.50 + terrainLift - 0.60
+        val cloud = smooth(0.0, 0.55, density)
+        return Sample(cloud, precipitation, wet, temp)
     }
 
     private fun interpolate(field: Array<DoubleArray>, i: Int) = interpolate(field, i % width + 0.5, i / width + 0.5)

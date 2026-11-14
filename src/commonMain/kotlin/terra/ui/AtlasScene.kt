@@ -46,6 +46,17 @@ class AtlasScene(
     private val weather: EnvironmentSnapshot get() = presentation!!.weather
     private val worldReady get() = presentation != null
     private lateinit var terrainTextures: Map<Terrain, Bitmap32>
+    private lateinit var background: View
+    private lateinit var headerBackground: View
+    private lateinit var headerActions: Container
+    private lateinit var footerBackground: View
+    private lateinit var layerPanel: Container
+    private lateinit var inspectorPanel: Container
+    private lateinit var inspectorBackground: View
+    private lateinit var helpShade: View
+    private lateinit var helpContent: Container
+    private var layoutWidth = 0.0
+    private var layoutHeight = 0.0
     private lateinit var mapLayer: Container
     private lateinit var mapViewport: FixedSizeContainer
     private lateinit var mapView: TerrainMapView
@@ -92,7 +103,7 @@ class AtlasScene(
 
     override suspend fun SContainer.sceneMain() {
         uiFont = SystemFont.getDefaultFont()
-        solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, AtlasUi.background)
+        background = solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, AtlasUi.background)
         mapViewport = fixedSizeContainer(Size(camera.viewportWidth, camera.viewportHeight), clip = true).xy(16.0, 92.0)
         mapLayer = mapViewport.container { }
         terrainTextures = loadTerrainTextures()
@@ -110,6 +121,7 @@ class AtlasScene(
         settingsPanel.updateBiomeSummary(presentation?.world?.landBiomeSummary() ?: "Generating world…")
         drawFrameTimeCounter()
         drawHelp()
+        layoutWindow()
         applyMapTransform()
 
         mapViewport.keys {
@@ -128,6 +140,7 @@ class AtlasScene(
         }
 
         mapViewport.addUpdater { _ ->
+            layoutWindow()
             val frameTime = TimeSource.Monotonic.markNow()
             val realSeconds = (frameTime - previousFrameTime).inWholeNanoseconds / 1e9
             previousFrameTime = frameTime
@@ -207,6 +220,32 @@ class AtlasScene(
         }
     }
 
+    private fun layoutWindow() {
+        val bounds = views.bp.actualVirtualBounds
+        val width = bounds.width
+        val height = bounds.height
+        if (width == layoutWidth && height == layoutHeight) return
+        layoutWidth = width; layoutHeight = height
+        background.width = width; background.height = height
+        headerBackground.width = width - 32
+        headerActions.x = width - WINDOW_WIDTH
+        layerPanel.x = width - 344
+        inspectorPanel.x = width - 344
+        inspectorBackground.height = height - 510
+        legendPanel.x = width - 328
+        footerBackground.width = width; footerBackground.y = height - 40
+        footerLabel.y = height - 26
+        frameTimeLabel.xy(width - 184, height - 26)
+        windLegendPanel.y = height - 144
+        mapViewport.unscaledSize = Size(width - 376, height - 144)
+        mapViewport.invalidateRender()
+        camera.resize(width - 376, height - 144)
+        helpShade.width = width; helpShade.height = height
+        helpContent.xy((width - 800) / 2, (height - 550) / 2)
+        settingsPanel.resize(width, height)
+        applyMapTransform()
+    }
+
     override suspend fun sceneDestroy() {
         simulation.close()
         super.sceneDestroy()
@@ -215,7 +254,7 @@ class AtlasScene(
     private fun SContainer.drawSimulationControls() {
         calendarLabel = atlasText(uiFont, "Generating world…", 224.0, 27.0, 18.0)
         simulationLabel = atlasText(uiFont, "", 224.0, 53.0, 12.0, muted = true)
-        solidRect(WINDOW_WIDTH, 40.0, AtlasUi.panel).xy(0.0, 920.0)
+        footerBackground = solidRect(WINDOW_WIDTH, 40.0, AtlasUi.panel).xy(0.0, 920.0)
         footerLabel = atlasText(uiFont, "", 276.0, 934.0, 11.0, muted = true)
     }
 
@@ -235,9 +274,8 @@ class AtlasScene(
             else -> {
                 val p = snapshot.progress
                 calendarLabel.text = SimulationDisplayText.date(p.completedSeconds, snapshot.yearSeconds)
-                val mode = "Seasonal climate atlas"
                 val state = if (paused && !p.paused) "Pausing…" else if (p.paused) "Paused" else if (p.rateLimited) "Catching up" else "Running"
-                simulationLabel.text = "$mode  /  $state"
+                simulationLabel.text = "${SimulationDisplayText.clock(p.completedSeconds)}   ·   $state"
                 footerLabel.text = buildList {
                     add(if (p.paused) "Paused" else "Actual ${SimulationDisplayText.rate(p.achievedSecondsPerWallSecond, snapshot.yearSeconds)}")
                     add("Monthly prevailing winds · climate means")
@@ -252,8 +290,8 @@ class AtlasScene(
     }
 
     private fun SContainer.drawSelectionPanel() {
-        container {
-            atlasCard(328.0, 450.0)
+        inspectorPanel = container {
+            inspectorBackground = atlasCard(328.0, 450.0)
             atlasText(uiFont, "TILE INSPECTOR", 16.0, 18.0, 12.0, muted = true)
             inspectorHeader = atlasText(uiFont, "Explore the map", 16.0, 48.0, 23.0)
             inspectorContext = atlasText(uiFont, "Select a tile to see its conditions.", 16.0, 82.0, 12.0, muted = true)
@@ -334,8 +372,8 @@ class AtlasScene(
     private fun SContainer.drawHelp() {
         helpPanel = container {
             visible = false
-            solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, AtlasUi.background.withA(225))
-            container {
+            helpShade = solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, AtlasUi.background.withA(225))
+            helpContent = container {
                 atlasCard(800.0, 550.0)
                 atlasText(uiFont, "Controls & climate", 28.0, 28.0, 25.0)
                 AtlasButton(this, uiFont, "Close", 688.0, 24.0, 84.0) { helpPanel.visible = false }
@@ -475,30 +513,32 @@ class AtlasScene(
 
     private fun SContainer.drawControls() {
         container {
-            atlasCard(1408.0, 64.0)
+            headerBackground = atlasCard(1408.0, 64.0)
             atlasText(uiFont, "TERRA", 16.0, 10.0, 23.0).color = AtlasUi.accent
             atlasText(uiFont, "PLANET EXPLORER", 17.0, 40.0, 10.0, muted = true)
         }.xy(16.0, 16.0)
-        pauseButton = AtlasButton(this, uiFont, "Pause", 754.0, 28.0, 90.0) { togglePause() }
-        pauseLabel = pauseButton.caption
-        slowerButton = AtlasButton(this, uiFont, "−", 852.0, 28.0, 36.0) { cycleSpeed(-1) }
-        speedLabel = AtlasButton(this, uiFont, simulationSpeed.label + " ▾", 896.0, 28.0, 142.0) {
-            speedMenu.visible = !speedMenu.visible
-            if (speedMenu.visible) { refreshSpeedButtons(); speedMenu.parent?.sendChildToFront(speedMenu) }
-        }.caption
-        fasterButton = AtlasButton(this, uiFont, "+", 1046.0, 28.0, 36.0) { cycleSpeed(1) }
-        AtlasButton(this, uiFont, "Home", 1096.0, 28.0, 72.0) { camera.home(); applyMapTransform() }
-        AtlasButton(this, uiFont, "Settings", 1176.0, 28.0, 128.0) { settingsPanel.toggle() }
-        AtlasButton(this, uiFont, "Help", 1312.0, 28.0, 96.0) { toggleHelp() }
-        speedMenu = container { visible = false }.xy(896.0, 76.0)
-        speedMenu.atlasCard(186.0, 336.0)
-        speedMenu.atlasText(uiFont, "TIME PER SECOND", 12.0, 12.0, 11.0, muted = true)
-        SimulationSpeed.entries.forEachIndexed { index, speed ->
-            speedChoices[speed] = AtlasButton(speedMenu, uiFont, speed.label, 8.0, 36 + index * 36.0, 170.0, 32.0) {
-                selectSpeed(speed); speedMenu.visible = false
+        headerActions = container {
+            pauseButton = AtlasButton(this, uiFont, "Pause", 754.0, 28.0, 90.0) { togglePause() }
+            pauseLabel = pauseButton.caption
+            slowerButton = AtlasButton(this, uiFont, "−", 852.0, 28.0, 36.0) { cycleSpeed(-1) }
+            speedLabel = AtlasButton(this, uiFont, simulationSpeed.label + " ▾", 896.0, 28.0, 142.0) {
+                speedMenu.visible = !speedMenu.visible
+                if (speedMenu.visible) { refreshSpeedButtons(); speedMenu.parent?.sendChildToFront(speedMenu) }
+            }.caption
+            fasterButton = AtlasButton(this, uiFont, "+", 1046.0, 28.0, 36.0) { cycleSpeed(1) }
+            AtlasButton(this, uiFont, "Home", 1096.0, 28.0, 72.0) { camera.home(); applyMapTransform() }
+            AtlasButton(this, uiFont, "Settings", 1176.0, 28.0, 128.0) { settingsPanel.toggle() }
+            AtlasButton(this, uiFont, "Help", 1312.0, 28.0, 96.0) { toggleHelp() }
+            speedMenu = container { visible = false }.xy(896.0, 76.0)
+            speedMenu.atlasCard(186.0, 336.0)
+            speedMenu.atlasText(uiFont, "TIME PER SECOND", 12.0, 12.0, 11.0, muted = true)
+            SimulationSpeed.entries.forEachIndexed { index, speed ->
+                speedChoices[speed] = AtlasButton(speedMenu, uiFont, speed.label, 8.0, 36 + index * 36.0, 170.0, 32.0) {
+                    selectSpeed(speed); speedMenu.visible = false
+                }
             }
         }
-        container {
+        layerPanel = container {
             atlasCard(328.0, 350.0)
             atlasText(uiFont, "MAP LAYERS", 16.0, 18.0, 12.0, muted = true)
             AtlasButton(this, uiFont, "Clear all", 232.0, 12.0, 80.0, 28.0) {
@@ -584,7 +624,7 @@ class AtlasScene(
             else -> null
         }
         if (state == "wind-zoom") { camera.home(); zoomBy(3.0, camera.viewportWidth / 2, camera.viewportHeight / 2) }
-        else { camera.home(); applyMapTransform() }
+        else { camera.home(fill = state == "overview"); applyMapTransform() }
         if (previewLayer != null) {
             activeOverlays.clear()
             activeOverlays.add(previewLayer)

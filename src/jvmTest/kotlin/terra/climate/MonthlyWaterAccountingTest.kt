@@ -84,12 +84,12 @@ class MonthlyWaterAccountingTest {
             val numerical = (0 until samples).sumOf { sample ->
                 forcing.rainfall.rateMmPerHour(1, 0, (calendarMonth + startFraction + (1 - startFraction) * (sample + 0.5) / samples) * monthSeconds)
             } * (1 - startFraction) * monthSeconds / (samples * 3600)
-            assertEquals(forcing.rainfall.amountMm(month, 1, startFraction, 1.0, calendarMonth), numerical, 1e-3)
+            assertEquals(forcing.rainfall.amountMm(month, 1, startFraction, 1.0), numerical, 1e-3)
             val whole = initialized()
             val startSeconds = (calendarMonth + startFraction) * monthSeconds
             val duration = (1 - startFraction) * monthSeconds
             ClimateEvolution(world, whole, startSeconds).advance(forcing, duration)
-            assertEquals(forcing.rainfall.amountMm(month, 1, startFraction, 1.0, calendarMonth), whole.rain[1], 1e-9)
+            assertEquals(forcing.rainfall.amountMm(month, 1, startFraction, 1.0), whole.rain[1], 1e-9)
             for (parts in listOf(listOf(0.5, 0.5), listOf(0.03, 0.04, 0.08, 0.22, 0.13, 0.5))) {
                 val split = initialized()
                 val evolution = ClimateEvolution(world, split, startSeconds)

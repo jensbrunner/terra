@@ -28,6 +28,7 @@ class TerrainSettingsPanel(
     private var tab = 0
     private val tabs = mutableListOf<AtlasButton>()
     private val overlay = parent.container { visible = false }
+    private val shade: View
     private val panel: Container
     private val content: Container
     private val pending: Text
@@ -36,7 +37,7 @@ class TerrainSettingsPanel(
     private val discard: AtlasButton
 
     init {
-        overlay.solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, AtlasUi.background.withA(225))
+        shade = overlay.solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, AtlasUi.background.withA(225))
         panel = overlay.container { }.xy(300.0, 120.0)
         panel.atlasCard(840.0, 720.0)
         panel.atlasText(font, "World settings", 28.0, 24.0, 25.0)
@@ -62,6 +63,11 @@ class TerrainSettingsPanel(
         }
         renderTab()
         refreshPendingChanges()
+    }
+
+    fun resize(width: Double, height: Double) {
+        shade.width = width; shade.height = height
+        panel.xy((width - 840) / 2, (height - 720) / 2)
     }
 
     fun hasOpenMenu(): Boolean = overlay.visible

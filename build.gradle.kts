@@ -46,6 +46,7 @@ tasks.register<JavaExec>("atlasUiPreview") {
     mainClass.set("terra.experiments.AtlasUiPreviewKt")
     classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
     jvmArgs((tasks.named("runJvm").get() as JavaExec).jvmArgs)
+    systemProperty("terra.uiReviewSize", providers.gradleProperty("uiReviewSize").orElse("1440x960").get())
     systemProperty("terra.uiReviewStates", providers.gradleProperty("uiReviewStates")
         .orElse("overview,inspection,details,speed,settings,advanced-settings,settings-edited,help").get())
 }

@@ -50,10 +50,7 @@ internal class LandscapeWater(private val world: World, val tileAreaM2: Double) 
      * their boundary ledger and update totals keeps them out of live diagnostics. */
     internal fun initializeClimate(atlas: SeasonalClimateAtlas) {
         soil.fill(0.0)
-        repeat(HYDROLOGY_SPINUP_YEARS) { year ->
-            for (month in 0..11) evolveMonth(atlas, month, 1.0,
-                calendarMonth = ((year - HYDROLOGY_SPINUP_YEARS) * 12 + month).toLong())
-        }
+        repeat(HYDROLOGY_SPINUP_YEARS) { for (month in 0..11) evolveMonth(atlas, month, 1.0) }
         val orbitalMonth = (atlas.solar.initialYearFraction % 1.0) * 12
         val month = orbitalMonth.toInt()
         for (m in 0 until month) evolveMonth(atlas, m, 1.0)
@@ -62,16 +59,16 @@ internal class LandscapeWater(private val world: World, val tileAreaM2: Double) 
         beginUpdate()
     }
 
-    /** Integrate the same traveling precipitation field used by the renderer. */
+    /** Integrate the same monthly precipitation used by the renderer. */
     internal fun evolveMonth(atlas: SeasonalClimateAtlas, month: Int, fraction: Double,
-        startFraction: Double = 0.0, calendarMonth: Long = month.toLong()): Double {
+        startFraction: Double = 0.0): Double {
         var evaporated = 0.0
         val days = fraction * atlas.solar.yearSeconds / (12 * 86400)
         val growthMemory = -expm1(-fraction / 6)
         val droughtMemory = -expm1(-fraction / 24)
         val drainageDecay = exp(-days * 86400 / DRAINAGE_SECONDS)
         for (i in 0 until count) {
-            val amount = atlas.rainfall.amountMm(month, i, startFraction, (startFraction + fraction).coerceAtMost(1.0), calendarMonth)
+            val amount = atlas.rainfall.amountMm(month, i, startFraction, (startFraction + fraction).coerceAtMost(1.0))
             rain[i] += amount
             if (!land[i]) continue
             val temperature = atlas.temperature[month][i]
