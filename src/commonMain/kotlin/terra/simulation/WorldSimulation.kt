@@ -14,7 +14,7 @@ data class TerrainElevationEdit(val x: Int, val y: Int, val elevation: Double)
 data class WorldRequest(
     val generation: Long = 0, val seed: Int = 31742, val width: Int = 283, val height: Int = 212,
     val terrain: TerrainGenerationSettings = TerrainGenerationSettings(),
-    val climate: ClimateConfig = ClimateConfig(), val solar: SolarConfig = SolarConfig()
+    val climate: ClimateConfig = ClimateConfig(width = width, height = height), val solar: SolarConfig = SolarConfig()
 )
 
 data class SimulationProgress(

@@ -87,7 +87,7 @@ class TerrainMapView(
                     val pixelsPerTile = 1
                     scaleX = 1.0 / pixelsPerTile
                     scaleY = 1.0 / pixelsPerTile
-                    smoothing = layer == ClimateLayer.DAY_NIGHT || layer == ClimateLayer.CLIMATE_RAIN || layer == ClimateLayer.ANNUAL_PRECIPITATION || layer == ClimateLayer.ARIDITY || layer == ClimateLayer.MEAN_TEMPERATURE
+                    smoothing = layer == ClimateLayer.CLOUDS || layer == ClimateLayer.PRECIPITATION || layer == ClimateLayer.DAY_NIGHT || layer == ClimateLayer.CLIMATE_RAIN || layer == ClimateLayer.ANNUAL_PRECIPITATION || layer == ClimateLayer.ARIDITY || layer == ClimateLayer.MEAN_TEMPERATURE
                     alpha = 0.0
                 }
             }

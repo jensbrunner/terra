@@ -281,6 +281,10 @@ class AtlasScene(
                     legendPanel.atlasText(uiFont, "Wind speed · m/s", 0.0, 0.0, 12.0)
                     legendPanel.atlasText(uiFont, "Length and colour show speed. Key on the map.", 0.0, 24.0, 11.0, muted = true)
                 }
+                ClimateLayer.CLOUDS in activeOverlays -> {
+                    legendPanel.atlasText(uiFont, "Cloud cover", 0.0, 0.0, 12.0)
+                    legendPanel.atlasText(uiFont, "White shading shows cloud density.", 0.0, 24.0, 11.0, muted = true)
+                }
                 ClimateLayer.DAY_NIGHT in activeOverlays -> {
                     legendPanel.atlasText(uiFont, "Day and night", 0.0, 0.0, 12.0)
                     legendPanel.atlasText(uiFont, "Dark shading marks night; edges show twilight.", 0.0, 24.0, 11.0, muted = true)
@@ -422,7 +426,7 @@ class AtlasScene(
         if (inspectorDetailed) {
             selectionLabel.text = "Seasonal climate atlas\nUpdate covers ${SimulationDisplayText.duration(weather.updateSeconds, presentation!!.yearSeconds)}\n" +
                 "Rain total   ${formatNumber(weather.rainMmThisUpdate(tx, ty), 3)} mm\n" +
-                "Monthly mean rate   ${formatNumber(weather.precipitationMmPerHour(tx, ty), 3)} mm/h\n" +
+                "Current rain rate   ${formatNumber(weather.precipitationMmPerHour(tx, ty), 3)} mm/h\n" +
                 "Wind speed   ${formatNumber(weather.windSpeedMetersPerSecond(tx, ty), 1)} m/s\n" +
                 "Monthly rain   ${formatNumber(weather.monthlyClimateRainMm(tx, ty), 0)} mm/month\n" +
                 "Annual rain   ${formatNumber(weather.annualizedRainMmPerYear(tx, ty), 0)} mm/year\n\n" +
@@ -491,7 +495,7 @@ class AtlasScene(
             }
             atlasText(uiFont, "Colour overlay", 16.0, 52.0, 12.0, muted = true)
             climateLayerGroup = container {
-                listOf(ClimateLayer.HUMIDITY to "1  Humidity", ClimateLayer.PRECIPITATION to "3  Mean rain rate",
+                listOf(ClimateLayer.HUMIDITY to "1  Humidity", ClimateLayer.PRECIPITATION to "3  Rain rate",
                     ClimateLayer.TEMPERATURE to "5  Temperature",
                     ClimateLayer.CLIMATE_RAIN to "4  Monthly rain", ClimateLayer.ANNUAL_PRECIPITATION to "6  Annual rainfall",
                     ClimateLayer.ARIDITY to "Q  Aridity", ClimateLayer.MEAN_TEMPERATURE to "T  Mean temp")
@@ -500,7 +504,7 @@ class AtlasScene(
                         76 + index / 2 * 40.0, 144.0) { toggleLayer(layer) }
                 }
             }
-            listOf(ClimateLayer.WIND to "9 Wind", ClimateLayer.DAY_NIGHT to "8 Light")
+            listOf(ClimateLayer.CLOUDS to "2 Clouds", ClimateLayer.WIND to "9 Wind", ClimateLayer.DAY_NIGHT to "8 Light")
                 .forEachIndexed { index, (layer, label) ->
                     layerButtons[layer] = AtlasButton(this, uiFont, label, 16 + index * 102.0, 236.0, 94.0, 32.0) { toggleLayer(layer) }
                 }
@@ -556,6 +560,7 @@ class AtlasScene(
         if (!paused) togglePause()
         helpPanel.visible = false; settingsPanel.closeMenus(); speedMenu.visible = false
         val previewLayer = when (state) {
+            "clouds" -> ClimateLayer.CLOUDS
             "humidity" -> ClimateLayer.HUMIDITY
             "rain" -> ClimateLayer.PRECIPITATION
             "30-day-rain", "monthly-rain" -> ClimateLayer.CLIMATE_RAIN

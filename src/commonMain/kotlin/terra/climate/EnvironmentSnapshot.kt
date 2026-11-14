@@ -11,10 +11,12 @@ class EnvironmentSnapshot internal constructor(
     val width = atlas.width
     val height = atlas.height
     private val month = atlas.monthAt(elapsedSeconds)
+    private val weather by lazy { ProceduralWeather(atlas, elapsedSeconds) }
     private val sunlight = PlanetarySunlight(width, height, atlas.solar, northUp = false).also { it.update(elapsedSeconds) }
     private fun i(x: Int, y: Int) = y * width + x
-    fun relativeHumidity(x: Int, y: Int) = atlas.relativeHumidity(month, i(x, y))
-    fun precipitationMmPerHour(x: Int, y: Int) = monthlyClimateRainMm(x, y) * 3600 / (atlas.solar.yearSeconds / 12)
+    fun relativeHumidity(x: Int, y: Int) = weather.relativeHumidity(x, y)
+    fun cloudCover(x: Int, y: Int) = weather.cloudCover(x, y)
+    fun precipitationMmPerHour(x: Int, y: Int) = weather.precipitationMmPerHour(x, y)
     fun rainMmThisUpdate(x: Int, y: Int) = rain[i(x, y)]
     fun drainageMmThisUpdate(x: Int, y: Int) = drainage[i(x, y)]
     fun overflowMmThisUpdate(x: Int, y: Int) = overflow[i(x, y)]
@@ -22,10 +24,10 @@ class EnvironmentSnapshot internal constructor(
     fun climateAridity(x: Int, y: Int) = atlas.aridity(i(x, y))
     fun meanClimateTemperatureC(x: Int, y: Int) = atlas.meanTemperature[i(x, y)]
     fun annualizedRainMmPerYear(x: Int, y: Int) = atlas.annualRainfallMm(i(x, y))
-    fun temperatureC(x: Int, y: Int) = atlas.temperatureC(month, i(x, y))
-    fun windUTilesPerDay(x: Int, y: Int) = atlas.windEastMetersPerSecond(month, i(x, y)) * 86400 * width / atlas.geography.config.domainWidthMeters
-    fun windVTilesPerDay(x: Int, y: Int) = atlas.windSouthMetersPerSecond(month, i(x, y)) * 86400 * height / atlas.geography.config.domainHeightMeters
-    fun windSpeedMetersPerSecond(x: Int, y: Int) = hypot(atlas.windEastMetersPerSecond(month, i(x, y)), atlas.windSouthMetersPerSecond(month, i(x, y)))
+    fun temperatureC(x: Int, y: Int) = weather.temperatureC(x, y)
+    fun windUTilesPerDay(x: Int, y: Int) = weather.windEastMetersPerSecond(x, y) * 86400 * width / atlas.geography.config.domainWidthMeters
+    fun windVTilesPerDay(x: Int, y: Int) = weather.windSouthMetersPerSecond(x, y) * 86400 * height / atlas.geography.config.domainHeightMeters
+    fun windSpeedMetersPerSecond(x: Int, y: Int) = hypot(weather.windEastMetersPerSecond(x, y), weather.windSouthMetersPerSecond(x, y))
     fun nightOpacity(x: Int, y: Int) = sunlight.nightOpacity(x, y)
     fun snowWaterMm(x: Int, y: Int) = snow[i(x, y)]
     fun soilWaterMm(x: Int, y: Int) = soil[i(x, y)]

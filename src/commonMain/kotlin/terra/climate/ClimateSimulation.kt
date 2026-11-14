@@ -3,7 +3,7 @@ package terra.climate
 import terra.world.World
 
 /** Single climate authority and persistent landscape; called only by the simulation owner. */
-class ClimateSimulation(private val world: World, val config: ClimateConfig = ClimateConfig(),
+class ClimateSimulation(private val world: World, val config: ClimateConfig = ClimateConfig(width = world.width, height = world.height),
     val solar: SolarConfig = SolarConfig()) {
     var atlas = ClimateAtlasBuilder(solar).build(ClimateGeography(world, config))
         private set

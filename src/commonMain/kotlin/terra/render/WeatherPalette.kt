@@ -26,11 +26,11 @@ internal fun weatherLegend(layer: ClimateLayer): WeatherLegend? = when (layer) {
     ClimateLayer.MEAN_TEMPERATURE -> WeatherLegend("Mean annual temperature · °C", temperaturePalette, "−20", "7.5", "35+", smooth = true)
     ClimateLayer.HUMIDITY -> WeatherLegend("Relative humidity · %", humidityPalette, "0", "50", "100", smooth = true)
     ClimateLayer.PRECIPITATION -> WeatherLegend(
-        "Monthly mean rain rate · mm/h",
+        "Rain rate · mm/h",
         precipitationPalette, "0", "3", "12+", smooth = true
     )
     ClimateLayer.CLIMATE_RAIN -> WeatherLegend("Monthly rainfall · mm/month", climateRainPalette, "0", "150", "300+", smooth = true)
-    ClimateLayer.TEMPERATURE -> WeatherLegend("Monthly temperature · °C", temperaturePalette, "−20", "7.5", "35+", smooth = true)
+    ClimateLayer.TEMPERATURE -> WeatherLegend("Air temperature · °C", temperaturePalette, "−20", "7.5", "35+", smooth = true)
     ClimateLayer.ANNUAL_PRECIPITATION -> WeatherLegend("Annual climate rainfall · mm/year", annualPrecipitationPalette, "0", "1250", "2500+", smooth = true)
     else -> null
 }
@@ -39,6 +39,7 @@ internal fun tileColor(layer: ClimateLayer, weather: EnvironmentSnapshot, x: Int
     when (layer) {
         ClimateLayer.ARIDITY -> ramp(weather.climateAridity(x, y) / 2, climateRainPalette)
         ClimateLayer.MEAN_TEMPERATURE -> ramp((weather.meanClimateTemperatureC(x, y) + 20) / 55, temperaturePalette)
+        ClimateLayer.CLOUDS -> Colors["#eef3fa"]
         ClimateLayer.HUMIDITY -> ramp(weather.relativeHumidity(x, y), humidityPalette)
         ClimateLayer.PRECIPITATION -> precipitationColor(weather.precipitationMmPerHour(x, y))
         ClimateLayer.CLIMATE_RAIN -> ramp(weather.monthlyClimateRainMm(x, y) / 300.0, climateRainPalette)
@@ -62,9 +63,10 @@ internal fun precipitationColor(rainMmPerHour: Double) =
     ramp(sqrt((rainMmPerHour / MAX_RAIN_DISPLAY_MM_PER_HOUR).coerceIn(0.0, 1.0)), precipitationPalette)
 
 internal fun precipitationOpacity(rainMmPerHour: Double): Double =
-    if (rainMmPerHour <= 0.0) 0.0 else 0.62 + 0.32 * smoothstep(0.05, 3.0, rainMmPerHour)
+    smoothstep(0.0, 0.03, rainMmPerHour) * (0.62 + 0.32 * smoothstep(0.05, 3.0, rainMmPerHour))
 
 internal fun weatherOverlayOpacity(layer: ClimateLayer, weather: EnvironmentSnapshot, x: Int, y: Int): Double = when (layer) {
+    ClimateLayer.CLOUDS -> weather.cloudCover(x, y) * 0.88
     ClimateLayer.PRECIPITATION -> {
         val rain = weather.precipitationMmPerHour(x, y)
         precipitationOpacity(rain)

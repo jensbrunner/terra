@@ -59,7 +59,7 @@ tasks.register<JavaExec>("climateAtlas") {
 
 tasks.register<JavaExec>("climateBenchmark") {
     group = "verification"
-    description = "Measure atlas startup and persistent landscape evolution on the default world."
+    description = "Compare climate atlas generation time and retained heap at coarse and native resolution."
     mainClass.set("terra.experiments.ClimateBenchmarkKt")
     classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
     args(providers.gradleProperty("climateBenchmarkArgs").orElse("").get().split(' ').filter { it.isNotBlank() })

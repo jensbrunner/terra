@@ -4,16 +4,19 @@ import terra.world.World
 import kotlin.math.*
 
 /** Immutable physical snapshot. All arrays use map order (north at row zero). */
-class ClimateGeography(internal val world: World, val config: ClimateConfig = ClimateConfig()) {
+class ClimateGeography(internal val world: World, val config: ClimateConfig = ClimateConfig(width = world.width, height = world.height)) {
     val geometryRevision = world.geometryRevision
     val width = config.width
     val height = config.height
     val count = width * height
-    internal val overlap = GridOverlap(world.width, world.height, width, height)
+    internal val overlap = if (width == world.width && height == world.height) null
+        else GridOverlap(world.width, world.height, width, height)
     internal val tileElevation = DoubleArray(world.width * world.height) { world.elevationMeters(it % world.width, it / world.width) }
     internal val tileLand = BooleanArray(tileElevation.size) { world.isLand(it % world.width, it / world.width) }
-    internal val elevationMeters = DoubleArray(count).also { overlap.restrict(tileElevation, it) }
-    internal val landFraction = DoubleArray(count).also { a -> overlap.restrict(DoubleArray(tileLand.size) { if (tileLand[it]) 1.0 else 0.0 }, a) }
+    internal val elevationMeters = overlap?.let { grid -> DoubleArray(count).also { grid.restrict(tileElevation, it) } } ?: tileElevation
+    internal val landFraction = DoubleArray(tileLand.size) { if (tileLand[it]) 1.0 else 0.0 }.let { land ->
+        overlap?.let { grid -> DoubleArray(count).also { grid.restrict(land, it) } } ?: land
+    }
     internal val coastDistanceMeters = DoubleArray(count) { if (landFraction[it] < 0.5) 0.0 else config.domainWidthMeters + config.domainHeightMeters }
     init {
         // Two directional distance-transform passes repeated for wrapped longitude.

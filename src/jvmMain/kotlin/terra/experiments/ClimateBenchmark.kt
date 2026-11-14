@@ -1,22 +1,39 @@
 package terra.experiments
 
 import java.io.File
-import kotlin.math.abs
 import terra.world.World
-import terra.climate.ClimateSimulation
+import terra.climate.*
 
+/** Compare atlas generation on identical terrain, after warming both resolutions. */
 fun main(args: Array<String>) {
-    val years = args.firstOrNull { it.startsWith("--years=") }?.substringAfter('=')?.toInt() ?: 100
-    val start = System.nanoTime()
-    val weather = ClimateSimulation(World(31742))
-    val buildMs = (System.nanoTime() - start) / 1e6
-    val year = weather.solar.yearSeconds
-    repeat(5) { weather.advance(year) }
-    var residual = 0.0
-    val measured = System.nanoTime()
-    repeat(years) { residual = maxOf(residual, abs(weather.advance(year).relativeWaterResidual)) }
-    val wall = (System.nanoTime() - measured) / 1e9
-    val report = "world=283x212 atlas_grid=96x72 startup_ms=$buildMs years=$years years_per_second=${years / wall} ms_per_month=${wall * 1000 / years / 12} surface_water_residual=$residual\n"
-    File("build/experiments").mkdirs(); File("build/experiments/climate-benchmark.txt").writeText(report)
+    val samples = args.firstOrNull { it.startsWith("--samples=") }?.substringAfter('=')?.toInt() ?: 3
+    require(samples > 0)
+    val world = World(31742)
+    val configs = listOf(ClimateConfig(width = 96, height = 72), ClimateConfig(width = world.width, height = world.height))
+    val runtime = Runtime.getRuntime()
+    fun usedBytes(): Long {
+        System.gc()
+        return runtime.totalMemory() - runtime.freeMemory()
+    }
+    for (config in configs) ClimateAtlasBuilder().build(ClimateGeography(world, config))
+    val report = buildString {
+        appendLine("world=${world.width}x${world.height} seed=${world.seed} samples=$samples (warmed JVM; retained heap after GC)")
+        for (config in configs) {
+            val times = mutableListOf<Double>()
+            val retained = mutableListOf<Double>()
+            var atlas: SeasonalClimateAtlas? = null
+            repeat(samples) {
+                atlas = null
+                val before = usedBytes()
+                val start = System.nanoTime()
+                atlas = ClimateAtlasBuilder().build(ClimateGeography(world, config))
+                times += (System.nanoTime() - start) / 1e6
+                retained += (usedBytes() - before) / (1024.0 * 1024)
+            }
+            appendLine("atlas_grid=${config.width}x${config.height} median_build_ms=${times.sorted()[samples / 2]} retained_mib=${retained.sorted()[samples / 2]} moisture_residual_mm_per_day=${atlas!!.maximumMoistureResidualMmPerDay} sweeps=${atlas!!.moistureSweeps}")
+        }
+    }
+    File("build/experiments").mkdirs()
+    File("build/experiments/climate-benchmark.txt").writeText(report)
     print(report)
 }

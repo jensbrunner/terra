@@ -10,16 +10,18 @@ class SeasonalClimateAtlasTest {
         val x = it % 96
         if (x !in 16..80) 0.1 else if (ridge && x in 46..50) 0.65 else 0.32
     })
-    @Test fun rainfallIsMonthlySumAndDownscalingConservesRegionalRain() {
+    @Test fun rainfallIsMonthlySumAndBothResolutionsConserveRegionalRain() {
         val world = continent(true)
-        val atlas = ClimateAtlasBuilder().build(ClimateGeography(world, config))
-        for (i in 0 until 96 * 72) {
-            assertEquals((0..11).sumOf { atlas.rainfallMm(it, i) }, atlas.annualRainfallMm(i), 1e-9)
-            assertTrue(atlas.annualRainfallMm(i).isFinite() && atlas.annualRainfallMm(i) >= 0, "Invalid rain at tile $i: ${atlas.annualRainfallMm(i)}")
+        for (grid in listOf(config, ClimateConfig(width = world.width, height = world.height))) {
+            val atlas = ClimateAtlasBuilder().build(ClimateGeography(world, grid))
+            for (i in 0 until 96 * 72) {
+                assertEquals((0..11).sumOf { atlas.rainfallMm(it, i) }, atlas.annualRainfallMm(i), 1e-9)
+                assertTrue(atlas.annualRainfallMm(i).isFinite() && atlas.annualRainfallMm(i) >= 0, "Invalid rain at tile $i: ${atlas.annualRainfallMm(i)}")
+            }
+            assertEquals(atlas.regionalAnnualMeanRainMm, atlas.annualRain.average(), 1e-8)
+            assertTrue(atlas.maximumHumidityChangeMm < 0.05, "Fixed sweeps must converge: ${atlas.maximumHumidityChangeMm}")
+            assertTrue(atlas.maximumMoistureResidualMmPerDay < ClimateAtlasBuilder.MOISTURE_TOLERANCE_MM_DAY)
         }
-        assertEquals(atlas.regionalAnnualMeanRainMm, atlas.annualRain.average(), 1e-8)
-        // Downscaling must not create water, even on isolated ridges.
-        assertTrue(atlas.maximumHumidityChangeMm < 0.05, "Fixed sweeps must converge: ${atlas.maximumHumidityChangeMm}")
     }
     @Test fun reversingWindReversesRidgeShadow() {
         val world = continent(true)

@@ -33,7 +33,8 @@ class SeasonalClimateAtlas internal constructor(
 }
 
 /** One upwind fixed-point moisture model. No live cloud, pressure, heat or vapor state. */
-class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), private val sweeps: Int = 384,
+// Native terrain cells need a larger iteration budget; converged months still exit early.
+class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), private val sweeps: Int = 1536,
     private val windOverride: Double? = null) {
     fun build(g: ClimateGeography): SeasonalClimateAtlas {
         require(sweeps > 0)
@@ -53,6 +54,19 @@ class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), privat
             moistureResidual = max(moistureResidual, solve.residualMmPerDay)
             totalSweeps += solve.sweeps
         }
+        val overlap = g.overlap
+        if (overlap == null) {
+            val pet = Array(12) { DoubleArray(n) }
+            for (m in 0..11) {
+                sunlight.update((m + 0.5) * solar.yearSeconds / 12)
+                for (i in 0 until n) {
+                    val light = sunlight.dailyMeanInputFactor(i / w)
+                    pet[m][i] = (max(0.0, t[m][i] + 5) * 0.18 * light / 0.32).coerceIn(0.0, 8.0) * 365 / 12
+                }
+            }
+            return SeasonalClimateAtlas(g, solar, t, p, pet, humidity, e, s,
+                p.sumOf { it.sum() } / n, residual, totalSweeps, moistureResidual)
+        }
         val tileCount = g.tileElevation.size
         val tileT = Array(12) { DoubleArray(tileCount) }; val tileP = Array(12) { DoubleArray(tileCount) }
         val tilePet = Array(12) { DoubleArray(tileCount) }; val tileE = Array(12) { DoubleArray(tileCount) }; val tileS = Array(12) { DoubleArray(tileCount) }
@@ -61,8 +75,8 @@ class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), privat
         val weight = DoubleArray(tileCount); val scratch = DoubleArray(n)
         for (m in 0..11) {
             sunlight.update((m + 0.5) * solar.yearSeconds / 12)
-            g.overlap.prolongUniform(humidity[m], tileHumidity[m])
-            g.overlap.prolongUniform(e[m], tileE[m]); g.overlap.prolongUniform(s[m], tileS[m])
+            overlap.prolongUniform(humidity[m], tileHumidity[m])
+            overlap.prolongUniform(e[m], tileE[m]); overlap.prolongUniform(s[m], tileS[m])
             // Bilinear reconstruction within each coarse cell, then conservative overlap normalization.
             // This preserves regional water exactly while blending adjacent-cell boundaries.
             for (i in 0 until tileCount) {
@@ -71,12 +85,12 @@ class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), privat
                 tileT[m][i] = sample(t[m], w, h, px, py) - 0.006 * (g.tileElevation[i] - sample(g.elevationMeters, w, h, px, py))
                 val slopeX = (g.tileElevation[y * g.world.width + (x + 1) % g.world.width] - g.tileElevation[y * g.world.width + (x + g.world.width - 1) % g.world.width]) / (2 * g.config.domainWidthMeters / g.world.width)
                 val slopeY = (g.tileElevation[min(g.world.height - 1, y + 1) * g.world.width + x] - g.tileElevation[max(0, y - 1) * g.world.width + x]) / (2 * g.config.domainHeightMeters / g.world.height)
-                val parent = g.overlap.targetOfSource[i]
+                val parent = overlap.targetOfSource[i]
                 weight[i] = (sample(p[m], w, h, px, py) / max(0.001, p[m][parent])).coerceIn(0.5, 2.0) * (1 + 12 * (tileE[m][i] * slopeX + tileS[m][i] * slopeY)).coerceIn(0.5, 1.8)
                 val light = sunlight.dailyMeanInputFactor((y.toDouble() * h / g.world.height).toInt().coerceIn(0, h - 1))
                 tilePet[m][i] = (max(0.0, tileT[m][i] + 5) * 0.18 * light / 0.32).coerceIn(0.0, 8.0) * 365 / 12
             }
-            g.overlap.prolongWeighted(p[m], weight, tileP[m], scratch)
+            overlap.prolongWeighted(p[m], weight, tileP[m], scratch)
         }
         return SeasonalClimateAtlas(g, solar, tileT, tileP, tilePet, tileHumidity, tileE, tileS, p.sumOf { it.sum() } / n, residual, totalSweeps, moistureResidual)
     }
