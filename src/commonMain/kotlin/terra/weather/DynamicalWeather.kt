@@ -27,41 +27,31 @@ class DynamicalWeather(
     override val height = world.height
     private val mapping = AtmosphereTileMapping(width, height, config)
     internal val surfaceState get() = surface
-    private val surface = TerrainMoistSurface(world, mapping)
-    private val initialWeather = InitialWeather(world.seed, config)
-    private val model = MoistAtmosphere(config, physics, seed = world.seed, surface = surface, initializeFlow = initialWeather::flow, initializeColumns = { x, y ->
-        val c = min(config.height - 1, (y / config.dy).toInt()) * config.width +
-            min(config.width - 1, (x / config.dx).toInt())
-        val moist = initialWeather.moistFraction(x / config.domainWidthMeters, y / config.domainHeightMeters,
-            surface.initialWaterAvailability(c))
-        // These are time-zero inventories, not ongoing moisture/temperature forcing.
-        MoistCell(temperatureKelvin = 280.0, relativeHumidity = initialWeather.relativeHumidity(moist),
-            cloudWaterKgM2 = initialWeather.cloudWaterMm(moist),
-            surfaceTemperatureKelvin = 288.0 - 4.0 * surface.landFraction[c], surfaceWaterKgM2 = 0.0)
-    })
-    private val sunlight = PlanetarySunlight(width, height, physics.solar, northUp = false)
-    private var view: MoistAtmosphereSnapshot = model.snapshot()
     var atlas = ClimateAtlasBuilder(physics.solar).build(ClimateGeography(world, config))
         private set
-    private var atlasSummary = atlas.seasonalSnapshot()
-    val seasonalClimate: SeasonalClimateSnapshot get() = atlasSummary
-    val observedClimateYears: Int get() = 0
+    private val surface = TerrainMoistSurface(world, mapping).also {
+        it.initializeClimate(atlas)
+        world.evolveAtlasCover(atlas, 0.0, initialize = true, soilAvailability = it.growingWaterAvailability)
+    }
+    private val model = MoistAtmosphere(config, physics, surface = surface,
+        initializeFlow = { _, _ -> terra.atmosphere.DryCell(config.meanHeightMeters, 0.0, 0.0) },
+        initializeColumns = { _, _ -> MoistCell(relativeHumidity = 0.0, surfaceWaterKgM2 = 0.0) })
+        .also { initializeDetailed(it, 0.0, initial = true) }
+    private val sunlight = PlanetarySunlight(width, height, physics.solar, northUp = false)
+    private var view: MoistAtmosphereSnapshot = model.snapshot()
     val atmosphereSnapshot: MoistAtmosphereSnapshot get() = view
     private var evolution: ClimateEvolution? = null
     internal val isClimateMode get() = evolution != null
-    internal val climateDiagnostics get() = evolution?.diagnostics
     internal var lastHandoff: terra.atmosphere.AtmosphereHandoff? = null
         private set
     internal val hasRepresentativeFields get() = isClimateMode
     override val fieldSemantics get() = if (isClimateMode) WeatherFieldSemantics(WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL,
-        elapsedSeconds - updateSeconds, updateSeconds, true) else WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW, elapsedSeconds - updateSeconds, updateSeconds)
-    init { world.evolveAtlasCover(atlas, 0.0, initialize = true) }
+        elapsedSeconds - updateSeconds, updateSeconds) else WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW, elapsedSeconds - updateSeconds, updateSeconds)
     internal fun ensureAtlas() {
         if (atlas.geometryRevision == world.geometryRevision) return
         val replacement = ClimateAtlasBuilder(physics.solar).build(ClimateGeography(world, config))
         surface.refreshGeometry()
         atlas = replacement
-        atlasSummary = replacement.seasonalSnapshot()
     }
     internal val detailedCompletedSteps get() = model.completedSteps
     private var updateSeconds = 0.0
@@ -87,10 +77,11 @@ class DynamicalWeather(
             model.step()
             timings?.end(SimulationWork.INTEGRATION)
             timings?.begin(SimulationWork.SURFACE_BUCKET)
+            for (cell in 0 until config.cellCount) surface.setCellTemperature(cell, model.surfaceTemperatureKelvinAt(cell) - 273.15)
             surface.finishStep(config.stepSeconds)
             timings?.end(SimulationWork.SURFACE_BUCKET)
             val previousYear = floor((model.worldSeconds - config.stepSeconds) / physics.solar.yearSeconds)
-            if (floor(model.worldSeconds / physics.solar.yearSeconds) > previousYear) world.evolveAtlasCover(atlas, 1.0)
+            if (floor(model.worldSeconds / physics.solar.yearSeconds) > previousYear) world.evolveAtlasCover(atlas, 1.0, drought = surface.climateDrought, soilAvailability = surface.growingWaterAvailability)
         }
         updateSeconds = steps * config.stepSeconds
         if (publishSnapshot) refreshSnapshot()
@@ -111,28 +102,33 @@ class DynamicalWeather(
     internal fun resumeDetailed(): terra.atmosphere.AtmosphereHandoff? {
         val engine = evolution ?: return null
         ensureAtlas()
-        val month = atlas.monthAt(engine.completedSeconds)
-        val temperatures = DoubleArray(config.cellCount)
-        val humidity = DoubleArray(config.cellCount)
-        val east = DoubleArray(config.cellCount); val north = DoubleArray(config.cellCount)
-        val coarseHumidity = DoubleArray(config.cellCount)
-        atlas.geography.overlap.restrict(DoubleArray(width * height) { (0.25 + 0.5 * atlas.aridity(it)).coerceIn(0.2, 0.9) }, coarseHumidity)
-        val coarseT = DoubleArray(config.cellCount); val coarseU = DoubleArray(config.cellCount); val coarseV = DoubleArray(config.cellCount)
-        atlas.geography.overlap.restrict(atlas.temperature[month], coarseT)
-        atlas.geography.overlap.restrict(atlas.east[month], coarseU)
-        atlas.geography.overlap.restrict(atlas.south[month], coarseV)
-        for (i in temperatures.indices) {
-            val j = (config.height - 1 - i / config.width) * config.width + i % config.width
-            temperatures[i] = coarseT[j] + 273.15
-            humidity[i] = coarseHumidity[j]; east[i] = coarseU[j]; north[i] = -coarseV[j]
-        }
-        val handoff = model.initializeAtlasRealization(engine.completedSeconds, temperatures, humidity, east, north)
+        val handoff = initializeDetailed(model, engine.completedSeconds)
         evolution = null
         updateSeconds = 0.0
         surface.beginUpdate()
         lastHandoff = handoff
         refreshSnapshot()
         return handoff
+    }
+
+    /** Shared world creation / reentry boundary. The atlas supplies the environmental
+     * mean; persistent soil, snow, groundwater, lakes and vegetation are retained. */
+    private fun initializeDetailed(atmosphere: MoistAtmosphere, seconds: Double, initial: Boolean = false): terra.atmosphere.AtmosphereHandoff {
+        val month = atlas.monthAt(seconds)
+        val tileFields = arrayOf(atlas.temperature[month], atlas.humidity[month], atlas.east[month], atlas.south[month])
+        val fields = Array(4) { DoubleArray(config.cellCount).also { a -> atlas.geography.overlap.restrict(tileFields[it], a) } }
+        val t = DoubleArray(config.cellCount); val rh = DoubleArray(config.cellCount)
+        val u = DoubleArray(config.cellCount); val v = DoubleArray(config.cellCount)
+        val surfaceT = DoubleArray(config.cellCount)
+        for (i in t.indices) {
+            val j = (config.height - 1 - i / config.width) * config.width + i % config.width
+            t[i] = fields[0][j] + 273.15; rh[i] = fields[1][j]
+            u[i] = fields[2][j]; v[i] = -fields[3][j]
+            surfaceT[i] = if (surface.snowWaterMm(i) > 1.0) minOf(273.15, t[i]) else t[i]
+            surface.setCellTemperature(i, surfaceT[i] - 273.15)
+        }
+        return atmosphere.initializeAtlasRealization(seconds, t, rh, u, v,
+            ClimateAtlasBuilder.THERMAL_PRESSURE_COUPLING, surfaceT, initial)
     }
 
     fun refreshSnapshot() {
@@ -146,7 +142,7 @@ class DynamicalWeather(
         ensureAtlas()
         val detailed = DynamicalWeatherPresentation(width, height, config, physics, view, elapsedSeconds, updateSeconds,
             arrayOf(surface.peakRainRate.copyOf(), surface.rain.copyOf(), surface.drainage.copyOf(), surface.overflow.copyOf(),
-                surface.climateRainRate.copyOf(), surface.soil.copyOf()), hasResolvedDynamics = hasResolvedDynamics)
+                surface.climateRainRate.copyOf(), surface.soil.copyOf(), surface.soilCapacityMm.copyOf()), hasResolvedDynamics = hasResolvedDynamics)
         return ClimatePresentation(detailed, atlas, atlas.monthAt(elapsedSeconds), surface.soil.copyOf(), surface.rain.copyOf(),
             surface.drainage.copyOf(), surface.overflow.copyOf(), elapsedSeconds, updateSeconds, isClimateMode)
     }
@@ -172,7 +168,7 @@ class DynamicalWeather(
 
     private fun index(x: Int, y: Int) = y * width + x
     private val month get() = atlas.monthAt(elapsedSeconds)
-    override fun relativeHumidity(x: Int, y: Int) = if (isClimateMode) (0.25 + 0.5 * atlas.aridity(index(x, y))).coerceIn(0.2, 0.9) else sample(x, y, view::relativeHumidityAt)
+    override fun relativeHumidity(x: Int, y: Int) = if (isClimateMode) atlas.relativeHumidity(month, index(x, y)) else sample(x, y, view::relativeHumidityAt)
     override fun cloudWaterMm(x: Int, y: Int) = if (isClimateMode) 0.0 else sample(x, y, view::cloudWaterMmAt)
     override fun cloudCover(x: Int, y: Int) = 1 - exp(-cloudWaterMm(x, y) / 0.15)
     override fun atmosphericWaterMm(x: Int, y: Int) = if (isClimateMode) 0.0 else sample(x, y) { cx, cy -> view.vaporMmAt(cx, cy) + view.cloudWaterMmAt(cx, cy) }
@@ -194,7 +190,8 @@ class DynamicalWeather(
     override fun meanClimateTemperatureC(x: Int, y: Int) = atlas.meanTemperature[index(x, y)]
     override fun annualizedRainMmPerYear(x: Int, y: Int) = atlas.annualRain[index(x, y)]
     override fun soilWaterMm(x: Int, y: Int) = surface.soil[index(x, y)]
-    override fun soilMoisture(x: Int, y: Int) = soilWaterMm(x, y) / 250.0
+    override fun soilCapacityMm(x: Int, y: Int) = surface.soilCapacityMm[index(x, y)]
+    override fun soilMoisture(x: Int, y: Int) = soilWaterMm(x, y) / soilCapacityMm(x, y)
     override fun solarInputFactor(x: Int, y: Int): Double {
         sunlight.update(elapsedSeconds)
         return sunlight.inputFactor(x, y)

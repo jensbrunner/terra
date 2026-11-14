@@ -8,12 +8,12 @@ import kotlin.math.*
  * intervals; coarse climate phases do not need channel travel-time substeps.
  * Only water reaching an ocean tile is returned as boundary export.
  */
-internal class SurfaceWater(world: World) {
+internal class SurfaceWater(world: World, initialGroundwaterMm: Double = 0.0, initialLakeFraction: Double = 0.0) {
     private val topology = HydrologyTopology(world)
     private val count = world.width * world.height
     private val lakeIds = IntArray(count) { -1 }
-    private val basins = topology.lakeCandidates.map { Lake(it, topology.terrainElevation) }
-    private val groundwater = DoubleArray(count) { if (topology.isLandTile(it)) 30.0 else 0.0 }
+    private val basins = topology.lakeCandidates.map { Lake(it, topology.terrainElevation, initialLakeFraction) }
+    private val groundwater = DoubleArray(count) { if (topology.isLandTile(it)) initialGroundwaterMm else 0.0 }
     private val channels = DoubleArray(count)
     private val recharge = DoubleArray(count)
     private val runoff = DoubleArray(count)
@@ -73,6 +73,15 @@ internal class SurfaceWater(world: World) {
     fun receive(tile: Int, drainage: Double, overflow: Double) {
         recharge[tile] += drainage; runoff[tile] += overflow
     }
+    /** Root-zone access transfers real local groundwater / bank storage, never a wetness source. */
+    fun supplyRoots(tile: Int, demand: Double): Double {
+        val ground = min(demand, groundwater[tile])
+        groundwater[tile] -= ground
+        val bank = if (topology.upstreamLandTileCount[tile] >= 12) min(demand - ground, channels[tile]) else 0.0
+        channels[tile] -= bank
+        return ground + bank
+    }
+
     fun isLakeWet(tile: Int) = wet[tile]
     fun receiveLakeRain(tile: Int, amount: Double) { basins[lakeIds[tile]].water += amount }
     fun evaporateLake(tile: Int, demand: Double): Double {
@@ -145,7 +154,7 @@ internal class SurfaceWater(world: World) {
     }
 
     /** Sorted hypsometry gives a finite volume/level relation in O(log n). */
-    private class Lake(val candidate: LakeCandidate, elevation: DoubleArray) {
+    private class Lake(val candidate: LakeCandidate, elevation: DoubleArray, initialFraction: Double) {
         private val heights = candidate.tileIndices.map { elevation[it] }.sorted().toDoubleArray()
         private val prefix = DoubleArray(heights.size + 1)
         private val threshold = DoubleArray(heights.size)
@@ -157,7 +166,7 @@ internal class SurfaceWater(world: World) {
                 threshold[i] = (heights[i] * i - prefix[i]) * MM_PER_ELEVATION
             }
             capacity = heights.sumOf { max(0.0, candidate.spillElevation - it) } * MM_PER_ELEVATION
-            water = if (capacity.isFinite()) capacity * 0.35 else 0.0 // Initial inventory, included in the starting water budget.
+            water = if (capacity.isFinite()) capacity * initialFraction else 0.0 // Initial inventory, included in the starting water budget.
         }
         fun level(): Double {
             if (water <= 0) return heights[0]

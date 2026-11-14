@@ -57,7 +57,6 @@ data class DryAtmosphereDiagnostics(
     val volumeCubicMeters: Double,
     /** Kinetic + dry height-anomaly potential, or full thermal potential, per unit fluid density. */
     val energyPerDensity: Double,
-    val potentialEnstrophy: Double,
     val minimumHeightMeters: Double,
     val maximumSpeedMetersPerSecond: Double,
     val maximumCourant: Double
@@ -139,23 +138,22 @@ class DryAtmosphere internal constructor(
         validate(h, mx, my)
     }
 
-    /** Reconstruct pressure and compatible circulation from evolved thermal geography. */
-    internal fun initializeClimateCirculation(temperature: DoubleArray, weatherPhase: Double? = null, seed: Int = 0): ReconstructedCirculation {
-        require(temperature.size == count)
-        val reference = columns?.physics?.referenceTemperatureKelvin ?: error("Thermal rest needs moist columns")
+    /** Exact thermal pressure-depth relation for a(T) = coupling * grad(T):
+     * h = C/sqrt(T) - 2 coupling Tref/g gives d[g h² T/(2 Tref)]/dT = -coupling h.
+     * Mean carrier depth is preserved; winds come directly from the atlas. */
+    internal fun initializeAtlasCirculation(temperature: DoubleArray, east: DoubleArray, north: DoubleArray,
+        coupling: Double) {
+        require(temperature.size == count && east.size == count && north.size == count)
         require(temperature.all { it.isFinite() && it > 0 })
-        val state = ClimateCirculation.reconstruct(config, reference, temperature, h.sum(), weatherPhase, seed)
+        val reference = columns?.physics?.referenceTemperatureKelvin ?: error("Thermal columns required")
+        val offset = 2 * coupling * reference / config.gravity
+        val scale = (h.sum() + count * offset) / temperature.sumOf { 1 / sqrt(it) }
         for (i in h.indices) {
-            h[i] = state.depth[i]
-            mx[i] = h[i] * state.east[i]; my[i] = h[i] * state.north[i]
+            h[i] = scale / sqrt(temperature[i]) - offset
+            mx[i] = h[i] * east[i]; my[i] = h[i] * north[i]
         }
         maximumCourant = 0.0
         validate(h, mx, my)
-        return state
-    }
-
-    internal fun initializeAtlasWinds(east: DoubleArray, north: DoubleArray) {
-        for (i in h.indices) { mx[i] = h[i] * east[i]; my[i] = h[i] * north[i] }
     }
 
     fun step() {
@@ -201,12 +199,6 @@ class DryAtmosphere internal constructor(
 
     /** Returns the dissipated kinetic energy per unit density and cell area. */
     /** Unresolved vertical momentum exchange; returns signed kinetic energy input. */
-    internal fun exchangeZonalMomentumAt(i: Int, target: Double, response: Double): Double {
-        val before = kineticEnergyAt(i)
-        mx[i] += (h[i] * target - mx[i]) * response
-        return kineticEnergyAt(i) - before
-    }
-
     internal fun dampMomentumAt(i: Int, retention: Double): Double {
         val before = kineticEnergyAt(i)
         mx[i] *= retention
@@ -238,30 +230,21 @@ class DryAtmosphere internal constructor(
     fun diagnostics(): DryAtmosphereDiagnostics {
         val volume = CompensatedSum()
         val energy = CompensatedSum()
-        val enstrophy = CompensatedSum()
         var minimum = Double.POSITIVE_INFINITY
         var speed = 0.0
         for (y in 0 until config.height) for (x in 0 until config.width) {
             val i = y * config.width + x
-            val west = y * config.width + if (x == 0) config.width - 1 else x - 1
-            val east = y * config.width + if (x + 1 == config.width) 0 else x + 1
-            val south = config.southRow(y) * config.width + x
-            val north = config.northRow(y) * config.width + x
             val u = mx[i] / h[i]
             val v = my[i] / h[i]
             val anomaly = h[i] - config.meanHeightMeters
-            val curl = (my[east] / h[east] - my[west] / h[west]) / (2 * config.dx) -
-                (mx[north] / h[north] - mx[south] / h[south]) / (2 * config.dy)
-            val pv = (curl + coriolis[y]) / h[i]
             volume.add(h[i] * config.cellArea)
             val potential = if (columns == null) 0.5 * config.gravity * anomaly * anomaly else
                 0.5 * config.gravity * columns.temperatureAt(i, h[i]) / columns.physics.referenceTemperatureKelvin * h[i] * h[i]
             energy.add((0.5 * h[i] * (u * u + v * v) + potential) * config.cellArea)
-            enstrophy.add(0.5 * h[i] * pv * pv * config.cellArea)
             minimum = min(minimum, h[i])
             speed = max(speed, sqrt(u * u + v * v))
         }
-        return DryAtmosphereDiagnostics(volume.value, energy.value, enstrophy.value, minimum, speed, maximumCourant)
+        return DryAtmosphereDiagnostics(volume.value, energy.value, minimum, speed, maximumCourant)
     }
 
     private fun validate(depth: DoubleArray, east: DoubleArray, north: DoubleArray) {

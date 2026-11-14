@@ -78,7 +78,7 @@ class HydrologyTopology internal constructor(
         lakeCandidates = if (hasOcean) findLakeCandidates(terrainElevation) else listOf(
             // All-land fallback: one nonspilling basin whose wet footprint grows
             // from the global minimum. Its storage is finite; capacity is unbounded.
-            LakeCandidate(0, IntArray(count) { it }, Double.POSITIVE_INFINITY, closedRoot, -1, IntArray(0))
+            LakeCandidate(0, IntArray(count) { it }, Double.POSITIVE_INFINITY, closedRoot)
         )
         processingOrder = buildProcessingOrder()
         buildUpstreamLandArea()
@@ -428,58 +428,13 @@ class HydrologyTopology internal constructor(
                 basinTiles[tileOffset++] = tile
                 tile = nextTileInBasin[tile]
             }
-            var entryCount = 0
-            for (tile in basinTiles) entryCount += countSubBasinEntries(
-                tile, group, basin, grouped, basinOwner
-            )
-            val entries = IntArray(entryCount)
-            var entryOffset = 0
-            for (tile in basinTiles) {
-                val x = tile % width
-                val y = tile / width
-                for (dy in -1..1) for (dx in -1..1) {
-                    if (dx == 0 && dy == 0) continue
-                    val nx = (x + dx + width) % width
-                    val ny = y + dy
-                    if (ny !in 0 until height) continue
-                    val upstream = ny * width + nx
-                    if (downstreamIndex[upstream] == tile &&
-                        (grouped[upstream] != group || basinOwner[upstream] != basin)
-                    ) entries[entryOffset++] = upstream
-                }
-            }
             candidates += LakeCandidate(
                 id = candidates.size,
                 tileIndices = basinTiles,
                 spillElevation = basinSpillElevation[basin],
-                exitTileIndex = basinExitTile[basin],
-                downstreamTileIndex = basinDownstreamTile[basin],
-                entryTileIndices = entries
+                exitTileIndex = basinExitTile[basin]
             )
         }
-    }
-
-    private fun countSubBasinEntries(
-        tile: Int,
-        group: Int,
-        basin: Int,
-        grouped: IntArray,
-        basinOwner: IntArray
-    ): Int {
-        val x = tile % width
-        val y = tile / width
-        var result = 0
-        for (dy in -1..1) for (dx in -1..1) {
-            if (dx == 0 && dy == 0) continue
-            val nx = (x + dx + width) % width
-            val ny = y + dy
-            if (ny !in 0 until height) continue
-            val upstream = ny * width + nx
-            if (downstreamIndex[upstream] == tile &&
-                (grouped[upstream] != group || basinOwner[upstream] != basin)
-            ) result++
-        }
-        return result
     }
 
     private fun findSet(value: Int, parent: IntArray): Int {
@@ -621,10 +576,7 @@ data class LakeCandidate(
     val id: Int,
     val tileIndices: IntArray,
     val spillElevation: Double,
-    val exitTileIndex: Int,
-    val downstreamTileIndex: Int,
-    /** Deterministically ordered tiles immediately upstream of this basin. */
-    val entryTileIndices: IntArray
+    val exitTileIndex: Int
 )
 
 /** Small build-time integer heap with caller-defined deterministic ordering. */

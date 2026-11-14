@@ -141,9 +141,9 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                 while (running.get() && !active.paused && work < 4 && System.nanoTime() < deadline &&
                     desiredWorld.get().generation == requested.generation && desiredControls.get().revision == active.revision &&
                     (simulation.fidelity != SimulationFidelity.CLIMATE || System.nanoTime() >= nextClimateAt) &&
-                    demand.pendingSeconds >= simulation.quantum(active.speed)) {
+                    demand.pendingSeconds >= simulation.stepSeconds) {
                     val started = System.nanoTime()
-                    val consumed = simulation.advance(demand.pendingSeconds, active.speed)
+                    val consumed = simulation.advance(demand.pendingSeconds)
                     demand.consume(consumed)
                     val finishedWork = System.nanoTime()
                     val cost = finishedWork - started
@@ -169,7 +169,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                         simulation.completedSeconds, active.speed, if (active.paused) 0.0 else achieved,
                         demand.pendingSeconds, demand.unservedSeconds, demand.limitSeconds, active.paused,
                         advanceNanos / 1e9, publicationNanos / 1e9, transactions,
-                        active.automatic, simulation.quantum(active.speed))
+                        active.automatic, simulation.stepSeconds)
                     val started = System.nanoTime()
                     val previous = mailbox.get()
                     val snapshot = if (previous?.progress?.generation == requested.generation &&

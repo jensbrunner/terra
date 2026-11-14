@@ -56,7 +56,7 @@ class SimulationWorkerTest {
 
         val direct = DynamicalWeather(directWorld, request.atmosphere)
         repeat(4320) {
-            assertEquals(20.0, owner.advance(20.0, SimulationSpeed.ONE_HOUR))
+            assertEquals(20.0, owner.advance(20.0))
             direct.advanceBudgeted(20.0, 1)
 
         }

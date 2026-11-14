@@ -14,8 +14,8 @@ class MoistAtmosphereTest {
     @Test
     fun subsaturatedCloudPartitionIsAnEquilibriumOfDetailedMicrophysics() {
         val t = 280.0
-        val sat = ColumnThermodynamics.saturationMm(t, closedPhysics.referenceDryColumnKgM2,
-            geometry.gravity, closedPhysics)
+        val sat = closedPhysics.referenceDryColumnKgM2 * closedPhysics.humidColumnFraction *
+            FastSaturation.mixingRatio(t, closedPhysics.referenceDryColumnKgM2 * geometry.gravity * closedPhysics.cloudPressureFraction)
         val water = 0.85 * sat
         val cloud = ColumnThermodynamics.cloudMm(water,sat)
         val model = MoistAtmosphere(geometry,closedPhysics,DryScenario.REST) { _, _ ->
@@ -28,46 +28,6 @@ class MoistAtmosphereTest {
         assertEquals(t,after.temperatureKelvinAt(3,3),1e-10)
         assertEquals(0.0,after.rainMmPerHourAt(3,3))
         assertTrue(abs(after.diagnostics.relativeWaterResidual) < 1e-12)
-    }
-
-    @Test
-    fun climateReconstructionPreservesAtmosphericWaterAndCarrierVolumeWithLocalTemperatures() {
-        val model = MoistAtmosphere(geometry, closedPhysics, DryScenario.REST) { _, y ->
-            MoistCell(relativeHumidity = 0.95, cloudWaterKgM2 = 0.2,
-                surfaceTemperatureKelvin = 270 + 20 * y / geometry.domainHeightMeters)
-        }
-        val before = model.snapshot()
-        val handoff = model.initializeFromClimate(255 * 365 * 86400.0)
-        val after = model.snapshot()
-        var volumeBefore = 0.0
-        var volumeAfter = 0.0
-        for (y in 0 until geometry.height) for (x in 0 until geometry.width) {
-            assertEquals(before.surfaceTemperatureKelvinAt(x, y) - 6.0,
-                after.temperatureKelvinAt(x, y), 1e-12)
-            val depth = after.dynamics.heightAt(x, y)
-            assertTrue(after.vaporMmAt(x, y).isFinite() && after.vaporMmAt(x, y) >= 0)
-            assertTrue(after.cloudWaterMmAt(x, y).isFinite() && after.cloudWaterMmAt(x, y) >= 0)
-            volumeBefore += before.dynamics.heightAt(x, y)
-            volumeAfter += depth
-        }
-        assertEquals(handoff.waterBeforeKg, handoff.waterAfterKg, handoff.waterBeforeKg * 1e-12)
-        val initialWater = (0 until geometry.height).sumOf { y -> (0 until geometry.width).sumOf { x ->
-            before.vaporMmAt(x, y) + before.cloudWaterMmAt(x, y) } }
-        val rebuiltWater = (0 until geometry.height).sumOf { y -> (0 until geometry.width).sumOf { x ->
-            after.vaporMmAt(x, y) + after.cloudWaterMmAt(x, y) } }
-        assertEquals(initialWater, rebuiltWater, initialWater * 1e-12)
-        assertEquals(volumeBefore, volumeAfter, volumeBefore * 1e-12)
-        assertTrue(handoff.maximumAirTemperatureKelvin > handoff.minimumAirTemperatureKelvin)
-        assertTrue(handoff.rootMeanSquareWindMetersPerSecond > 1)
-        assertTrue(handoff.maximumWindMetersPerSecond <= 35)
-        assertEquals(0L, model.completedSteps)
-        assertEquals(handoff.worldSeconds, model.worldSeconds)
-        model.step()
-        val diagnostics = model.snapshot().diagnostics
-        assertTrue(abs(diagnostics.relativeWaterResidual) < 1e-12)
-        // Reconstruction energy is deliberately reported, not silently removed from raw residuals.
-        val unexplained = diagnostics.unexplainedEnergyResidualJoules - handoff.initializationEnergyChangeJoules
-        assertTrue(abs(unexplained / diagnostics.totalModelEnergyJoules) < 1e-10)
     }
 
     @Test
@@ -140,7 +100,8 @@ class MoistAtmosphereTest {
     fun evolvedAirSurvivesReentryAndSaturationAgreesAcrossPressures() {
         val model = MoistAtmosphere(geometry, closedPhysics, DryScenario.REST) { _, _ -> MoistCell() }
         val temperatures = DoubleArray(geometry.cellCount) { 260.0 + it / geometry.width }
-        model.initializeFromClimate(255 * 365 * 86400.0, temperatures)
+        model.initializeAtlasRealization(255 * 365 * 86400.0, temperatures, DoubleArray(geometry.cellCount) { 0.65 },
+            DoubleArray(geometry.cellCount), DoubleArray(geometry.cellCount), 25.0)
         val after = model.snapshot()
         for (y in 0 until geometry.height) for (x in 0 until geometry.width)
             assertEquals(temperatures[y * geometry.width + x], after.temperatureKelvinAt(x, y), 1e-12)

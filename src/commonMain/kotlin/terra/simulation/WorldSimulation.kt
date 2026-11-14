@@ -36,10 +36,8 @@ data class SimulationProgress(
 data class WorldPresentationSnapshot(
     val progress: SimulationProgress, val world: WorldSnapshot, val weather: WeatherPresentation,
     val drainage: SurfaceWaterSnapshot,
-    val seasonalClimate: SeasonalClimateSnapshot?, val observedClimateYears: Int,
     val yearSeconds: Double, val diagnostics: MoistAtmosphereDiagnostics?,
     val clouds: RasterFrame?, val surfaceWater: RasterFrame,
-    val climateDiagnostics: ClimateIntervalDiagnostics? = null,
     val fidelity: SimulationFidelity = SimulationFidelity.DETAILED, val fidelityRevision: Long = 0,
     val lastHandoff: terra.atmosphere.AtmosphereHandoff? = null,
     val solar: terra.atmosphere.SolarConfig = terra.atmosphere.SolarConfig()
@@ -92,11 +90,9 @@ internal class WorldSimulation(val request: WorldRequest) {
         weatherView = null
     }
 
-    fun quantum(speed: SimulationSpeed): Double = stepSeconds
-
     /** Whole completed transactions only; discarded presentation snapshots never carry transfers. */
-    fun advance(pendingSeconds: Double, speed: SimulationSpeed): Double {
-        if (pendingSeconds < quantum(speed)) return 0.0
+    fun advance(pendingSeconds: Double): Double {
+        if (pendingSeconds < stepSeconds) return 0.0
         if (fidelity == SimulationFidelity.CLIMATE) {
             advanceClimateInterval(stepSeconds)
             return stepSeconds
@@ -140,10 +136,9 @@ internal class WorldSimulation(val request: WorldRequest) {
         } else null
         return WorldPresentationSnapshot(progress, worldView!!,
             weatherView!!, drainageView,
-            weather.seasonalClimate, weather.observedClimateYears,
             weather.physics.solar.yearSeconds,
             weather.takeUnless { it.hasRepresentativeFields }?.diagnostics,
-            cloudFrame, waterFrame, weather.climateDiagnostics,
+            cloudFrame, waterFrame,
             fidelity, fidelityRevision,
             weather.lastHandoff, weather.physics.solar)
     }

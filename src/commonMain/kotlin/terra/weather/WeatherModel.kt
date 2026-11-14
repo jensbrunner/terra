@@ -3,12 +3,9 @@ package terra.weather
 /** Quality of representative fields, independently of integrated rainfall totals. */
 enum class WeatherFieldQuality { RESOLVED_NOW, REPRESENTATIVE_FOR_INTERVAL }
 
-/** Coarse-event diagnostics, not resolved storm intensity or an infiltration parameter. */
-data class RainEventSummary(val wetFraction: Double, val intenseRainMm: Double)
-
 data class WeatherFieldSemantics(
     val quality: WeatherFieldQuality, val intervalStartSeconds: Double = 0.0,
-    val intervalDurationSeconds: Double = 0.0, val energyApproximate: Boolean = false
+    val intervalDurationSeconds: Double = 0.0
 ) {
     companion object { val RESOLVED = WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW) }
 }
@@ -21,7 +18,6 @@ interface WeatherModel {
     fun relativeVorticityPerSecond(x: Int, y: Int): Double? = null
     /** Rain totals are integrated over the update; representative peaks describe subperiods. */
     val fieldSemantics: WeatherFieldSemantics get() = WeatherFieldSemantics.RESOLVED
-    fun rainEventSummary(x: Int, y: Int): RainEventSummary? = null
     val width: Int
     val height: Int
     /** Completed simulation time; presentation never advances the model clock. */
@@ -51,5 +47,6 @@ interface WeatherModel {
     fun atmosphericWaterMm(x: Int, y: Int): Double
     fun cloudWaterMm(x: Int, y: Int): Double
     fun soilWaterMm(x: Int, y: Int): Double
+    fun soilCapacityMm(x: Int, y: Int): Double = 250.0
     fun soilMoisture(x: Int, y: Int): Double
 }

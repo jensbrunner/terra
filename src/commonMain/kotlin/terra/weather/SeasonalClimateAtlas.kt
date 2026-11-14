@@ -10,8 +10,9 @@ import kotlin.math.*
 class SeasonalClimateAtlas internal constructor(
     val geography: ClimateGeography, val solar: SolarConfig,
     internal val temperature: Array<DoubleArray>, internal val rain: Array<DoubleArray>,
-    internal val pet: Array<DoubleArray>, internal val east: Array<DoubleArray>, internal val south: Array<DoubleArray>,
-    val regionalAnnualMeanRainMm: Double, val maximumHumidityChangeMm: Double
+    internal val pet: Array<DoubleArray>, internal val humidity: Array<DoubleArray>, internal val east: Array<DoubleArray>, internal val south: Array<DoubleArray>,
+    val regionalAnnualMeanRainMm: Double, val maximumHumidityChangeMm: Double,
+    val moistureSweeps: Int, val maximumMoistureResidualMmPerDay: Double
 ) {
     val geometryRevision = geography.geometryRevision
     val width = geography.world.width
@@ -24,83 +25,45 @@ class SeasonalClimateAtlas internal constructor(
     internal val warmest = DoubleArray(count) { i -> temperature.maxOf { it[i] } }
     fun temperatureC(month: Int, tile: Int) = temperature[month][tile]
     fun rainfallMm(month: Int, tile: Int) = rain[month][tile]
-    fun potentialEvapotranspirationMm(month: Int, tile: Int) = pet[month][tile]
     fun annualRainfallMm(tile: Int) = annualRain[tile]
     fun aridity(tile: Int) = annualRain[tile] / max(1.0, annualPet[tile])
+    fun relativeHumidity(month: Int, tile: Int) = humidity[month][tile]
     fun windEastMetersPerSecond(month: Int, tile: Int) = east[month][tile]
     fun windSouthMetersPerSecond(month: Int, tile: Int) = south[month][tile]
     fun monthAt(seconds: Double) = floor(((seconds / solar.yearSeconds + solar.initialYearFraction) % 1.0) * 12 + 1e-10).toInt() % 12
 
-    /** Compatibility view for existing seasonal inspector; full tile resolution avoids a second rainfall representation. */
-    internal fun seasonalSnapshot(): SeasonalClimateSnapshot {
-        val temps = Array(4) { DoubleArray(count) }; val rains = Array(4) { DoubleArray(count) }
-        val durations = DoubleArray(4) { solar.yearSeconds / 4 }
-        val low = DoubleArray(count); val high = DoubleArray(count)
-        for (i in 0 until count) {
-            val j = (height - 1 - i / width) * width + i % width
-            low[j] = temperature.minOf { it[i] }; high[j] = warmest[i]
-            for (m in 0..11) { temps[m / 3][j] += temperature[m][i] * solar.yearSeconds / 12; rains[m / 3][j] += rain[m][i] }
-        }
-        val year = ClimateYear(temps, rains, durations, low, high, DoubleArray(count), true)
-        return SeasonalClimateSnapshot(width, height, solar.yearSeconds, 0, year, year)
-    }
 }
 
 /** One upwind fixed-point moisture model. No live cloud, pressure, heat or vapor state. */
-class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), private val sweeps: Int = 160,
+class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), private val sweeps: Int = 384,
     private val windOverride: Double? = null) {
     fun build(g: ClimateGeography): SeasonalClimateAtlas {
         require(sweeps > 0)
         val n = g.count; val w = g.width; val h = g.height
         val t = Array(12) { DoubleArray(n) }; val p = Array(12) { DoubleArray(n) }
+        val humidity = Array(12) { DoubleArray(n) }
         val e = Array(12) { DoubleArray(n) }; val s = Array(12) { DoubleArray(n) }
         // Atlas months are orbital bins; initialYearFraction belongs to monthAt(), not
         // to the forcing of each bin (otherwise a nonzero start season is counted twice).
         val sunlight = PlanetarySunlight(w, h, solar.copy(initialYearFraction = 0.0), northUp = false)
         calculateTemperatures(g, sunlight, t)
-        val q = DoubleArray(n); val previousRain = DoubleArray(n)
-        var residual = 0.0
+        var residual = 0.0; var moistureResidual = 0.0; var totalSweeps = 0
         for (m in 0..11) {
             diagnoseWinds(g, t[m], e[m], s[m])
-            // Independent diagnostic solves: ocean supply fixes each month without a persistent vapor store.
-            q.fill(0.0); previousRain.fill(0.0)
-            val tau = DoubleArray(n); val lambda = DoubleArray(n); val oceanQ = DoubleArray(n)
-            for (i in 0 until n) {
-                val u = e[m][i]; val v = s[m][i]
-                tau[i] = 1 / max(0.2 / min(g.config.dx, g.config.dy), max(abs(u) / g.config.dx, abs(v) / g.config.dy)) / 86400
-                val x = i % w; val y = i / w
-                val divergence = (e[m][y * w + (x + 1) % w] - e[m][y * w + (x + w - 1) % w]) / (2 * g.config.dx) +
-                    (s[m][min(h - 1, y + 1) * w + x] - s[m][max(0, y - 1) * w + x]) / (2 * g.config.dy)
-                val convergenceRainout = (CONVERGENCE_EFFICIENCY * max(0.0, -divergence) * 86400).coerceAtMost(0.3)
-                val uplift = max(0.0, u * g.slopeEast[i] + v * g.slopeSouth[i])
-                lambda[i] = 0.045 + convergenceRainout + 1.4 * uplift
-                oceanQ[i] = (55 * exp(0.04 * (t[m][i] - 20))).coerceIn(5.0, 100.0)
-            }
-            repeat(sweeps) { sweep ->
-                var change = 0.0
-                for (index in 0 until n) {
-                    val i = if (sweep % 2 == 0) index else n - 1 - index
-                    val u = e[m][i]; val v = s[m][i]
-                    val scale = max(0.2 / min(g.config.dx, g.config.dy), max(abs(u) / g.config.dx, abs(v) / g.config.dy))
-                    val up = sample(q, w, h, i % w - u / g.config.dx / scale, i / w - v / g.config.dy / scale)
-                    // Overlap sums can exceed one by roundoff; an ocean source must never become a sink.
-                    val k = (1 - g.landFraction[i].coerceIn(0.0, 1.0)) * 1.2
-                    val recycle = 0.18 * previousRain[i] * g.landFraction[i]
-                    val next = (up + tau[i] * (recycle + k * oceanQ[i])) / (1 + tau[i] * (lambda[i] + k))
-                    change = max(change, abs(next - q[i])); q[i] = next
-                    previousRain[i] = lambda[i] * next
-                }
-                if (sweep == sweeps - 1) residual = max(residual, change)
-            }
-            for (i in 0 until n) p[m][i] = previousRain[i] * 365 / 12
+            val solve = diagnoseRainfall(g, t[m], e[m], s[m], p[m], humidity[m])
+            residual = max(residual, solve.changeMm)
+            moistureResidual = max(moistureResidual, solve.residualMmPerDay)
+            totalSweeps += solve.sweeps
         }
         val tileCount = g.tileElevation.size
         val tileT = Array(12) { DoubleArray(tileCount) }; val tileP = Array(12) { DoubleArray(tileCount) }
         val tilePet = Array(12) { DoubleArray(tileCount) }; val tileE = Array(12) { DoubleArray(tileCount) }; val tileS = Array(12) { DoubleArray(tileCount) }
 
+        val tileHumidity = Array(12) { DoubleArray(tileCount) }
         val weight = DoubleArray(tileCount); val scratch = DoubleArray(n)
         for (m in 0..11) {
             sunlight.update((m + 0.5) * solar.yearSeconds / 12)
+            g.overlap.prolongUniform(humidity[m], tileHumidity[m])
             g.overlap.prolongUniform(e[m], tileE[m]); g.overlap.prolongUniform(s[m], tileS[m])
             // Bilinear reconstruction within each coarse cell, then conservative overlap normalization.
             // This preserves regional water exactly while blending adjacent-cell boundaries.
@@ -117,8 +80,136 @@ class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), privat
             }
             g.overlap.prolongWeighted(p[m], weight, tileP[m], scratch)
         }
-        return SeasonalClimateAtlas(g, solar, tileT, tileP, tilePet, tileE, tileS, p.sumOf { it.sum() } / n, residual)
+        return SeasonalClimateAtlas(g, solar, tileT, tileP, tilePet, tileHumidity, tileE, tileS, p.sumOf { it.sum() } / n, residual, totalSweeps, moistureResidual)
     }
+    private data class MoistureSolve(val sweeps: Int, val changeMm: Double, val residualMmPerDay: Double)
+
+    /** Steady advection with weak unresolved mixing. Humidity is a diagnostic availability,
+     * not a historical atmospheric reservoir. Every sink removes humidity before it can
+     * reach the lee; land recycling returns only a fraction of that same precipitation. */
+    private fun diagnoseRainfall(g: ClimateGeography, temperature: DoubleArray, east: DoubleArray,
+        south: DoubleArray, rain: DoubleArray, humidity: DoubleArray): MoistureSolve {
+        val n = g.count; val w = g.width; val h = g.height
+        val q = DoubleArray(n)
+        val upwind = IntArray(n * 4); val weights = DoubleArray(n * 4)
+        val advection = DoubleArray(n); val oceanSupply = DoubleArray(n)
+        val capacity = DoubleArray(n); val lambda = DoubleArray(n); val recycledFraction = DoubleArray(n)
+        val diffusionX = MOISTURE_DIFFUSIVITY_M2_S * 86400 / (g.config.dx * g.config.dx)
+        val diffusionY = MOISTURE_DIFFUSIVITY_M2_S * 86400 / (g.config.dy * g.config.dy)
+        val denominator = DoubleArray(n)
+        val hasOcean = g.landFraction.any { it < 1 - 1e-12 }
+        val initialFetchLength = sqrt(MOISTURE_DIFFUSIVITY_M2_S * 86400 / BACKGROUND_RAINOUT_PER_DAY)
+        for (i in 0 until n) {
+            val x = i % w; val y = i / w
+            val fraction = g.landFraction[i].coerceIn(0.0, 1.0)
+            val land = when { fraction < 1e-12 -> 0.0; fraction > 1 - 1e-12 -> 1.0; else -> fraction }
+            val scale = max(abs(east[i]) / g.config.dx, abs(south[i]) / g.config.dy)
+            advection[i] = scale * 86400
+            val px = x - if (scale > 0) east[i] / g.config.dx / scale else 0.0
+            val py = (y - if (scale > 0) south[i] / g.config.dy / scale else 0.0).coerceIn(0.0, h - 1.0)
+            val ix = floor(px).toInt(); val iy = floor(py).toInt()
+            val fx = px - ix; val fy = py - iy
+            val left = ((ix % w) + w) % w; val right = (left + 1) % w
+            val top = iy.coerceIn(0, h - 1); val bottom = (iy + 1).coerceIn(0, h - 1)
+            val offset = i * 4
+            upwind[offset] = top * w + left; upwind[offset + 1] = top * w + right
+            upwind[offset + 2] = bottom * w + left; upwind[offset + 3] = bottom * w + right
+            weights[offset] = (1 - fx) * (1 - fy); weights[offset + 1] = fx * (1 - fy)
+            weights[offset + 2] = (1 - fx) * fy; weights[offset + 3] = fx * fy
+            var upwindHeight = 0.0
+            for (j in 0..3) upwindHeight += g.elevationMeters[upwind[offset + j]] * weights[offset + j]
+            // Directed ascent follows the actual incoming path, rather than averaging the lee
+            // into a central terrain gradient. The same path supplies humidity below.
+            val uplift = max(0.0, g.elevationMeters[i] - upwindHeight) * scale
+            val divergence = (east[y * w + (x + 1) % w] - east[y * w + (x + w - 1) % w]) / (2 * g.config.dx) +
+                (south[min(h - 1, y + 1) * w + x] - south[max(0, y - 1) * w + x]) / (2 * g.config.dy)
+            lambda[i] = BACKGROUND_RAINOUT_PER_DAY + (CONVERGENCE_EFFICIENCY * max(0.0, -divergence) * 86400).coerceAtMost(0.3) + OROGRAPHIC_RAINOUT * uplift
+            capacity[i] = (68 * exp(0.055 * (temperature[i] - 20))).coerceIn(2.0, 125.0)
+            oceanSupply[i] = (1 - land) * 1.2
+            recycledFraction[i] = 0.18 * land
+            // A diffusion-length initial guess accelerates sheltered regions. The residual
+            // check below, not this guess, determines the final diagnostic solution.
+            q[i] = if (hasOcean) 0.8 * capacity[i] * exp(-g.coastDistanceMeters[i] / initialFetchLength) else 0.0
+            val diffusion = 2 * diffusionX + (if (y > 0) diffusionY else 0.0) + (if (y + 1 < h) diffusionY else 0.0)
+            // A calm upwind sample is local; exclude that diagonal contribution analytically.
+            var selfWeight = 0.0
+            for (j in 0..3) if (upwind[offset + j] == i) selfWeight += weights[offset + j]
+            denominator[i] = advection[i] * (1 - selfWeight) + diffusion + oceanSupply[i] + (1 - recycledFraction[i]) * lambda[i]
+        }
+        fun supply(i: Int): Double {
+            val x = i % w; val y = i / w
+            var incoming = oceanSupply[i] * 0.8 * capacity[i]
+            for (j in 0..3) {
+                val source = upwind[i * 4 + j]
+                if (source != i) incoming += advection[i] * weights[i * 4 + j] * q[source]
+            }
+            incoming += diffusionX * (q[y * w + (x + w - 1) % w] + q[y * w + (x + 1) % w])
+            if (y > 0) incoming += diffusionY * q[i - w]
+            if (y + 1 < h) incoming += diffusionY * q[i + w]
+            return incoming
+        }
+        fun equationResidual(result: DoubleArray): Double {
+            var maximum = 0.0
+            for (i in 0 until n) {
+                val cooling = (1 - recycledFraction[i]) * COOLING_RAINOUT_PER_DAY * max(0.0, q[i] - capacity[i])
+                result[i] = supply(i) - denominator[i] * q[i] - cooling
+                maximum = max(maximum, abs(result[i]))
+            }
+            return maximum
+        }
+        val anchor = DoubleArray(n); val plain = DoubleArray(n)
+        val anchorResidual = DoubleArray(n); val currentResidual = DoubleArray(n)
+        var used = 0; var change = Double.POSITIVE_INFINITY; var residual = Double.POSITIVE_INFINITY
+        for (sweep in 0 until sweeps) {
+            if (sweep % 4 == 0) { q.copyInto(anchor); equationResidual(anchorResidual) }
+            change = 0.0
+            for (index in 0 until n) {
+                val i = if (sweep % 2 == 0) index else n - 1 - index
+                val incoming = supply(i)
+                val dry = incoming / denominator[i]
+                // Implicit condensation of humidity in excess of local temperature capacity.
+                // Descending warm air can hold more moisture, but cannot manufacture it.
+                val cooling = (1 - recycledFraction[i]) * COOLING_RAINOUT_PER_DAY
+                val next = if (dry <= capacity[i]) dry else
+                    (incoming + cooling * capacity[i]) / (denominator[i] + cooling)
+                change = max(change, abs(next - q[i])); q[i] = next
+            }
+            used++
+            if (used % 4 == 0 || used == sweeps) {
+                residual = equationResidual(currentResidual)
+                // Residual-minimizing extrapolation accelerates slow sheltered circulation.
+                // Accept it only when the actual nonlinear residual improves and q stays positive.
+                var dot = 0.0; var norm = 0.0; var plainNorm = 0.0
+                var positiveLimit = 8.0
+                for (i in 0 until n) {
+                    val difference = anchorResidual[i] - currentResidual[i]
+                    dot += anchorResidual[i] * difference; norm += difference * difference
+                    plainNorm += currentResidual[i] * currentResidual[i]
+                    val delta = q[i] - anchor[i]
+                    if (delta < 0) positiveLimit = min(positiveLimit, -anchor[i] / delta)
+                }
+                val factor = if (norm > 1e-20) (dot / norm).coerceIn(1.0, max(1.0, positiveLimit)) else 1.0
+                if (factor > 1.01) {
+                    q.copyInto(plain)
+                    for (i in 0 until n) q[i] = max(0.0, anchor[i] + factor * (plain[i] - anchor[i]))
+                    val candidateResidual = equationResidual(currentResidual)
+                    var candidateNorm = 0.0
+                    for (value in currentResidual) candidateNorm += value * value
+                    if (candidateNorm < plainNorm && candidateResidual <= residual) {
+                        residual = candidateResidual
+                        for (i in 0 until n) change = max(change, abs(q[i] - plain[i]))
+                    } else plain.copyInto(q)
+                }
+                if (change < HUMIDITY_TOLERANCE_MM && residual < MOISTURE_TOLERANCE_MM_DAY) break
+            }
+        }
+        for (i in 0 until n) {
+            rain[i] = (lambda[i] * q[i] + COOLING_RAINOUT_PER_DAY * max(0.0, q[i] - capacity[i])) * 365 / 12
+            humidity[i] = (q[i] / capacity[i]).coerceIn(0.0, 1.0)
+        }
+        return MoistureSolve(used, change, residual)
+    }
+
     /** Local linear energy balance: absorbed sunlight = A + B T. The thermal
      * response is solved for a periodic year analytically, with no heat PDE or spin-up.
      * The monthly mean of the exact exponential response supplies the atlas temperature. */
@@ -172,7 +263,7 @@ class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), privat
         }
     }
 
-    private companion object {
+    internal companion object {
         const val SOLAR_FLUX_W_M2 = 1360.0
         const val OUTGOING_AT_ZERO_W_M2 = 180.0
         const val OUTGOING_SLOPE_W_M2_K = 4.0
@@ -183,6 +274,13 @@ class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), privat
         const val WIND_DRAG_DAYS = 1.0
         const val MAX_WIND_M_S = 12.0
         const val CONVERGENCE_EFFICIENCY = 0.1
+        const val BACKGROUND_RAINOUT_PER_DAY = 0.02
+        const val OROGRAPHIC_RAINOUT = 2.5
+        const val COOLING_RAINOUT_PER_DAY = 0.7
+        // Unresolved crosswind mixing feeds sheltered/stagnant regions without prescribing rain.
+        const val MOISTURE_DIFFUSIVITY_M2_S = 75_000.0
+        const val HUMIDITY_TOLERANCE_MM = 0.002
+        const val MOISTURE_TOLERANCE_MM_DAY = 0.01
     }
 
     private fun sample(a: DoubleArray, w: Int, h: Int, x: Double, y: Double): Double {

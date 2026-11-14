@@ -6,7 +6,7 @@ import kotlin.math.*
 import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
-import terra.atmosphere.DryAtmosphereConfig
+import terra.atmosphere.AtmosphereTileMapping
 import terra.weather.*
 import terra.world.*
 
@@ -14,10 +14,12 @@ import terra.world.*
 fun main(args: Array<String>) {
     val output = File(args.firstOrNull { it.startsWith("--output=") }?.substringAfter('=') ?: "build/experiments/seasonal-atlas").also { it.mkdirs() }
     val summaries = StringBuilder()
-    fun export(name: String, world: World, wind: Double? = null, month: Int = 3) {
+    fun export(name: String, world: World, wind: Double? = null, month: Int = 3): SeasonalClimateAtlas {
         val start = System.nanoTime()
         val atlas = ClimateAtlasBuilder(windOverride = wind).build(ClimateGeography(world))
-        world.evolveAtlasCover(atlas, 0.0, initialize = true)
+        val surface = TerrainMoistSurface(world, AtmosphereTileMapping(world.width, world.height, atlas.geography.config))
+        surface.initializeClimate(atlas)
+        world.evolveAtlasCover(atlas, 0.0, initialize = true, soilAvailability = surface.growingWaterAvailability)
         val millis = (System.nanoTime() - start) / 1e6
         val w = world.width; val h = world.height
         val scale = 3; val label = 26
@@ -64,7 +66,14 @@ fun main(args: Array<String>) {
         }
         graphics.dispose(); ImageIO.write(image, "png", File(output, "$name.png"))
         val landRain = (0 until w * h).filter { world.isLand(it % w, it / w) }.map { atlas.annualRainfallMm(it) }.sorted()
-        summaries.appendLine("$name build_ms=$millis q_sweep_residual_mm=${atlas.maximumHumidityChangeMm} temperature_range=${atlas.meanTemperature.min()}..${atlas.meanTemperature.max()} max_wind_ms=${(0 until w * h).maxOf { hypot(atlas.windEastMetersPerSecond(month, it), atlas.windSouthMetersPerSecond(month, it)) }} land_rain_p10_p50_p90=${listOf(0.1,0.5,0.9).map { landRain[(it * (landRain.size - 1)).toInt()] }} ${world.landBiomeSummary()}")
+        summaries.appendLine("$name build_ms=$millis mean_sweeps_per_month=${atlas.moistureSweeps / 12.0} q_change_mm=${atlas.maximumHumidityChangeMm} moisture_residual_mm_day=${atlas.maximumMoistureResidualMmPerDay} temperature_range=${atlas.meanTemperature.min()}..${atlas.meanTemperature.max()} max_wind_ms=${(0 until w * h).maxOf { hypot(atlas.windEastMetersPerSecond(month, it), atlas.windSouthMetersPerSecond(month, it)) }} land_rain_p10_p50_p90=${listOf(0.1,0.5,0.9).map { landRain[(it * (landRain.size - 1)).toInt()] }} ${world.landBiomeSummary()}")
+        if (name == "seed-31742" || name == "moisture-coast-ridge-interior") {
+            val evolution = ClimateEvolution(world, surface, 0.0)
+            writeLandscape(output, "$name-year0", world, surface)
+            repeat(5) { evolution.advance(atlas, 20 * atlas.solar.yearSeconds, 0) }
+            writeLandscape(output, "$name-year100", world, surface)
+        }
+        return atlas
     }
     for (seed in listOf(31742, 42, 777)) export("seed-$seed", World(seed))
     val w = 144; val h = 108
@@ -82,6 +91,108 @@ fun main(args: Array<String>) {
     })
     export("island-summer", island)
     export("island-winter", island, month = 9)
+    fun moistureWorld(ridge: Boolean, mirror: Boolean = false) = World.withElevation(7, 96, 72,
+        TerrainGenerationSettings(), DoubleArray(96 * 72) { i ->
+            val x = if (mirror) 95 - i % 96 else i % 96
+            if (x !in 16..80) 0.1 else 0.32 + 0.0015 * cos(2 * PI * (i / 96) / 18) + if (ridge) 0.27 * exp(-((x - 40.0) / 5).pow(2)) else 0.0
+        })
+    val ridgeWorld = moistureWorld(true)
+    val wetDry = export("moisture-coast-ridge-interior", ridgeWorld, 5.0)
+    val flat = export("moisture-flat-control", moistureWorld(false), 5.0)
+    export("moisture-reversed", moistureWorld(true, true), -5.0)
+    writeMoistureTransect(output, ridgeWorld, wetDry, flat)
     File(output, "metrics.txt").writeText(summaries.toString()); print(summaries)
     println("ATLAS_REVIEW ${output.absolutePath}")
+}
+
+/** Same equations and ecology on both slopes; numerical wind is held fixed to isolate rainout. */
+private fun writeMoistureTransect(output: File, world: World, atlas: SeasonalClimateAtlas, flat: SeasonalClimateAtlas) {
+    val rain = DoubleArray(world.width); val control = DoubleArray(world.width)
+    val elevation = DoubleArray(world.width); val trees = DoubleArray(world.width)
+    for (x in 0 until world.width) {
+        for (y in 28..43) {
+            rain[x] += atlas.annualRainfallMm(y * world.width + x) / 16
+            control[x] += flat.annualRainfallMm(y * world.width + x) / 16
+            trees[x] += world.treeCover(x, y) / 16
+        }
+        elevation[x] = world.elevationMeters(x, 36)
+    }
+    val csv = StringBuilder("x,elevation_m,rain_mm_year,flat_rain_mm_year,tree_cover\n")
+    for (x in rain.indices) csv.appendLine("$x,${elevation[x]},${rain[x]},${control[x]},${trees[x]}")
+    File(output, "moisture-transect.csv").writeText(csv.toString())
+    val image = BufferedImage(1200, 620, BufferedImage.TYPE_INT_RGB)
+    val g = image.createGraphics()
+    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+    g.color = Color(18, 29, 37); g.fillRect(0, 0, 1200, 620)
+    g.color = Color.WHITE; g.font = java.awt.Font("SansSerif", java.awt.Font.BOLD, 20)
+    g.drawString("Ocean → wet windward mountains → dry continental interior", 55, 38)
+    g.font = java.awt.Font("SansSerif", java.awt.Font.PLAIN, 14)
+    g.drawString("Fixed 5 m/s wind · tropical transect · identical rainfall equations and existing vegetation model", 55, 64)
+    fun px(x: Int) = 70 + x * 1070.0 / (world.width - 1)
+    val top = 110; val baseline = 420; val maximum = max(5000.0, ceil(rain.max() / 1000) * 1000)
+    for (mark in 0..5) {
+        val y = baseline - mark * (baseline - top) / 5
+        g.color = Color(49, 67, 76); g.drawLine(70, y, 1140, y)
+        g.color = Color(184, 201, 207); g.drawString("${(mark * maximum / 5).toInt()}", 15, y + 5)
+    }
+    g.drawString("Rain · mm/year", 70, 96)
+    fun line(field: DoubleArray, color: Color, maximumValue: Double, bottom: Int, height: Int) {
+        g.color = color; g.stroke = java.awt.BasicStroke(2.5f)
+        val path = java.awt.geom.Path2D.Double()
+        for (x in field.indices) {
+            val y = bottom - field[x] / maximumValue * height
+            if (x == 0) path.moveTo(px(x), y) else path.lineTo(px(x), y)
+        }
+        g.draw(path)
+    }
+    line(control, Color(164, 174, 180), maximum, baseline, baseline - top)
+    line(rain, Color(85, 202, 222), maximum, baseline, baseline - top)
+    g.color = Color(85, 202, 222); g.drawString("With mountains", 850, 88)
+    g.color = Color(164, 174, 180); g.drawString("Flat control", 1005, 88)
+    g.color = Color(184, 201, 207); g.drawString("Elevation / existing tree cover", 70, 466)
+    line(elevation, Color(211, 181, 125), 3500.0, 580, 90)
+    line(trees, Color(107, 211, 135), 1.0, 580, 90)
+    g.drawString("Ocean", 95, 603); g.drawString("Windward", 385, 603); g.drawString("Ridge", 505, 603); g.drawString("Leeward interior", 650, 603)
+    g.dispose(); ImageIO.write(image, "png", File(output, "moisture-transect.png"))
+    fun mean(field: DoubleArray, xs: IntRange) = xs.sumOf { field[it] } / xs.count()
+    val report = "windward_rain_mm_year=${mean(rain, 31..39)} lee_rain_mm_year=${mean(rain, 48..62)} flat_interior_rain_mm_year=${mean(control, 48..62)} windward_tree_cover=${mean(trees, 31..39)} lee_tree_cover=${mean(trees, 48..62)}\n"
+    File(output, "moisture-milestone.txt").writeText(report)
+    print(report)
+}
+
+private fun writeLandscape(output: File, name: String, world: World, surface: TerrainMoistSurface) {
+    val image = BufferedImage(world.width * 3 * 3, (world.height * 3 + 26), BufferedImage.TYPE_INT_RGB)
+    val g = image.createGraphics()
+    val water = surface.surfaceWater.snapshot()
+    val labels = listOf("Persistent cover + rivers/lakes", "Root-zone water · 0–250 mm", "Growing-season water availability")
+    for (panel in 0..2) {
+        val ox = panel * world.width * 3
+        g.color = Color(18, 29, 37); g.fillRect(ox, 0, world.width * 3, 26)
+        g.color = Color.WHITE; g.drawString(labels[panel], ox + 6, 18)
+        for (y in 0 until world.height) for (x in 0 until world.width) {
+            val i = y * world.width + x
+            val tree = world.treeCover(x, y); val grass = world.grassCover(x, y); val bare = world.bareCover(x, y)
+            g.color = if (!world.isLand(x, y)) Color(34, 70, 97) else when (panel) {
+                0 -> if (world[x, y].terrain == Terrain.TUNDRA || world[x, y].terrain == Terrain.MOUNTAINS) Color(149, 157, 148)
+                    else Color((30 * tree + 133 * grass + 195 * bare).toInt().coerceIn(0,255),
+                        (103 * tree + 156 * grass + 160 * bare).toInt().coerceIn(0,255), (49 * tree + 77 * grass + 110 * bare).toInt().coerceIn(0,255))
+                else -> { val f = (if (panel == 1) surface.soil[i] / 250 else surface.growingWaterAvailability[i]).coerceIn(0.0,1.0)
+                    Color((185 - 135 * f).toInt(), (130 + 60 * f).toInt(), (76 + 115 * f).toInt()) }
+            }
+            if (panel == 0 && water.isLakeTileWet(x, y)) g.color = Color(66, 155, 196)
+            g.fillRect(ox + x * 3, 26 + y * 3, 3, 3)
+            if (panel == 0 && water.isStreamTile(x, y)) {
+                val next = water.downstreamTileIndex(x, y)
+                if (next >= 0 && abs(next % world.width - x) < 3 && abs(next / world.width - y) < 3) {
+                    g.color = Color(66, 155, 196); g.stroke = java.awt.BasicStroke(0.8f)
+                    g.draw(java.awt.geom.Line2D.Double(x * 3 + 1.5, 26 + y * 3 + 1.5,
+                        next % world.width * 3 + 1.5, 26 + next / world.width * 3 + 1.5))
+                }
+            }
+        }
+    }
+    g.dispose(); ImageIO.write(image, "png", File(output, "$name-landscape.png"))
+    val wetLakes = (0 until world.width * world.height).count { water.isLakeTileWet(it % world.width, it / world.width) }
+    val streams = (0 until world.width * world.height).count { water.isStreamTile(it % world.width, it / world.width) }
+    File(output, "$name-landscape.txt").writeText("wet_lake_tiles=$wetLakes stream_tiles=$streams soil_mean_mm=${surface.soil.average()}\n${world.landBiomeSummary()}\n")
 }

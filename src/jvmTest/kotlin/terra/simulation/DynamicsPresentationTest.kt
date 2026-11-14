@@ -7,8 +7,6 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import terra.atmosphere.DryAtmosphereConfig
-import terra.weather.testWeather
-import terra.world.World
 
 class DynamicsPresentationTest {
     @Test
@@ -17,7 +15,7 @@ class DynamicsPresentationTest {
             atmosphere = DryAtmosphereConfig(width = 8, height = 6)))
         fun capture() = owner.snapshot(SimulationProgress(0, 1, 0, owner.completedSeconds,
             SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, 86400.0, false, 0.0, 0.0, 0))
-        owner.advance(20.0, SimulationSpeed.ONE_HOUR)
+        owner.advance(20.0)
         val detailed = capture().weather
         val pressure = detailed.pressureAnomalyPercent(4, 5)
         val curl = detailed.relativeVorticityPerSecond(4, 5)
@@ -30,7 +28,7 @@ class DynamicsPresentationTest {
         assertNull(capture().weather.relativeVorticityPerSecond(4, 5))
         owner.setFidelity(SimulationFidelity.DETAILED)
         assertTrue(capture().weather.hasResolvedDynamics)
-        owner.advance(20.0, SimulationSpeed.ONE_HOUR)
+        owner.advance(20.0)
         assertTrue(capture().weather.hasResolvedDynamics)
         assertNotNull(capture().weather.pressureAnomalyPercent(4, 5))
         assertEquals(pressure, detailed.pressureAnomalyPercent(4, 5))

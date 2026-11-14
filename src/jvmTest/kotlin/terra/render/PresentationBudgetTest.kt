@@ -4,8 +4,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import terra.weather.DynamicalWeather
-import terra.weather.WeatherModel
-import terra.weather.testWeather
 import terra.world.World
 
 class PresentationBudgetTest {

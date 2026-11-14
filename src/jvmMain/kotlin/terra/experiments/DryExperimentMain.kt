@@ -50,7 +50,6 @@ fun main(args: Array<String>) {
     val stride = max(1L, steps / (frameCount - 1))
     val seed = (values["seed"] ?: "31742").toInt()
     val output = File(values["output"] ?: "build/experiments/${if (moist) "moist" else "dry"}-atmosphere").apply { mkdirs() }
-    require(!terrain || scenario == DryScenario.JET) { "Coupled terrain uses the game JET initializer" }
     val world = if (terrain) World(seed, config.width * 2 - 1, config.height * 2 - 1) else null
     val coupled = world?.let { DynamicalWeather(it, config) }
     val wetModel = if (moist && !terrain) MoistAtmosphere(config, scenario = scenario, seed = seed) else null
@@ -63,7 +62,7 @@ fun main(args: Array<String>) {
     val initialImage = DryAtmosphereImages.frame(initial, initialMoist)
     ImageIO.write(initialImage, "png", File(output, "initial.png"))
     println("${if (moist) "Moist" else "Dry"} $scenario ${config.width}×${config.height}: $steps fixed ${config.stepSeconds}s steps")
-    val budgets = StringBuilder("day,relative_water_residual,energy_residual_J,numerical_transport_energy_J,unexplained_energy_residual_J,boundary_export_kg,soil_mm_tiles,observed_years\n")
+    val budgets = StringBuilder("day,relative_water_residual,energy_residual_J,numerical_transport_energy_J,unexplained_energy_residual_J,boundary_export_kg,soil_mm_tiles\n")
     AnimatedGif(File(output, "atmosphere.gif")).use { animation ->
         animation.add(initialImage)
         while (completedSteps() < steps) {
@@ -83,11 +82,11 @@ fun main(args: Array<String>) {
                     val diagnostics = wet!!.diagnostics
                     val soil = (0 until coupled.height).sumOf { y -> (0 until coupled.width).sumOf { x -> coupled.soilWaterMm(x, y) } }
                     budgets.append("${elapsedSeconds() / 86400},${diagnostics.relativeWaterResidual},${diagnostics.energyResidualJoules}," +
-                        "${diagnostics.numericalTransportEnergyJoules},${diagnostics.unexplainedEnergyResidualJoules},${diagnostics.exportedWaterKg},$soil,${coupled.observedClimateYears}\n")
+                        "${diagnostics.numericalTransportEnergyJoules},${diagnostics.unexplainedEnergyResidualJoules},${diagnostics.exportedWaterKg},$soil\n")
                     println("water_residual=${diagnostics.relativeWaterResidual}; energy_residual_J=${diagnostics.energyResidualJoules}; " +
                         "transport_energy_J=${diagnostics.numericalTransportEnergyJoules}; unexplained_energy_J=${diagnostics.unexplainedEnergyResidualJoules}; " +
                         "boundary_export_kg=${diagnostics.exportedWaterKg}; soil_mm_tiles=$soil; " +
-                        "observed_years=${coupled.observedClimateYears}; biome_revision=${world.biomeRevision}")
+                        "biome_revision=${world.biomeRevision}")
                 }
             }
         }
@@ -120,13 +119,13 @@ fun main(args: Array<String>) {
             "numerical_transport_energy_J=${d.numericalTransportEnergyJoules}\nunexplained_energy_residual_J=${d.unexplainedEnergyResidualJoules}\n" +
             "energy_residual_J=${d.energyResidualJoules}\ntotal_evaporation_kg=${d.totalEvaporationKg}\ntotal_rain_kg=${d.totalRainKg}\n"
     } ?: ""
-    val climateText = coupled?.seasonalClimate?.let { climate ->
-        "observed_climate_years=${climate.observedYears}\nannual_coverage=${climate.hasAnnualCoverage}\n" +
-            "climate_surface_temperature_C=${(0 until config.cellCount).map(climate::meanSurfaceTemperatureC).average()}\n" +
-            "climate_annual_rain_mm=${(0 until config.cellCount).map(climate::annualPrecipitationMm).average()}\n" +
-            "mean_seasonal_temperature_range_C=${(0 until config.cellCount).map { cell ->
-                (0..3).maxOf { climate.seasonMeanSurfaceTemperatureC(it, cell) } -
-                    (0..3).minOf { climate.seasonMeanSurfaceTemperatureC(it, cell) }
+    val climateText = coupled?.atlas?.let { climate ->
+        val tiles = 0 until climate.width * climate.height
+        "climate_surface_temperature_C=${tiles.map { climate.meanTemperature[it] }.average()}\n" +
+            "climate_annual_rain_mm=${tiles.map(climate::annualRainfallMm).average()}\n" +
+            "mean_seasonal_temperature_range_C=${tiles.map { tile ->
+                (0..11).maxOf { climate.temperatureC(it, tile) } -
+                    (0..11).minOf { climate.temperatureC(it, tile) }
             }.average()}\n" +
             "biome_revision=${world.biomeRevision}\nboundary_export_kg=${coupled.diagnostics.exportedWaterKg}\n"
     } ?: ""

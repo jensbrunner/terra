@@ -1,6 +1,5 @@
 package terra.weather
 
-import terra.atmosphere.DryAtmosphereConfig
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max

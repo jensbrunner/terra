@@ -57,7 +57,8 @@ internal class DynamicalWeatherPresentation(
     override fun thirtyDayRainMmPerHour(x: Int, y: Int) = fields[4][index(x, y)]
     override fun annualizedRainMmPerYear(x: Int, y: Int) = thirtyDayRainMmPerHour(x, y) * 24 * 365
     override fun soilWaterMm(x: Int, y: Int) = fields[5][index(x, y)]
-    override fun soilMoisture(x: Int, y: Int) = soilWaterMm(x, y) / 250.0
+    override fun soilCapacityMm(x: Int, y: Int) = fields[6][index(x, y)]
+    override fun soilMoisture(x: Int, y: Int) = soilWaterMm(x, y) / soilCapacityMm(x, y)
     override fun solarInputFactor(x: Int, y: Int): Double {
         return sunlight.inputFactor(x, y)
     }

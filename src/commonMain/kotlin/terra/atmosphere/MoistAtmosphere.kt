@@ -1,13 +1,9 @@
 package terra.atmosphere
 
-import kotlin.math.PI
-import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sin
 import kotlin.math.sqrt
-import kotlin.random.Random
 
 /** Warm-cloud, idealized ocean parameters. Water amounts in kg/m² are also liquid-depth mm. */
 data class MoistPhysicsConfig(
@@ -23,11 +19,6 @@ data class MoistPhysicsConfig(
     val solar: SolarConfig = SolarConfig(),
     /** Weak column-integrated drag, a 30-day e-folding time; dissipated kinetic energy becomes heat. */
     val momentumDragPerSecond: Double = 1.0 / (30 * 86400.0),
-    /** Momentum supplied by unresolved overturning to narrow, potentially unstable jets.
-     * No storm positions or perturbations are supplied. Zero disables this closure.
-     */
-    val overturningWindMetersPerSecond: Double = 60.0,
-    val overturningSeconds: Double = 5 * 86400.0,
     val surfaceAlbedo: Double = 0.18,
     val atmosphericEmissivity: Double = 0.8,
     val cloudSolarReflection: Double = 0.45,
@@ -52,13 +43,13 @@ data class MoistPhysicsConfig(
     init {
         require(listOf(referenceTemperatureKelvin, referenceDryColumnKgM2, surfaceHeatCapacityJm2K,
             airHeatCapacityJkgK, latentHeatJkg, condensationSeconds, cloudEvaporationSeconds, rainoutSeconds,
-            liftResidenceSeconds, convectiveMixingDepthMeters, overturningSeconds)
+            liftResidenceSeconds, convectiveMixingDepthMeters)
             .all { it.isFinite() && it > 0 })
         require(rainOnsetKgM2.isFinite() && rainOnsetKgM2 > rainCloudThresholdKgM2)
         require(humidColumnFraction > 0 && humidColumnFraction <= 1 && cloudPressureFraction > 0 && cloudPressureFraction <= 1)
         require(listOf(surfaceAlbedo, atmosphericEmissivity, cloudSolarReflection).all { it.isFinite() && it in 0.0..1.0 })
         require(listOf(solarPeakWm2, momentumDragPerSecond, bulkExchangeCoefficient, unresolvedGustMetersPerSecond, rainCloudThresholdKgM2,
-            overturningWindMetersPerSecond, maximumParcelLiftMeters, convectiveVelocityCoefficient, maximumConvectiveVelocityMetersPerSecond)
+            maximumParcelLiftMeters, convectiveVelocityCoefficient, maximumConvectiveVelocityMetersPerSecond)
             .all { it.isFinite() && it >= 0 })
     }
 }
@@ -90,9 +81,7 @@ data class MoistAtmosphereDiagnostics(
     val frictionHeatingJoules: Double = 0.0,
     /** Measured discrete flow/tracer energy change; it can have either sign. */
     val numericalTransportEnergyJoules: Double = 0.0,
-    val includesApproximateHistory: Boolean = false,
-    val atmosphereInitializationEnergyJoules: Double = 0.0,
-    val overturningEnergyJoules: Double = 0.0
+    val includesApproximateHistory: Boolean = false
 ) {
     val unexplainedEnergyResidualJoules: Double get() = energyResidualJoules - numericalTransportEnergyJoules
 }
@@ -128,15 +117,7 @@ class MoistAtmosphereSnapshot internal constructor(
 
 /** Deliberate atmosphere reconstruction, not a conservative heat correction or a time step. */
 data class AtmosphereHandoff(
-    val worldSeconds: Double, val waterBeforeKg: Double, val waterAfterKg: Double,
-    val vaporKg: Double, val cloudKg: Double, val airTemperatureKelvin: Double,
-    val initializationEnergyChangeJoules: Double, val physicalStepsAtHandoff: Long,
-    val spinInSteps: Int = 0, val vaporRelativeHumidityLimit: Double = 1.0,
-    val minimumAirTemperatureKelvin: Double = airTemperatureKelvin,
-    val maximumAirTemperatureKelvin: Double = airTemperatureKelvin,
-    val maximumWindMetersPerSecond: Double = 0.0,
-    val rootMeanSquareWindMetersPerSecond: Double = 0.0,
-    val reconstructionPressureExponent: Double = 0.0
+    val waterBeforeKg: Double, val waterAfterKg: Double, val physicalStepsAtHandoff: Long
 )
 
 /**
@@ -148,43 +129,26 @@ data class AtmosphereHandoff(
 class MoistAtmosphere(
     val config: DryAtmosphereConfig = DryAtmosphereConfig(),
     val physics: MoistPhysicsConfig = MoistPhysicsConfig(),
-    scenario: DryScenario = DryScenario.JET,
+    scenario: DryScenario = DryScenario.REST,
     seed: Int = 31742,
     private val surface: MoistSurface? = null,
     initializeFlow: ((Double, Double) -> DryCell)? = null,
     initializeColumns: ((Double, Double) -> MoistCell)? = null
 ) {
-    companion object {
-        internal const val CLIMATE_AIR_SURFACE_OFFSET_K = 6.0
-    }
-
     private val columns = MoistColumnTransport(config, physics)
     private val flow = DryAtmosphere(config, columns, initializeFlow ?: DryScenarios.initializer(scenario, config, seed))
-    private val reconstructionSeed = seed
     private val density = physics.referenceDryColumnKgM2 / config.meanHeightMeters
-    val surfaceThermalState = SurfaceThermalState(config.cellCount)
-    private val surfaceTemperature = surfaceThermalState.kelvin
+    private val surfaceTemperature = DoubleArray(config.cellCount)
     private val surfaceWater = DoubleArray(config.cellCount)
     private val rainRate = DoubleArray(config.cellCount)
     private val rainActive = BooleanArray(config.cellCount)
     private val rainTotal = DoubleArray(config.cellCount)
     private var worldEpochSeconds = 0.0
     private var approximateHistory = false
-    private var initializationEnergy = 0.0
     private var initialWater = 0.0
     private var initialEnergy = 0.0
     private var radiationEnergy = 0.0
     private var frictionHeating = 0.0
-    private var overturningEnergy = 0.0
-    private val overturningResponse = if (physics.overturningWindMetersPerSecond > 0 && physics.radiationEnabled && physics.surfaceExchangeEnabled && !config.periodicY)
-        1 - exp(-config.stepSeconds / physics.overturningSeconds) else 0.0
-    private val overturningTarget = DoubleArray(config.height) { y ->
-        val latitude = PlanetLatitude.atmosphereRowRadians(y, config.height)
-        // Eight-degree shear zones can change the sign of the meridional PV gradient.
-        // The solver, not the forcing, decides whether and where eddies form.
-        physics.overturningWindMetersPerSecond * (exp(-0.5 * ((latitude - 0.70) / 0.14).let { it * it }) +
-            exp(-0.5 * ((latitude + 0.70) / 0.14).let { it * it }))
-    }
     private val transportEnergyChange = CompensatedSum()
     private val sunlight = PlanetarySunlight(config.width, config.height, physics.solar)
     private var evaporationTotal = 0.0
@@ -197,14 +161,6 @@ class MoistAtmosphere(
     val worldSeconds: Double get() = worldEpochSeconds + elapsedSeconds
     fun temperatureKelvinAt(cell: Int): Double = columns.temperatureAt(cell, flow.depthAt(cell))
     fun surfaceTemperatureKelvinAt(cell: Int): Double = surfaceTemperature[cell]
-    fun rainMmThisStepAt(cell: Int): Double = rainRate[cell] * config.stepSeconds / 3600.0
-
-    /** Read-only diagnostic capacity; does not condense or move column water. */
-    internal fun saturatedVaporMmAt(cell: Int, temperatureKelvin: Double): Double {
-        require(temperatureKelvin.isFinite() && temperatureKelvin > 0)
-        val mass = density * flow.depthAt(cell)
-        return ColumnThermodynamics.saturationMm(temperatureKelvin, mass, config.gravity, physics)
-    }
 
     /** Physical detailed column water (vapor plus condensate). */
     internal fun effectiveMoistureMmAt(cell: Int): Double = density * (columns.values[1][cell] + columns.values[2][cell])
@@ -212,114 +168,36 @@ class MoistAtmosphere(
     /** Explicit climatological realization. Water introduced here is an initialization flux,
      * not conservation of a diagnostic atlas humidity or the dormant detailed atmosphere. */
     internal fun initializeAtlasRealization(atSeconds: Double, temperature: DoubleArray, humidity: DoubleArray,
-        east: DoubleArray, north: DoubleArray): AtmosphereHandoff {
+        east: DoubleArray, north: DoubleArray, coupling: Double,
+        surfaceKelvin: DoubleArray = temperature, initial: Boolean = false): AtmosphereHandoff {
         val before = atmosphericWaterKg
-        val energyBefore = diagnostics().totalModelEnergyJoules
-        flow.initializeClimateCirculation(temperature)
-        flow.initializeAtlasWinds(east, north)
-        var vapor = 0.0
+        flow.initializeAtlasCirculation(temperature, east, north, coupling)
         for (i in temperature.indices) {
-            val amount = saturatedVaporMmAt(i, temperature[i]) * humidity[i]
+            val mass = density * flow.depthAt(i)
+            val amount = mass * physics.humidColumnFraction * WarmCloud.saturationMixingRatio(temperature[i],
+                mass * config.gravity * physics.cloudPressureFraction) * humidity[i]
             columns.values[0][i] = flow.depthAt(i) * temperature[i]
             columns.values[1][i] = amount / density
             columns.values[2][i] = 0.0
-            surfaceTemperature[i] = temperature[i]
-            vapor += amount
+            surfaceTemperature[i] = surfaceKelvin[i]
         }
         worldEpochSeconds = atSeconds - elapsedSeconds
         rainRate.fill(0.0); rainActive.fill(false)
-        approximateHistory = true
-        val energyChange = diagnostics().totalModelEnergyJoules - energyBefore
-        initializationEnergy += energyChange
+        approximateHistory = !initial
         // Detailed accounting starts from this explicitly initialized realization.
         initialWater = diagnostics().totalWaterKg + (surface?.exportedWaterKg ?: 0.0)
-        return AtmosphereHandoff(atSeconds, before, atmosphericWaterKg, vapor * config.cellArea, 0.0,
-            temperature.average(), energyChange, completedSteps, minimumAirTemperatureKelvin = temperature.min(),
-            maximumAirTemperatureKelvin = temperature.max(),
-            maximumWindMetersPerSecond = east.indices.maxOf { sqrt(east[it] * east[it] + north[it] * north[it]) },
-            rootMeanSquareWindMetersPerSecond = sqrt(east.indices.sumOf { east[it] * east[it] + north[it] * north[it] } / east.size))
-    }
-
-    /** Reconstruct from current climate temperatures, conserving atmospheric water.
-     * Vapor/condensate partition at saturation; pressure is approximately balanced
-     * without new-world moisture, old storms or hidden physical advancement.
-     */
-    internal fun initializeFromClimate(atWorldSeconds: Double, evolvedAirTemperatureKelvin: DoubleArray? = null): AtmosphereHandoff {
-        require(atWorldSeconds.isFinite() && atWorldSeconds >= 0.0)
-        val water = DoubleArray(config.cellCount) { effectiveMoistureMmAt(it) }
-        val before = atmosphericWaterKg
-        val energyBefore = diagnostics().totalModelEnergyJoules
-        val temperature = evolvedAirTemperatureKelvin?.also {
-            require(it.size == config.cellCount && it.all { kelvin -> kelvin.isFinite() && kelvin > 0.0 })
-        }?.copyOf() ?: DoubleArray(config.cellCount) { surfaceTemperature[it] - CLIMATE_AIR_SURFACE_OFFSET_K }
-        val circulation = flow.initializeClimateCirculation(temperature, atWorldSeconds / (7 * 86400.0), reconstructionSeed)
-        // Smooth local conservative exchange resolves moist low-pressure sectors.
-        // Pairwise relaxation preserves water and positivity without block boundaries
-        // or a global moisture funding pool. It is initialization, not elapsed time.
-        val pressure = DoubleArray(config.cellCount) { i ->
-            val h = flow.depthAt(i)
-            h * h * temperature[i]
+        if (initial) {
+            initialEnergy = diagnostics().totalModelEnergyJoules
         }
-        val meanPressure = pressure.average()
-        val weight = DoubleArray(config.cellCount) { i ->
-            exp(((meanPressure - pressure[i]) / (0.015 * meanPressure)).coerceIn(-1.5, 1.5))
-        }
-        repeat(32) { sweep ->
-            for (index in water.indices) {
-                val i = if (sweep % 2 == 0) index else water.lastIndex - index
-                val x = i % config.width; val y = i / config.width
-                fun exchange(j: Int) {
-                    val target = (water[i] + water[j]) * weight[i] / (weight[i] + weight[j])
-                    val amount = 0.45 * (target - water[i])
-                    water[i] += amount; water[j] -= amount
-                }
-                exchange(y * config.width + (x + 1) % config.width)
-                if (y + 1 < config.height) exchange(i + config.width)
-                else if (config.periodicY) exchange(x)
-            }
-        }
-        val vaporTarget = 1.0
-        var vaporTotal = 0.0
-        var cloudTotal = 0.0
-        for (i in water.indices) {
-            val depth = flow.depthAt(i)
-            val vaporLimit = saturatedVaporMmAt(i, temperature[i])
-            // A moist mean column contains unresolved saturated parcels. Partition a
-            // small, bounded fraction as cloud without creating any column water.
-            val cloud = ColumnThermodynamics.cloudMm(water[i], vaporLimit)
-            val vapor = water[i] - cloud
-            columns.values[0][i] = depth * temperature[i]
-            columns.values[1][i] = vapor / density
-            columns.values[2][i] = cloud / density
-            vaporTotal += vapor; cloudTotal += cloud
-        }
-        worldEpochSeconds = atWorldSeconds - elapsedSeconds
-        rainRate.fill(0.0)
-        rainActive.fill(false)
-        approximateHistory = true
-        val energyChange = diagnostics().totalModelEnergyJoules - energyBefore
-        initializationEnergy += energyChange
-        val after = atmosphericWaterKg
-        check(kotlin.math.abs(after - before) <= 1e-12 * max(1.0, before))
-        return AtmosphereHandoff(atWorldSeconds, before, after, vaporTotal * config.cellArea,
-            cloudTotal * config.cellArea, temperature.average(), energyChange, completedSteps,
-            vaporRelativeHumidityLimit = vaporTarget, minimumAirTemperatureKelvin = temperature.min(),
-            maximumAirTemperatureKelvin = temperature.max(), maximumWindMetersPerSecond = circulation.maximumSpeed,
-            rootMeanSquareWindMetersPerSecond = circulation.rmsSpeed,
-            reconstructionPressureExponent = circulation.pressureExponent)
+        return AtmosphereHandoff(before, atmosphericWaterKg, completedSteps)
     }
 
     init {
-        val phase = Random(seed + 1).nextDouble() * 2 * PI
         for (y in 0 until config.height) for (x in 0 until config.width) {
             val i = y * config.width + x
             val px = (x + 0.5) * config.dx
             val py = (y + 0.5) * config.dy
-            val initial = initializeColumns?.invoke(px, py) ?: MoistCell(
-                temperatureKelvin = physics.referenceTemperatureKelvin,
-                relativeHumidity = 0.65 + 0.30 * sin(2 * PI * px / config.domainWidthMeters + phase) *
-                    cos(2 * PI * py / config.domainHeightMeters)
-            )
+            val initial = initializeColumns?.invoke(px, py) ?: MoistCell(temperatureKelvin = physics.referenceTemperatureKelvin, relativeHumidity = 0.65)
             require(initial.temperatureKelvin.isFinite() && initial.temperatureKelvin > 0 &&
                 initial.surfaceTemperatureKelvin.isFinite() && initial.surfaceTemperatureKelvin > 0)
             require(listOf(initial.relativeHumidity, initial.cloudWaterKgM2, initial.surfaceWaterKgM2).all { it.isFinite() && it >= 0 })
@@ -377,7 +255,7 @@ class MoistAtmosphere(
             vapor.value / config.cellCount, cloud.value / config.cellCount,
             precipitationTotal / (config.cellCount * config.cellArea), peakRain, temperature.value / config.cellCount,
             evaporationTotal, precipitationTotal, energy.value, radiationEnergy,
-            if (initialEnergy > 0) energy.value - initialEnergy - radiationEnergy - overturningEnergy else 0.0, exported, frictionHeating, transportEnergyChange.value, approximateHistory, initializationEnergy, overturningEnergy
+            if (initialEnergy > 0) energy.value - initialEnergy - radiationEnergy else 0.0, exported, frictionHeating, transportEnergyChange.value, approximateHistory
         )
     }
 
@@ -407,8 +285,6 @@ class MoistAtmosphere(
             check(roughness.isFinite() && roughness >= 0) { "Invalid surface drag at cell $i" }
             val retention = exp(-physics.momentumDragPerSecond * roughness * dt)
             val dissipated = density * flow.dampMomentumAt(i, retention)
-            if (overturningResponse > 0) overturningEnergy += density *
-                flow.exchangeZonalMomentumAt(i, overturningTarget[y], overturningResponse) * config.cellArea
             var temperature = columns.temperatureAt(i, depth) + dissipated / capacity
             frictionHeating += dissipated * config.cellArea
             var surface = surfaceTemperature[i]

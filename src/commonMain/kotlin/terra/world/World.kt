@@ -8,7 +8,7 @@ import terra.MAP_HEIGHT_TILES
 import terra.MAP_WIDTH_TILES
 
 /** Why a tile cannot support more cover, kept separate from the cover itself. */
-enum class GrowthLimitation { NONE, COLD, FROST, WATER, SOIL, ROCK, DISTURBANCE }
+enum class GrowthLimitation { NONE, COLD, WATER, ROCK, DISTURBANCE }
 
 class World private constructor(
     val seed: Int,
@@ -26,20 +26,15 @@ class World private constructor(
     }
     private val publishedTerrainChanges = BooleanArray(width * height)
     private val trees = DoubleArray(width * height)
+    private val canopyBefore = DoubleArray(width * height)
     private val grasses = DoubleArray(width * height) { 0.55 }
     private val bare = DoubleArray(width * height) { 0.45 }
-    private val evergreen = DoubleArray(width * height)
-    private val droughtStress = DoubleArray(width * height)
     private val limitation = Array(width * height) { GrowthLimitation.NONE }
     private val disturbanceAge = DoubleArray(width * height) { 100.0 }
     private var ecologyElapsedSeconds = 0.0
-    private var burnCount = 0
-    val fireCount: Int get() = burnCount
-    fun disturbanceAgeAt(x: Int, y: Int): Double = disturbanceAge[y * width + ((x % width) + width) % width]
     fun treeCover(x: Int, y: Int): Double = trees[y * width + ((x % width) + width) % width]
     fun grassCover(x: Int, y: Int): Double = grasses[y * width + ((x % width) + width) % width]
     fun bareCover(x: Int, y: Int): Double = bare[y * width + ((x % width) + width) % width]
-    fun evergreenFraction(x: Int, y: Int): Double = evergreen[y * width + ((x % width) + width) % width]
     fun growthLimitation(x: Int, y: Int): GrowthLimitation = limitation[y * width + ((x % width) + width) % width]
     val seaLevel: Double get() = settings.seaLevel
     var geometryRevision: Long = 0
@@ -61,35 +56,42 @@ class World private constructor(
         geometryRevision++; biomeRevision++
     }
 
-    /** Equilibrium at creation; thereafter cover responds over years and retains disturbances. */
+    /** Equilibrium at creation; thereafter cover responds over years and retains disturbances.
+     * Growing-season root-zone availability controls water suitability when supplied by
+     * hydrology. Annual aridity is a fallback for atlas-only diagnostic callers. */
     internal fun evolveAtlasCover(atlas: terra.weather.SeasonalClimateAtlas, years: Double, initialize: Boolean = false,
-        drought: DoubleArray? = null) {
+        drought: DoubleArray? = null, soilAvailability: DoubleArray? = null) {
+        trees.copyInto(canopyBefore)
         for (i in cells.indices) {
             val x = i % width; val y = i / width
             if (!isLand(x, y)) continue
             val warm = smoothstep(atlas.growingWarmth[i], 100.0, 900.0)
-            val moisture = atlas.aridity(i)
+            val moisture = soilAvailability?.let { 1.5 * it[i].coerceIn(0.0, 1.0) } ?: atlas.aridity(i)
             val water = smoothstep(moisture, 0.10, 0.85)
             val rock = smoothstep(elevationMeters(x, y), 2400.0, 4200.0)
             val patch = 0.9 + 0.1 * sin(x * 0.13 + seed) * sin(y * 0.17)
             val targetTree = (0.94 * warm * smoothstep(moisture, 0.45, 1.2) * (1 - rock) * patch)
             val targetGrass = (1 - targetTree) * warm * water * (1 - rock)
             val stress = drought?.get(i) ?: 0.0
-            droughtStress[i] = stress
-            val response = if (initialize) 1.0 else -expm1(-years / if (targetTree < trees[i]) 7.0 else 18.0)
+            val nearbySeeds = (canopyBefore[y * width + (x + width - 1) % width] + canopyBefore[y * width + (x + 1) % width] +
+                canopyBefore[maxOf(0, y - 1) * width + x] + canopyBefore[minOf(height - 1, y + 1) * width + x]) / 4
+            // Mature canopy and nearby seed sources speed recruitment; grass competes with saplings.
+            val growthRate = (0.015 + 0.12 * nearbySeeds + 0.12 * canopyBefore[i]) * (1 - 0.5 * grasses[i])
+            val rate = if (targetTree < trees[i]) 1.0 / (7 - 4 * stress) else growthRate
+            val response = if (initialize) 1.0 else -expm1(-years * rate)
             trees[i] += (targetTree * (1 - 0.4 * stress) - trees[i]) * response
-            grasses[i] += (targetGrass - grasses[i]) * (if (initialize) 1.0 else -expm1(-years / 3.0))
+            val grassSpace = (1 - trees[i]) * warm * water * (1 - rock)
+            grasses[i] += ((if (initialize) targetGrass else grassSpace) - grasses[i]) * (if (initialize) 1.0 else -expm1(-years / 3.0))
             grasses[i] = grasses[i].coerceIn(0.0, 1 - trees[i])
             bare[i] = 1 - trees[i] - grasses[i]
-            evergreen[i] = smoothstep(atlas.meanTemperature[i], -2.0, 16.0)
             limitation[i] = when { rock > 0.6 -> GrowthLimitation.ROCK; warm < 0.25 -> GrowthLimitation.COLD; water < 0.3 -> GrowthLimitation.WATER; else -> GrowthLimitation.NONE }
             disturbanceAge[i] += years
             if (!initialize && stress > 0.4 && disturbanceAge[i] > 25 && trees[i] + grasses[i] > 0.4 &&
                 hash01(i, (ecologyElapsedSeconds / atlas.solar.yearSeconds).toInt()) < 0.01 * stress) {
                 trees[i] *= 0.4; grasses[i] *= 0.7; bare[i] = 1 - trees[i] - grasses[i]
-                disturbanceAge[i] = 0.0; limitation[i] = GrowthLimitation.DISTURBANCE; burnCount++
+                disturbanceAge[i] = 0.0; limitation[i] = GrowthLimitation.DISTURBANCE
             }
-            val next = if (cellIsAlpine(i)) Terrain.MOUNTAINS else if (atlas.warmest[i] < 10) Terrain.TUNDRA else classifyCover(i, cells[i], trees[i], grasses[i], moisture.coerceIn(0.0, 1.0), atlas.meanTemperature[i])
+            val next = if (cellIsAlpine(i)) Terrain.MOUNTAINS else if (atlas.warmest[i] < 10) Terrain.TUNDRA else classifyCover(cells[i], trees[i], grasses[i], moisture.coerceIn(0.0, 1.0), atlas.meanTemperature[i])
             if (cells[i].terrain != next) { cells[i] = cells[i].copy(terrain = next) }
         }
         ecologyElapsedSeconds += years * atlas.solar.yearSeconds
@@ -112,7 +114,7 @@ class World private constructor(
         var next = 0
         for (i in cells.indices) if (publishedTerrainChanges[i]) dirty[next++] = i
         return WorldSnapshot(generation, seed, width, height, biomeRevision, cells.copyOf(), landBiomeSummary(), dirty,
-            trees.copyOf(), grasses.copyOf(), bare.copyOf(), evergreen.copyOf(), limitation.copyOf(), geometryRevision)
+            trees.copyOf(), grasses.copyOf(), bare.copyOf(), limitation.copyOf(), geometryRevision)
     }
 
     private fun generate() {
@@ -137,7 +139,7 @@ class World private constructor(
     /** Cold limitation is a first-class category: cold wet land must not become desert. */
     private fun cellIsAlpine(i: Int) = elevation[i] > settings.mountainThreshold
 
-    private fun classifyCover(i: Int, cell: Cell, tree: Double, grass: Double, moisture: Double, temperature: Double): Terrain {
+    private fun classifyCover(cell: Cell, tree: Double, grass: Double, moisture: Double, temperature: Double): Terrain {
         if (cell.terrain == Terrain.OCEAN) return Terrain.OCEAN
         if (cell.terrain == Terrain.MOUNTAINS || cell.elevation > settings.mountainThreshold) return Terrain.MOUNTAINS
         val cold = temperature < -4.0 || (temperature < 1.0 && tree < 0.12)
@@ -192,8 +194,6 @@ class World private constructor(
 
 
     internal companion object {
-        private const val FIRE_MINIMUM_AGE_YEARS = 25.0
-
         /** Deterministic test/experiment hook; production worlds always come from the generator. */
         fun withElevation(seed: Int, width: Int, height: Int, settings: TerrainGenerationSettings,
             elevation: DoubleArray): World {

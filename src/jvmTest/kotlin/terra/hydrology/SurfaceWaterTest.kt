@@ -10,7 +10,7 @@ class SurfaceWaterTest {
         val world = World(31742, 48, 36)
         val topology = HydrologyTopology(world)
         val tile = topology.processingOrder.first { topology.isLandTile(it) }
-        val water = SurfaceWater(world)
+        val water = SurfaceWater(world, initialGroundwaterMm = 30.0, initialLakeFraction = 0.35)
         val before = water.totalWaterMmTiles
         water.receive(tile, 100.0, 40.0)
         var exported = water.advance(21600.0)
@@ -29,7 +29,7 @@ class SurfaceWaterTest {
     @Test
     fun finiteLakesDryAndRefillWithoutChangingDrainageOrCreatingWater() {
         val world = World(31742)
-        val water = SurfaceWater(world)
+        val water = SurfaceWater(world, initialGroundwaterMm = 30.0, initialLakeFraction = 0.35)
         val initial = water.snapshot()
         val tile = (0 until world.width * world.height).filter { initial.isLakeTileWet(it % world.width,it / world.width) }
             .maxBy { world[it % world.width,it / world.width].elevation }
@@ -56,4 +56,15 @@ class SurfaceWaterTest {
         assertTrue(water.lakeWaterMmTiles(id) < stored * 4)
         assertEquals(before + pulse, water.totalWaterMmTiles + exported, (before + pulse) * 1e-12)
     }
+    @Test fun rootUptakeWithdrawsRealGroundwaterAndRetainsWaterClosure() {
+        val world = World(42, 31, 23)
+        val water = SurfaceWater(world, initialGroundwaterMm = 30.0)
+        val tile = (0 until 31 * 23).first { world.isLand(it % 31, it / 31) }
+        val before = water.totalWaterMmTiles
+        val uptake = water.supplyRoots(tile, 12.0)
+        assertEquals(12.0, uptake)
+        val exported = water.advance(86400.0)
+        assertEquals(before, water.totalWaterMmTiles + uptake + exported, before * 1e-12)
+    }
+
 }

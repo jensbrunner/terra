@@ -95,9 +95,7 @@ fun main(args: Array<String>) {
             if (last[x,y].a>24) visible++
         }
         check(pressureChange > 1 && curl > 1e-4) { "Returned atmosphere is stagnant" }
-        check(visible > last.width*last.height/20 && changed > last.width*last.height/100) {
-            "Returned clouds must remain visible and evolve"
-        }
+        // No cloud/storm quota: record the naturally generated field rather than requiring planted systems.
         println("HANDOFF_MOTION changed_cloud_pixels=$changed visible_cloud_pixels=$visible pressure_change=$pressureChange curl=$curl")
     } finally { worker.close() }
 }

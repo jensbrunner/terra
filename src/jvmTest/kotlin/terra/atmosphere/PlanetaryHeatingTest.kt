@@ -10,18 +10,13 @@ import kotlin.test.assertTrue
 
 class PlanetaryHeatingTest {
     @Test
-    fun unresolvedOverturningSuppliesMomentumWithAnExplicitSignedEnergyBudget() {
-        val grid = DryAtmosphereConfig(width = 12,height = 9)
-        val model = MoistAtmosphere(grid,scenario = DryScenario.REST) { _, _ ->
-            MoistCell(relativeHumidity = 0.0)
-        }
+    fun uniformRestHasNoArtificialJetAcceleration() {
+        val grid = DryAtmosphereConfig(width = 12, height = 9)
+        val model = MoistAtmosphere(grid, physics = MoistPhysicsConfig(radiationEnabled = false, surfaceExchangeEnabled = false))
         repeat(180) { model.step() }
-        val s = model.snapshot()
-        assertTrue(s.diagnostics.overturningEnergyJoules > 0)
-        assertTrue(s.dynamics.eastWindAt(4,6) > 0)
-        assertTrue(abs(s.diagnostics.unexplainedEnergyResidualJoules /
-            s.diagnostics.totalModelEnergyJoules) < 1e-11)
-        assertTrue(abs(s.diagnostics.relativeWaterResidual) < 1e-12)
+        val snapshot = model.snapshot()
+        assertTrue(snapshot.dynamics.diagnostics.maximumSpeedMetersPerSecond < 1e-10)
+        assertTrue(abs(snapshot.diagnostics.relativeWaterResidual) < 1e-12)
     }
 
     @Test
@@ -95,7 +90,7 @@ class PlanetaryHeatingTest {
     fun momentumDampingReturnsLostKineticEnergyAsHeat() {
         val geometry = DryAtmosphereConfig(width = 12, height = 8)
         val physics = MoistPhysicsConfig(radiationEnabled = false, surfaceExchangeEnabled = false, momentumDragPerSecond = 0.0)
-        fun create(drag: Double) = MoistAtmosphere(geometry, physics.copy(momentumDragPerSecond = drag)) { _, _ ->
+        fun create(drag: Double) = MoistAtmosphere(geometry, physics.copy(momentumDragPerSecond = drag), DryScenario.JET) { _, _ ->
             MoistCell(relativeHumidity = 0.0)
         }
         val control = create(0.0)

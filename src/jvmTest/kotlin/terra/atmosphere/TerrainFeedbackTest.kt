@@ -53,8 +53,8 @@ class TerrainFeedbackTest {
     @Test
     fun windwardCondensationProducesRainAndVaporDepletionWithClosedBudgets() {
         val surface = TestSurface(config, slope = { cell -> if (cell % config.width < 6) 0.02 else -0.02 })
-        val lifted = MoistAtmosphere(config, closed, surface = surface) { _, _ -> MoistCell(relativeHumidity = 0.98) }
-        val control = MoistAtmosphere(config, closed) { _, _ -> MoistCell(relativeHumidity = 0.98) }
+        val lifted = MoistAtmosphere(config, closed, DryScenario.JET, surface = surface) { _, _ -> MoistCell(relativeHumidity = 0.98) }
+        val control = MoistAtmosphere(config, closed, DryScenario.JET) { _, _ -> MoistCell(relativeHumidity = 0.98) }
         lifted.step()
         control.step()
         var state = lifted.snapshot()
@@ -92,8 +92,8 @@ class TerrainFeedbackTest {
     fun roughSurfaceDampsMoreStronglyAndReturnsTheEnergyAsHeat() {
         val rough = TestSurface(config, drag = { if (it % config.width < 6) 1.0 else 6.0 })
         val physics = closed.copy(momentumDragPerSecond = 1.0 / 86400)
-        val model = MoistAtmosphere(config, physics, surface = rough) { _, _ -> MoistCell(relativeHumidity = 0.0) }
-        val control = MoistAtmosphere(config, closed) { _, _ -> MoistCell(relativeHumidity = 0.0) }
+        val model = MoistAtmosphere(config, physics, DryScenario.JET, surface = rough) { _, _ -> MoistCell(relativeHumidity = 0.0) }
+        val control = MoistAtmosphere(config, closed, DryScenario.JET) { _, _ -> MoistCell(relativeHumidity = 0.0) }
         model.step(); control.step()
         val a = model.snapshot()
         val b = control.snapshot()

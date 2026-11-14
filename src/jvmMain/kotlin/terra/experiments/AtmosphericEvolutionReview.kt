@@ -12,7 +12,6 @@ import terra.weather.DynamicalWeather
 
 /** Explicit bounded trajectory review, kept out of routine tests. No cloud or storm quotas. */
 fun main(args: Array<String>) {
-    if ("--unseeded" in args) { reviewUnseeded(args); return }
     val native = "--native" in args
     val world = if (native) World(31742) else World(31742, 96, 72)
     val config = if (native) DryAtmosphereConfig(stepSeconds = 40.0) else DryAtmosphereConfig(width = 48, height = 36)
@@ -69,54 +68,6 @@ fun main(args: Array<String>) {
     metrics.appendLine("experiment_wall_seconds=${(System.nanoTime() - started) / 1e9}")
     File(output, if (native) "evolution-native.txt" else "evolution-current.txt").writeText(metrics.toString())
     ImageIO.write(image, "png", File(output, if (native) "evolution-native.png" else "evolution-current.png"))
-}
-
-/** No initialized lows: tiny broadband momentum perturbation over uniform
- * depth. Compare driven and undriven jets after weeks, not just retained eddies.
- */
-private fun reviewUnseeded(args: Array<String>) {
-    val days = args.firstOrNull { it.startsWith("--days=") }?.substringAfter('=')?.toInt() ?: 28
-    val jet = args.firstOrNull { it.startsWith("--jet=") }?.substringAfter('=')?.toDouble() ?: terra.atmosphere.MoistPhysicsConfig().overturningWindMetersPerSecond
-    val tauDays = args.firstOrNull { it.startsWith("--tau=") }?.substringAfter('=')?.toDouble() ?: terra.atmosphere.MoistPhysicsConfig().overturningSeconds / 86400.0
-    val grid = if ("--native" in args) DryAtmosphereConfig(stepSeconds = 40.0)
-        else DryAtmosphereConfig(width = 48, height = 36, stepSeconds = 80.0)
-    val output = File("build/experiments/unseeded-weather").apply { mkdirs() }
-    val rows = StringBuilder("driven,day,eddy_ke,max_wind,cloud_mm,water_residual,energy_residual,forcing_j\n")
-    for (driven in if ("--driven-only" in args) listOf(true) else listOf(false, true)) {
-        val random = kotlin.random.Random(42)
-        val model = terra.atmosphere.MoistAtmosphere(grid,
-            terra.atmosphere.MoistPhysicsConfig(overturningWindMetersPerSecond = if (driven) jet else 0.0,
-                overturningSeconds = tauDays * 86400),
-            initializeFlow = { _, _ -> terra.atmosphere.DryCell(grid.meanHeightMeters,
-                random.nextDouble(-0.01,0.01), random.nextDouble(-0.01,0.01)) })
-        for (day in 1..days) {
-            repeat((86400 / grid.stepSeconds).toInt()) { model.step() }
-            if (day in listOf(1,7,14,28,56,days)) {
-                val s = model.snapshot(); val d = s.dynamics
-                var eddy = 0.0
-                for (y in 0 until grid.height) {
-                    val u = (0 until grid.width).sumOf { d.eastWindAt(it,y) } / grid.width
-                    val v = (0 until grid.width).sumOf { d.northWindAt(it,y) } / grid.width
-                    for (x in 0 until grid.width) eddy += 0.5 *
-                        ((d.eastWindAt(x,y)-u).let { it*it } + (d.northWindAt(x,y)-v).let { it*it }) / grid.cellCount
-                }
-                if (day >= 14) {
-                    val image = BufferedImage(grid.width*8,grid.height*2,BufferedImage.TYPE_INT_RGB)
-                    drawFields(s,image,0,2)
-                    ImageIO.write(image,"png",File(output,"driven-$driven-day$day.png"))
-                }
-                if (driven && "--native" in args && day == 28)
-                    check(eddy > 5.0) { "Jet forcing must generate growing resolved eddies, not just a mean wind: $eddy" }
-                val diag = s.diagnostics
-                val energy = diag.unexplainedEnergyResidualJoules / diag.totalModelEnergyJoules
-                val line = "$driven,$day,$eddy,${d.diagnostics.maximumSpeedMetersPerSecond},${diag.meanCloudMm},${diag.relativeWaterResidual},$energy,${diag.overturningEnergyJoules}"
-                println("UNSEEDED $line"); rows.appendLine(line)
-                check(kotlin.math.abs(diag.relativeWaterResidual) < 1e-10)
-                check(kotlin.math.abs(energy) < 1e-10)
-            }
-        }
-    }
-    File(output,"trajectory.csv").writeText(rows.toString())
 }
 
 private fun drawFields(snapshot: terra.atmosphere.MoistAtmosphereSnapshot,

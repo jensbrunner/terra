@@ -16,19 +16,13 @@ class ClimateGeography(internal val world: World, val config: DryAtmosphereConfi
     internal val elevationMeters = DoubleArray(count).also { overlap.restrict(tileElevation, it) }
     internal val landFraction = DoubleArray(count).also { a -> overlap.restrict(DoubleArray(tileLand.size) { if (tileLand[it]) 1.0 else 0.0 }, a) }
     internal val coastDistanceMeters = DoubleArray(count) { if (landFraction[it] < 0.5) 0.0 else config.domainWidthMeters + config.domainHeightMeters }
-    internal val slopeEast = DoubleArray(count)
-    internal val slopeSouth = DoubleArray(count)
     init {
         // Two directional distance-transform passes repeated for wrapped longitude.
         repeat(3) {
             for (i in 0 until count) relax(i)
             for (i in count - 1 downTo 0) relax(i)
         }
-        for (i in 0 until count) {
-            val x = i % width; val y = i / width
-            slopeEast[i] = (elevationMeters[y * width + (x + 1) % width] - elevationMeters[y * width + (x + width - 1) % width]) / (2 * config.dx)
-            slopeSouth[i] = (elevationMeters[min(height - 1, y + 1) * width + x] - elevationMeters[max(0, y - 1) * width + x]) / (2 * config.dy)
-        }
+
     }
     private fun relax(i: Int) {
         val x = i % width; val y = i / width
