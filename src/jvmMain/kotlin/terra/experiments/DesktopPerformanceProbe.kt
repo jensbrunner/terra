@@ -22,7 +22,7 @@ class DesktopPerformanceProbe private constructor(environment: String) : Perform
         ?.split(',')?.map { SimulationSpeed.valueOf(it.trim()) } ?: SimulationSpeed.entries
     private val selectedClouds = System.getProperty("terra.profile.clouds", "").takeIf { it.isNotBlank() }
         ?.let { listOf(it.toBooleanStrict()) } ?: listOf(false, true)
-    private val cases = selectedSpeeds.flatMap { speed -> selectedClouds.map { ProfileSettings(speed, it, System.getProperty("terra.profile.dayNight", "false").toBooleanStrict()) } }
+    private val cases = selectedSpeeds.flatMap { speed -> selectedClouds.map { ProfileSettings(speed, it, System.getProperty("terra.profile.dayNight", "false").toBooleanStrict(), System.getProperty("terra.profile.wind", "false").toBooleanStrict()) } }
     private val frames = DoubleArray(10000)
     private var frameCount = 0
     private var caseIndex = -1
@@ -101,7 +101,7 @@ class DesktopPerformanceProbe private constructor(environment: String) : Perform
                     "${(worker?.unservedRequestedSeconds ?: 0.0) - (start?.unservedRequestedSeconds ?: 0.0)},${worker?.rateLimited ?: false},${worker?.automaticFidelity ?: false},${worker?.quantumSeconds ?: 0.0}")
                 report.write(",${(worker?.revision ?: 0) - (start?.revision ?: 0)},${gcCount() - startGcCount},${gcMillis() - startGcMillis},$startHeap,${heapBytes()}")
                 report.newLine(); report.flush()
-                println("PROFILE ${settings.speed.name} clouds=${settings.clouds}: p95=%.2fms, p99=%.2fms, achieved=%.4f days/s".format(
+                println("PROFILE ${settings.speed.name} clouds=${settings.clouds} wind=${settings.wind}: p95=%.2fms, p99=%.2fms, achieved=%.4f days/s".format(
                     percentile(0.95), percentile(0.99), completed / elapsed / 86400))
                 return nextCase(now)
             }

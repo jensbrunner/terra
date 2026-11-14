@@ -231,6 +231,8 @@ class TerrainMapView(
 
     fun clearSelection() { selectionBorder.visible = false }
 
+    fun viewportChanged() { windOverlay.viewportChanged() }
+
     /** Static topographic light, independent of seasonal lighting and physical temperatures. */
     /** Continuous canopy, grass and bare-ground fractions instead of a categorical switch. */
     private fun updateCanopy() {

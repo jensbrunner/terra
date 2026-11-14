@@ -144,6 +144,8 @@ class AtlasScene(
                     selectSpeed(settings.speed)
                     if (settings.clouds) activeOverlays.add(WeatherLayer.CLOUDS) else activeOverlays.remove(WeatherLayer.CLOUDS)
                     if (settings.dayNight) activeOverlays.add(WeatherLayer.DAY_NIGHT) else activeOverlays.remove(WeatherLayer.DAY_NIGHT)
+                    if (settings.wind) activeOverlays.add(WeatherLayer.WIND) else activeOverlays.remove(WeatherLayer.WIND)
+                    refreshLegend()
                     refreshLayerButtons()
                     simulation.updateControls(settings.speed, paused, resetPending = true)
                 }
@@ -323,16 +325,16 @@ class AtlasScene(
         } else if (legend == null) {
             when {
                 WeatherLayer.CLOUDS in activeOverlays -> {
-                    legendPanel.atlasText(uiFont, "Terrain + clouds", 0.0, 0.0, 12.0)
-                    legendPanel.atlasText(uiFont, "Texture shows cover and cloud-water depth.", 0.0, 24.0, 11.0, muted = true)
+                    legendPanel.atlasText(uiFont, if (representative) "Climate means" else "Terrain + clouds", 0.0, 0.0, 12.0)
+                    legendPanel.atlasText(uiFont, if (representative) "Clouds return in detailed-weather mode." else "Texture shows cover and cloud-water depth.", 0.0, 24.0, 11.0, muted = true)
                 }
                 WeatherLayer.WIND in activeOverlays -> {
                     legendPanel.atlasText(uiFont, "Wind speed · m/s", 0.0, 0.0, 12.0)
                     legendPanel.atlasText(uiFont, "Length and colour show speed. Key on the map.", 0.0, 24.0, 11.0, muted = true)
                 }
                 WeatherLayer.DAY_NIGHT in activeOverlays -> {
-                    legendPanel.atlasText(uiFont, "Day and night", 0.0, 0.0, 12.0)
-                    legendPanel.atlasText(uiFont, "Dark shading marks night; edges show twilight.", 0.0, 24.0, 11.0, muted = true)
+                    legendPanel.atlasText(uiFont, if (representative) "Seasonal sunlight" else "Day and night", 0.0, 0.0, 12.0)
+                    legendPanel.atlasText(uiFont, if (representative) "Average daylight over the climate interval." else "Dark shading marks night; edges show twilight.", 0.0, 24.0, 11.0, muted = true)
                 }
                 else -> {
                     legendPanel.atlasText(uiFont, "Terrain view", 0.0, 0.0, 12.0)
@@ -356,7 +358,7 @@ class AtlasScene(
             atlasCard(376.0, 76.0)
             atlasText(uiFont, "WIND SPEED · m/s", 14.0, 9.0, 11.0, muted = true)
             val samples = listOf(2.0, 5.0, 10.0, 20.0)
-            graphics(renderer = GraphicsRenderer.GPU) {
+            graphics(renderer = GraphicsRenderer.SYSTEM) {
                 samples.forEachIndexed { index, speed ->
                     WindGlyph.draw(this, 48.0 + index * 92, 39.0, 1.0, 0.0, speed, scale = 3.0)
                 }
@@ -478,7 +480,7 @@ class AtlasScene(
         if (inspectorDetailed) {
             val represented = WeatherDisplayText.period(period, year)
             val source = WeatherDisplayText.quality(period)
-            selectionLabel.text = "$source\nUpdate covers $represented\n\n" +
+            selectionLabel.text = "$source\nUpdate covers $represented\n" +
                 "Rain total   ${formatNumber(weather.rainMmThisUpdate(tx, ty), 3)} mm\n" +
                 "${if (estimate) "Monthly mean rate" else "Step peak"}   ${formatNumber(weather.peakSubstepPrecipitationMmPerHour(tx, ty), 3)} mm/h\n" +
                 "Wind speed   ${formatNumber(weather.windSpeedMetersPerSecond(tx, ty), 1)} m/s\n" +
@@ -500,6 +502,9 @@ class AtlasScene(
             showingDynamics = true
             refreshDynamicsMenu()
             if (presentation?.weather?.hasResolvedDynamics != true) return
+        }
+        if (!layer.resolvedDynamicsOnly && weatherLegend(layer) != null && showingDynamics) {
+            showingDynamics = false; refreshDynamicsMenu()
         }
         if (layer in activeOverlays) activeOverlays.remove(layer) else {
             // Independent scalar tints cannot share a meaningful colour legend.
@@ -554,7 +559,7 @@ class AtlasScene(
                 showingDynamics = !showingDynamics; refreshDynamicsMenu()
             }
             AtlasButton(this, uiFont, "Clear all", 232.0, 12.0, 80.0, 28.0) {
-                activeOverlays.clear(); refreshLayerButtons(); refreshLegend(); refreshOverlays()
+                activeOverlays.clear(); refreshLayerButtons(); refreshLegend(); refreshOverlays(); updateSelectionInfo()
             }
             atlasText(uiFont, "Colour overlay", 16.0, 52.0, 12.0, muted = true)
             weatherLayerGroup = container {
@@ -632,6 +637,7 @@ class AtlasScene(
         mapLayer.scaleX = camera.scale
         mapLayer.scaleY = camera.scale
         mapLayer.xy(camera.x, camera.y)
+        if (::mapView.isInitialized) mapView.viewportChanged()
     }
 
     /** Explicit development-preview states; never called during ordinary play. */
@@ -670,7 +676,7 @@ class AtlasScene(
                 inspectorDetailed = true; updateSelectionInfo()
             }
             "inspection", "details" -> {
-                activeOverlays.remove(WeatherLayer.CLOUDS)
+                activeOverlays.clear()
                 if (WeatherLayer.HUMIDITY !in activeOverlays) toggleLayer(WeatherLayer.HUMIDITY)
                 selectedTileX = world.width * 3 / 4; selectedTileY = world.height / 2
                 mapView.selectTile(selectedTileX!!, selectedTileY!!)
