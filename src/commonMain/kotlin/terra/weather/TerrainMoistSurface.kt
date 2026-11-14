@@ -80,16 +80,27 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
         beginUpdate(); climateRainRate.fill(0.0)
     }
 
-    /** Atlas forcing is an external water flux. Rain is concentrated into a deterministic
-     * wet tenth of the interval; melt and PET span both wet and dry periods. This lets
+    /** Atlas forcing is an external water flux. Rain is concentrated into the first
+     * tenth of the calendar month; melt and PET span both wet and dry periods. This lets
      * saturation/infiltration excess escape before later dry-period evaporation. */
-    internal fun evolveMonth(atlas: SeasonalClimateAtlas, month: Int, fraction: Double): Double {
+    internal fun evolveMonth(atlas: SeasonalClimateAtlas, month: Int, fraction: Double,
+        startFraction: Double = 0.0): Double {
+        val wetFraction = (min(startFraction + fraction, CLIMATE_WET_FRACTION) -
+            min(startFraction, CLIMATE_WET_FRACTION)).coerceAtLeast(0.0)
+        var evaporation = 0.0
+        if (wetFraction > 0.0) evaporation += evolveClimatePeriod(atlas, month, wetFraction, wetFraction / CLIMATE_WET_FRACTION)
+        val dryFraction = fraction - wetFraction
+        if (dryFraction > 0.0) evaporation += evolveClimatePeriod(atlas, month, dryFraction, 0.0)
+        return evaporation
+    }
+
+    private fun evolveClimatePeriod(atlas: SeasonalClimateAtlas, month: Int, fraction: Double, rainFraction: Double): Double {
         var evaporated = 0.0
         val days = fraction * 365 / 12
         val growthMemory = -expm1(-fraction / 6)
         val droughtMemory = -expm1(-fraction / 24)
         for (i in 0 until count) {
-            val amount = atlas.rain[month][i] * fraction
+            val amount = atlas.rain[month][i] * rainFraction
             rain[i] += amount
             if (!land[i]) continue
             val temperature = atlas.temperature[month][i]
@@ -109,9 +120,7 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
                 }
                 continue
             }
-            val wet = CLIMATE_WET_FRACTION
-            val wetActual = evolveClimateBucket(i, amount * (1 - frozen) + melt * wet, demand * wet, days * wet)
-            val actual = wetActual + evolveClimateBucket(i, melt * (1 - wet), demand * (1 - wet), days * (1 - wet))
+            val actual = evolveClimateBucket(i, input, demand, days)
             evaporated += actual
             if (temperature > 5 && demand > 0) {
                 val availability = 0.6 * actual / demand + 0.4 * (soil[i] / (soilCapacityMm[i] * FIELD_CAPACITY_FRACTION)).coerceIn(0.0, 1.0)
@@ -121,6 +130,19 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
         }
         export(surfaceWater.advance(days * 86400))
         return evaporated * mapping.tileAreaM2
+    }
+
+    internal class ClimateState(val soil: DoubleArray, val snow: DoubleArray, val availability: DoubleArray,
+        val drought: DoubleArray, val water: SurfaceWater.State, val boundary: Double, val roundoff: Double)
+
+    internal fun captureClimateState() = ClimateState(soil.copyOf(), snow.copyOf(), growingWaterAvailability.copyOf(),
+        climateDrought.copyOf(), surfaceWater.captureState(), boundaryMmTiles, boundaryRoundoff)
+
+    internal fun restoreClimateState(state: ClimateState) {
+        state.soil.copyInto(soil); state.snow.copyInto(snow)
+        state.availability.copyInto(growingWaterAvailability); state.drought.copyInto(climateDrought)
+        surfaceWater.restoreState(state.water)
+        boundaryMmTiles = state.boundary; boundaryRoundoff = state.roundoff
     }
 
     /** Climate mode adds potential ET and finite root access to the shared balance. */

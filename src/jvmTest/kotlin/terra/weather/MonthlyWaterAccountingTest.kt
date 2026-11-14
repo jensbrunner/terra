@@ -24,7 +24,7 @@ class MonthlyWaterAccountingTest {
         val before = surface.totalWaterKg
         val boundary = surface.exportedWaterKg
         val evaporation = surface.evolveMonth(atlas, 0, fraction)
-        val precipitation = land.sumOf { atlas.rain[0][it] * fraction } * mapping.tileAreaM2
+        val precipitation = land.sumOf { atlas.rain[0][it] * (fraction / 0.1).coerceAtMost(1.0) } * mapping.tileAreaM2
         assertEquals(before + precipitation,
             surface.totalWaterKg + evaporation + surface.exportedWaterKg - boundary,
             (before + precipitation).coerceAtLeast(1.0) * 1e-11)
@@ -86,6 +86,46 @@ class MonthlyWaterAccountingTest {
                         advance(surface, atlas(0.0, pet), fraction)
                     }
                 }
+            }
+        }
+    }
+
+    @Test fun calendarMonthHydrologyIsIndependentOfTransactionBoundaries() {
+        for (temperature in listOf(-10.0, 0.5, 20.0)) for (startFraction in listOf(0.0, 0.05, 0.3)) {
+            val forcing = atlas(400.0, 500.0, temperature)
+            fun initialized() = TerrainMoistSurface(world, mapping).also { surface ->
+                for (i in land) surface.soil[i] = surface.soilCapacityMm[i] * 0.75
+            }
+            val monthSeconds = forcing.solar.yearSeconds / 12
+            val whole = initialized()
+            val startSeconds = startFraction * monthSeconds
+            val duration = (1 - startFraction) * monthSeconds
+            ClimateEvolution(world, whole, startSeconds).advance(forcing, duration, 0)
+            assertEquals(400.0 * (1 - startFraction / 0.1).coerceAtLeast(0.0), whole.rain[1], 1e-9)
+            for (parts in listOf(listOf(0.5, 0.5), listOf(0.03, 0.04, 0.08, 0.22, 0.13, 0.5))) {
+                val split = initialized()
+                val evolution = ClimateEvolution(world, split, startSeconds)
+                val totals = Array(3) { DoubleArray(width * height) }
+                for (part in parts) {
+                    val diagnostics = evolution.advance(forcing, part * duration, 0)
+                    assertTrue(kotlin.math.abs(diagnostics.relativeWaterResidual) < 1e-10)
+                    for ((f, flux) in arrayOf(split.rain, split.drainage, split.overflow).withIndex()) {
+                        for (i in flux.indices) totals[f][i] += flux[i]
+                    }
+                }
+                val expected = whole.captureClimateState(); val actual = split.captureClimateState()
+                val expectedArrays = arrayOf(expected.soil, expected.snow, expected.availability, expected.drought,
+                    expected.water.groundwater, expected.water.channels, expected.water.recharge,
+                    expected.water.runoff, expected.water.lakes, expected.water.discharge,
+                    whole.rain, whole.drainage, whole.overflow)
+                val actualArrays = arrayOf(actual.soil, actual.snow, actual.availability, actual.drought,
+                    actual.water.groundwater, actual.water.channels, actual.water.recharge,
+                    actual.water.runoff, actual.water.lakes, actual.water.discharge,
+                    totals[0], totals[1], totals[2])
+                for (f in expectedArrays.indices) for (i in expectedArrays[f].indices) {
+                    assertEquals(expectedArrays[f][i], actualArrays[f][i], 1e-8)
+                }
+                assertEquals(expected.boundary, actual.boundary, 1e-8)
             }
         }
     }

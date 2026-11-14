@@ -68,6 +68,21 @@ internal class SurfaceWater(world: World, initialGroundwaterMm: Double = 0.0, in
     }
 
     val totalWaterMmTiles get() = groundwater.sum() + channels.sum() + recharge.sum() + runoff.sum() + basins.sumOf { it.water }
+    internal class State(val groundwater: DoubleArray, val channels: DoubleArray, val recharge: DoubleArray,
+        val runoff: DoubleArray, val lakes: DoubleArray, val discharge: DoubleArray, val pendingSeconds: Double)
+
+    internal fun captureState() = State(groundwater.copyOf(), channels.copyOf(), recharge.copyOf(),
+        runoff.copyOf(), DoubleArray(basins.size) { basins[it].water }, discharge.copyOf(), pendingSeconds)
+
+    internal fun restoreState(state: State) {
+        state.groundwater.copyInto(groundwater); state.channels.copyInto(channels)
+        state.recharge.copyInto(recharge); state.runoff.copyInto(runoff)
+        state.discharge.copyInto(discharge)
+        for (i in basins.indices) basins[i].water = state.lakes[i]
+        pendingSeconds = state.pendingSeconds
+        refreshLakes(); revision++
+    }
+
     fun groundwaterMmAt(tile: Int) = groundwater[tile] + recharge[tile]
     fun lakeWaterMmTiles(id: Int) = basins[id].water
     fun receive(tile: Int, drainage: Double, overflow: Double) {
