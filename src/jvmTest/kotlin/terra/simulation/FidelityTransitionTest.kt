@@ -10,33 +10,31 @@ import terra.atmosphere.PlanetarySunlight
 import terra.weather.WeatherFieldQuality
 
 class FidelityTransitionTest {
-    private val request = WorldRequest(generation = 1, width = 15, height = 11, dynamical = true,
-        atmosphere = DryAtmosphereConfig(width = 8, height = 6))
+    private val request = WorldRequest(generation = 1, width = 15, height = 11, atmosphere = DryAtmosphereConfig(width = 8, height = 6))
     private val day = 86400.0
 
     @Test
     fun nativeWorldReturnsFromTwoHundredFiftyFiveYearsWithActiveResolvedDynamics() {
-        val owner = WorldSimulation(WorldRequest(dynamical = true))
+        val owner = WorldSimulation(WorldRequest())
         fun capture() = owner.snapshot(SimulationProgress(0, 1, 0, owner.completedSeconds,
             SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, day, false, 0.0, 0.0, 0))
         owner.advance(owner.stepSeconds, SimulationSpeed.ONE_HOUR)
-        val water = capture().diagnostics!!.totalWaterKg
+        val water = capture().diagnostics!!.let { it.totalWaterKg + it.exportedWaterKg }
         repeat(12) { owner.advanceClimateInterval(20 * 365 * day) }
         owner.advanceClimateInterval(15 * 365 * day)
         val coarse = capture()
         owner.setFidelity(SimulationFidelity.DETAILED)
         val pending = capture()
         assertEquals(coarse.progress.completedSeconds, pending.progress.completedSeconds)
-        assertTrue(coarse.world === pending.world && coarse.hydrology === pending.hydrology)
+        assertTrue(coarse.world === pending.world && coarse.drainage === pending.drainage)
         assertTrue(coarse.seasonalClimate === pending.seasonalClimate)
         assertTrue(pending.lastHandoff!!.rootMeanSquareWindMetersPerSecond > 1)
         assertTrue(pending.lastHandoff.maximumWindMetersPerSecond <= 35)
         assertEquals(1L, pending.lastHandoff.physicalStepsAtHandoff)
-        assertFalse(pending.weather.hasResolvedDynamics)
+        assertTrue(pending.weather.hasResolvedDynamics)
         for (y in 0 until pending.world.height) for (x in 0 until pending.world.width) {
             assertEquals(coarse.weather.soilWaterMm(x, y), pending.weather.soilWaterMm(x, y))
             assertEquals(coarse.weather.surfaceTemperatureC(x, y), pending.weather.surfaceTemperatureC(x, y))
-            assertEquals(coarse.weather.atmosphericWaterMm(x, y), pending.weather.atmosphericWaterMm(x, y), 1e-10)
         }
         repeat(90) { owner.advance(40.0, SimulationSpeed.ONE_HOUR) }
         val resolved = capture()
@@ -44,7 +42,7 @@ class FidelityTransitionTest {
         assertTrue(resolved.weather.hasResolvedDynamics)
         assertTrue(resolved.weather.pressureAnomalyPercent(160, 100)!!.isFinite())
         assertTrue(resolved.weather.relativeVorticityPerSecond(160, 100)!!.isFinite())
-        assertEquals(water, resolved.diagnostics!!.totalWaterKg, water * 1e-10)
+        assertEquals(water, resolved.diagnostics!!.let { it.totalWaterKg + it.exportedWaterKg }, water * 1e-10)
         assertTrue(abs(resolved.diagnostics.relativeWaterResidual) < 1e-10)
         println("NATIVE_REENTRY years=255 climate_transactions=13 rms_wind_ms=${pending.lastHandoff.rootMeanSquareWindMetersPerSecond} max_wind_ms=${pending.lastHandoff.maximumWindMetersPerSecond} water_residual=${resolved.diagnostics.relativeWaterResidual}")
     }
@@ -55,7 +53,7 @@ class FidelityTransitionTest {
         fun capture() = owner.snapshot(SimulationProgress(1, 1, 0, owner.completedSeconds,
             SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, day, false, 0.0, 0.0, 0))
         owner.advance(20.0, SimulationSpeed.ONE_HOUR)
-        val initialWater = capture().diagnostics!!.totalWaterKg
+        val initialWater = capture().diagnostics!!.let { it.totalWaterKg + it.exportedWaterKg }
         // A single tiny-grid schedule: 3.28 real model years, no detailed spin-up or seed sweep.
         repeat(171) { owner.advanceClimateInterval(7 * day) }
         val coarse = capture()
@@ -65,10 +63,10 @@ class FidelityTransitionTest {
         val pending = capture()
         assertEquals(coarse.progress.completedSeconds, pending.progress.completedSeconds)
         assertEquals(SimulationFidelity.DETAILED, pending.fidelity)
-        assertTrue(pending.detailedReentryPending)
-        assertEquals(WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL, pending.weather.fieldSemantics.quality)
+        assertTrue(pending.weather.hasResolvedDynamics)
+        assertEquals(WeatherFieldQuality.RESOLVED_NOW, pending.weather.fieldSemantics.quality)
         assertTrue(coarse.world === pending.world)
-        assertTrue(coarse.hydrology === pending.hydrology)
+        assertTrue(coarse.drainage === pending.drainage)
         assertTrue(coarse.seasonalClimate === pending.seasonalClimate)
         assertEquals(coarse.observedClimateYears, pending.observedClimateYears)
         val handoff = pending.lastHandoff!!
@@ -79,17 +77,15 @@ class FidelityTransitionTest {
         for (y in 0 until request.height) for (x in 0 until request.width) {
             assertEquals(coarse.weather.soilWaterMm(x, y), pending.weather.soilWaterMm(x, y))
             assertEquals(coarse.weather.surfaceTemperatureC(x, y), pending.weather.surfaceTemperatureC(x, y))
-            assertEquals(coarse.weather.atmosphericWaterMm(x, y), pending.weather.atmosphericWaterMm(x, y), 1e-12)
         }
         repeat(100) { owner.advance(20.0, SimulationSpeed.ONE_HOUR) }
         val resolved = capture()
-        assertFalse(resolved.detailedReentryPending)
         assertEquals(WeatherFieldQuality.RESOLVED_NOW, resolved.weather.fieldSemantics.quality)
         assertEquals(coarse.progress.completedSeconds + 2000, resolved.progress.completedSeconds)
         assertEquals(resolved.progress.completedSeconds, resolved.weather.elapsedSeconds)
         assertTrue(resolved.diagnostics!!.includesApproximateHistory)
         assertEquals(handoff.initializationEnergyChangeJoules, resolved.diagnostics.atmosphereInitializationEnergyJoules)
-        assertEquals(initialWater, resolved.diagnostics.totalWaterKg, initialWater * 1e-10)
+        assertEquals(initialWater, resolved.diagnostics.let { it.totalWaterKg + it.exportedWaterKg }, initialWater * 1e-10)
         assertTrue(abs(resolved.diagnostics.relativeWaterResidual) < 1e-10)
         val absolute = PlanetarySunlight(request.width, request.height, northUp = false).also { it.update(owner.completedSeconds) }
         val restarted = PlanetarySunlight(request.width, request.height, northUp = false).also { it.update(2020.0) }
@@ -113,7 +109,7 @@ class FidelityTransitionTest {
         fun capture() = owner.snapshot(SimulationProgress(1, 1, 0, owner.completedSeconds,
             SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, day, false, 0.0, 0.0, 0))
         owner.advance(20.0, SimulationSpeed.ONE_HOUR)
-        val initialWater = capture().diagnostics!!.totalWaterKg
+        val initialWater = capture().diagnostics!!.let { it.totalWaterKg + it.exportedWaterKg }
         repeat(255) { owner.advanceClimateInterval(365 * day) }
         val coarse = capture()
         val records = StringBuilder()
@@ -159,7 +155,7 @@ class FidelityTransitionTest {
         }
         val resolved = capture()
         assertEquals(coarse.progress.completedSeconds + 20 * 3600, owner.completedSeconds)
-        assertEquals(initialWater, resolved.diagnostics!!.totalWaterKg, initialWater * 1e-10)
+        assertEquals(initialWater, resolved.diagnostics!!.let { it.totalWaterKg + it.exportedWaterKg }, initialWater * 1e-10)
         assertTrue(abs(resolved.diagnostics.relativeWaterResidual) < 1e-10)
         val renderer = terra.render.CloudRenderer(resolved.world.width, resolved.world.height, resolved.world.seed)
         renderer.update(resolved.weather)
@@ -194,12 +190,12 @@ class FidelityTransitionTest {
             val pending = worker.latestSnapshot()!!
             assertEquals(coarse.progress.generation, pending.progress.generation)
             assertEquals(coarse.progress.completedSeconds, pending.progress.completedSeconds)
-            assertTrue(pending.detailedReentryPending)
-            assertEquals(WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL, pending.weather.fieldSemantics.quality)
+            assertTrue(pending.weather.hasResolvedDynamics)
+            assertEquals(WeatherFieldQuality.RESOLVED_NOW, pending.weather.fieldSemantics.quality)
             assertEquals(coarse.world.seed, pending.world.seed)
             assertEquals(coarse.weather.soilWaterMm(3, 3), pending.weather.soilWaterMm(3, 3))
             worker.updateControls(SimulationSpeed.ONE_HOUR, false)
-            await { worker.latestSnapshot()?.weather?.fieldSemantics?.quality == WeatherFieldQuality.RESOLVED_NOW }
+            await { worker.latestSnapshot()?.let { it.progress.completedSeconds > coarse.progress.completedSeconds && it.weather.fieldSemantics.quality == WeatherFieldQuality.RESOLVED_NOW } == true }
             val resumed = worker.latestSnapshot()!!
             assertTrue(resumed.progress.completedSeconds > coarse.progress.completedSeconds)
             assertEquals(1L, resumed.progress.generation)

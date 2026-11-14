@@ -1,496 +1,202 @@
 package terra.weather
 
-import terra.atmosphere.AtmosphereTileMapping
-import terra.atmosphere.AtmosphereTerrain
-import terra.atmosphere.MoistSurface
-import terra.atmosphere.ColumnThermodynamics
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyExchange
-import terra.hydrology.WaterFluxBatch
+import terra.atmosphere.*
 import terra.world.World
 import terra.world.Terrain
-import kotlin.math.abs
-import kotlin.math.exp
-import kotlin.math.expm1
-import kotlin.math.ln1p
-import kotlin.math.max
-import kotlin.math.min
+import kotlin.math.*
 
-/**
- * Fine land reservoirs and surface exchange. Ownership:
- *
- *  - root zone (`soil`) is the fast plant-accessible store;
- *  - `groundwater` is a slow baseflow store released by a linear recession;
- *  - `snow` is frozen water with its own albedo and delayed melt;
- *  - lakes, channels and the finite ocean remain owned by [HydrologySimulation].
- *
- * No climate-cell array duplicates any of these inventories. The reduced atmosphere
- * only ever requests exchange against the authoritative tile stores.
+/** Shared soil and snow. Open water is a boundary moisture source; surplus land water
+ * leaves as runoff. No groundwater, channel inventories, or duplicate climate stores.
+ * exportedWaterKg is a signed boundary ledger, not a finite ocean reservoir.
  */
-internal class TerrainMoistSurface(
-    private val world: World,
-    val mapping: AtmosphereTileMapping,
-    private val hydrology: HydrologySimulation
-) : MoistSurface, HydrologyExchange {
+internal class TerrainMoistSurface(private val world: World, val mapping: AtmosphereTileMapping) : MoistSurface {
     private val width = world.width
     private val height = world.height
     private val count = width * height
-    internal val worldForClimate: World get() = world
-    internal val worldSeedForClimate: Int get() = world.seed
-    private val land = BooleanArray(count) { hydrology.isLandTile(it % width, it / width) }
-    val responseUnits = HydrologicalResponseUnits(world, hydrology)
-    val soil = DoubleArray(count) { if (land[it]) INITIAL_ROOT_ZONE_MM else 0.0 }
-    private val unitGroundwater = DoubleArray(responseUnits.count)
-    private val unitSnow = DoubleArray(responseUnits.count)
-    private val unitPercolation = DoubleArray(responseUnits.count)
+    internal val worldForClimate get() = world
+    private val land = BooleanArray(count) { world[it % width, it / width].terrain != Terrain.OCEAN }
+    val soil = DoubleArray(count) { if (land[it]) 120.0 else 0.0 }
     private val snow = DoubleArray(count)
-    private val cellSnowMm = DoubleArray(mapping.config.cellCount)
-    private var wetLake = BooleanArray(count)
-    /** Slow slab-ice memory belongs to the shared surface, not a disposable climate engine. */
+    private val queuedRain = DoubleArray(count)
+    private val stepRain = DoubleArray(count)
+    private val weightedWet = DoubleArray(count)
+    private var boundaryMmTiles = 0.0
+    private var boundaryRoundoff = 0.0
+    private fun export(amount: Double) {
+        val corrected = amount - boundaryRoundoff
+        val next = boundaryMmTiles + corrected
+        boundaryRoundoff = (next - boundaryMmTiles) - corrected
+        boundaryMmTiles = next
+    }
     internal val seaIceFraction = DoubleArray(mapping.config.cellCount)
-    internal val waterMaskRevision: Long get() = hydrology.lakeMaskRevision
     val landFraction = DoubleArray(mapping.config.cellCount) { c ->
         var amount = 0.0
         mapping.forCell(c) { i, f -> if (land[i]) amount += f }
         amount / mapping.tilesPerCell
     }
-    // An atmospheric relief scale: 0.3 normalized elevation above sea is 3 km.
-    // This does not alter the existing game-scale hydrological basin capacities.
-    val terrain = AtmosphereTerrain(mapping, DoubleArray(count) { tile ->
-        max(0.0, world[tile % width, tile / width].elevation - world.seaLevel) * 10_000.0
+    val terrain = AtmosphereTerrain(mapping, DoubleArray(count) {
+        max(0.0, world[it % width, it / width].elevation - world.seaLevel) * 10_000.0
     })
     private val infiltrationScale = DoubleArray(count) { tile ->
         val x = tile % width; val y = tile / width
-        val east = world[(x + 1) % width, y].elevation
-        val west = world[(x + width - 1) % width, y].elevation
-        val north = world[x, maxOf(0, y - 1)].elevation
-        val south = world[x, minOf(height - 1, y + 1)].elevation
-        val slope = (abs(east - west) + abs(south - north)).coerceAtLeast(0.0)
-        (1.0 - 0.65 * (slope / 0.05).coerceIn(0.0, 1.0)).coerceIn(0.25, 1.0)
+        val slope = abs(world[(x + 1) % width, y].elevation - world[(x + width - 1) % width, y].elevation) +
+            abs(world[x, min(height - 1, y + 1)].elevation - world[x, max(0, y - 1)].elevation)
+        (1 - 0.65 * (slope / 0.05).coerceIn(0.0, 1.0)).coerceIn(0.25, 1.0)
     }
-    private val dragMultiplier = DoubleArray(mapping.config.cellCount)
-    private var roughnessRevision = -1L
     val rain = DoubleArray(count)
     val drainage = DoubleArray(count)
     val overflow = DoubleArray(count)
-    val lakeRain = DoubleArray(count)
-    val rainRate = DoubleArray(count)
     val peakRainRate = DoubleArray(count)
     val climateRainRate = DoubleArray(count)
-    val observedRain = DoubleArray(count)
-    val rainWetSeconds = DoubleArray(count)
-    val snowMelt = DoubleArray(count)
-    private val wetFractionWeightedRain = DoubleArray(count)
-    private val queuedSoilRain = DoubleArray(count)
-    private var climateRainQueued = false
-    private var postClimateTotals: ClimateFluxTotals? = null
-    private val stepRain = DoubleArray(count)
-    private val cellTemperatureC = DoubleArray(mapping.config.cellCount) { 10.0 }
-    private val activeTiles = IntArray(count)
-    private val activeFlag = BooleanArray(count)
-    private var activeTileCount = 0
-    private fun markActive(tile: Int) {
-        if (!activeFlag[tile]) { activeFlag[tile] = true; activeTiles[activeTileCount++] = tile }
-    }
-    private var transferred = true
-    private var updateRevision = 0L
-    private var updateDurationSeconds = 0.0
-    var pendingFluxBatch: WaterFluxBatch? = null
-        private set
-    val soilWaterMmTiles: Double get() = soil.sum()
-    val groundwaterMmTiles: Double get() = unitGroundwater.sum()
-    val unitGroundwaterMmTiles: Double get() = unitGroundwater.sum()
-    val snowWaterMmTiles: Double get() = snow.sum()
-    val unitSnowWaterMmTiles: Double get() = unitSnow.sum()
-    val hasSnow: Boolean get() = unitSnow.any { it > 0.0 }
-    fun snowMmInCell(cell: Int): Double = cellSnowMm[cell]
-    val unacceptedWaterMmTiles: Double
-        get() = if (transferred) 0.0 else drainage.sum() + overflow.sum() + lakeRain.sum() + queuedSoilRain.sum()
-
-    init {
-        for (unit in 0 until responseUnits.count) {
-            unitGroundwater[unit] = INITIAL_GROUNDWATER_MM * responseUnits.tileCountPerUnit[unit]
-        }
-    }
-
-    /** Read the initial physical stores without coupling weather initialization to soil constants. */
-    fun initialWaterAvailability(cell: Int): Double {
-        var available = 1 - landFraction[cell]
-        mapping.forCell(cell) { tile, fraction ->
-            val unit = responseUnits.unitOfTile[tile]
-            val groundwaterShare = if (unit >= 0) unitGroundwater[unit] / responseUnits.tileCountPerUnit[unit] else 0.0
-            available += ((soil[tile] + groundwaterShare * GROUNDWATER_ACCESS) /
-                (SOIL_CAPACITY_MM + INITIAL_GROUNDWATER_MM)) * fraction / mapping.tilesPerCell
-        }
-        return available.coerceIn(0.0, 1.0)
-    }
-
-    /** Owner-only temperature estimate used for snow accumulation and melt, °C. */
-    fun setCellTemperature(cell: Int, celsius: Double) {
-        require(cell in cellTemperatureC.indices && celsius.isFinite())
-        cellTemperatureC[cell] = celsius
-    }
-
-    private fun landHeatCapacity(tile: Int): Double = if (wetLake[tile]) OCEAN_MIXED_LAYER_HEAT_CAPACITY
-        else LAND_HEAT_CAPACITY + min(soil[tile] * WATER_HEAT_CAPACITY_PER_MM, MAX_SOIL_HEAT_CAPACITY)
+    private val temperatureC = DoubleArray(mapping.config.cellCount) { 10.0 }
+    private val drag = DoubleArray(mapping.config.cellCount)
+    private var roughnessRevision = -1L
+    val soilWaterMmTiles get() = soil.sum()
+    val snowWaterMmTiles get() = snow.sum()
+    fun snowMmInCell(cell: Int): Double = snowWaterMm(cell)
+    fun initialWaterAvailability(cell: Int) = (1 - landFraction[cell] + rootZoneMm(cell) / 250.0).coerceIn(0.0, 1.0)
+    fun setCellTemperature(cell: Int, celsius: Double) { temperatureC[cell] = celsius }
 
     private fun tileAlbedo(tile: Int, cell: Int): Double {
-        if (!land[tile]) return OCEAN_ALBEDO * (1 - seaIceFraction[cell]) + 0.55 * seaIceFraction[cell]
-        if (wetLake[tile]) return OCEAN_ALBEDO
+        if (!land[tile]) return 0.07 * (1 - seaIceFraction[cell]) + 0.40 * seaIceFraction[cell]
         val cover = world.treeCover(tile % width, tile / width)
         val grass = world.grassCover(tile % width, tile / width)
-        val wetness = (soil[tile] / SOIL_CAPACITY_MM).coerceIn(0.0, 1.0)
-        val snowFraction = (snow[tile] / SNOW_ALBEDO_DEPTH_MM).coerceIn(0.0, 1.0)
-        val landAlbedo = (LAND_ALBEDO - 0.075 * cover - 0.04 * grass - 0.055 * wetness).coerceIn(0.12, 0.36)
-        return landAlbedo * (1 - snowFraction) + SNOW_ALBEDO * snowFraction
+        val bare = (0.25 - 0.075 * cover - 0.04 * grass - 0.055 * (soil[tile] / 250).coerceIn(0.0, 1.0)).coerceIn(0.12, 0.36)
+        val ice = (snow[tile] / 25.0).coerceIn(0.0, 1.0)
+        return bare * (1 - ice) + 0.45 * ice
     }
-
+    private fun tileCapacity(tile: Int) = if (land[tile]) 3.2e6 else 1.6e8
     override fun heatCapacityJm2K(cell: Int): Double {
-        var capacity = (1 - landFraction[cell]) * OCEAN_MIXED_LAYER_HEAT_CAPACITY
-        mapping.forCell(cell) { tile, fraction ->
-            if (land[tile]) capacity += landHeatCapacity(tile) * fraction / mapping.tilesPerCell
-        }
-        return capacity
-    }
-
-    override fun albedo(cell: Int): Double {
+        if (landFraction[cell] == 0.0) return 1.6e8
         var sum = 0.0
-        mapping.forCell(cell) { tile, fraction -> sum += tileAlbedo(tile, cell) * fraction }
-        return (sum / mapping.tilesPerCell).coerceIn(0.05, 0.82)
+        mapping.forCell(cell) { i, f -> sum += tileCapacity(i) * f }
+        return sum / mapping.tilesPerCell
     }
-
-    /** Climate refreshes both properties together; visit the expensive tile overlap only once. */
+    override fun albedo(cell: Int): Double {
+        if (landFraction[cell] == 0.0) return 0.07 * (1 - seaIceFraction[cell]) + 0.40 * seaIceFraction[cell]
+        var sum = 0.0
+        mapping.forCell(cell) { i, f -> sum += tileAlbedo(i, cell) * f }
+        return sum / mapping.tilesPerCell
+    }
     fun fillThermalProperties(albedo: DoubleArray, capacity: DoubleArray) {
-        for (cell in 0 until mapping.config.cellCount) {
-            var reflectivity = 0.0
-            var heatCapacity = (1 - landFraction[cell]) * OCEAN_MIXED_LAYER_HEAT_CAPACITY
-            mapping.forCell(cell) { tile, fraction ->
-                reflectivity += tileAlbedo(tile, cell) * fraction
-                if (land[tile]) heatCapacity += landHeatCapacity(tile) * fraction / mapping.tilesPerCell
+        for (c in albedo.indices) {
+            if (landFraction[c] == 0.0) {
+                albedo[c] = 0.07 * (1 - seaIceFraction[c]) + 0.40 * seaIceFraction[c]
+                capacity[c] = 1.6e8
+                continue
             }
-            albedo[cell] = (reflectivity / mapping.tilesPerCell).coerceIn(0.05, 0.82)
-            capacity[cell] = heatCapacity
+            var a = 0.0; var heat = 0.0
+            mapping.forCell(c) { i, f -> a += tileAlbedo(i, c) * f; heat += tileCapacity(i) * f }
+            albedo[c] = a / mapping.tilesPerCell; capacity[c] = heat / mapping.tilesPerCell
         }
     }
-
-    /** Snow-covered area fraction in a climate cell, 0..1. */
-    fun snowCover(cell: Int): Double {
-        var covered = 0.0
-        mapping.forCell(cell) { tile, fraction ->
-            if (snow[tile] > SNOW_ALBEDO_DEPTH_MM * 0.15) covered += fraction
-        }
-        return (covered / mapping.tilesPerCell).coerceIn(0.0, 1.0)
-    }
-
-    /** Energy-limited snowmelt; returns cell-average melt in mm and conserves snow/soil. */
-    fun meltSnowEnergyMm(cell: Int, energyJoules: Double): Double {
-        require(energyJoules.isFinite() && energyJoules >= 0.0)
-        if (energyJoules == 0.0) return 0.0
-        val meltDepthMm = energyJoules / LATENT_HEAT_FUSION_J_PER_KG
-        var meltedTiles = 0.0
-        val totals = postClimateTotals
-        mapping.forCell(cell) { tile, fraction ->
-            if (snow[tile] > 0.0) {
-                // fraction is overlap / tile area, as in recordRain(). Budget and
-                // returned melt are expressed per full atmospheric-cell area.
-                val melt = min(snow[tile], meltDepthMm * fraction)
-                snow[tile] -= melt
-                val unit = responseUnits.unitOfTile[tile]
-                if (unit >= 0) unitSnow[unit] = (unitSnow[unit] - melt).coerceAtLeast(0.0)
-                cellSnowMm[mapping.cellOfTile[tile]] -= melt
-                if (wetLake[tile]) {
-                    // Snow that fell on a dry basin and later became wet melts into the
-                    // lake inventory rather than an inaccessible soil pocket.
-                    lakeRain[tile] += melt
-                    totals?.let { it.lakeRain[tile] += melt }
-                } else if (land[tile]) {
-                    soil[tile] += melt
-                    val excess = max(0.0, soil[tile] - SOIL_CAPACITY_MM)
-                    soil[tile] -= excess
-                    overflow[tile] += excess
-                    totals?.let { it.overflow[tile] += excess }
-                } else {
-                    overflow[tile] += melt
-                    totals?.let { it.overflow[tile] += melt }
-                }
-                if (overflow[tile] > 0.0 || lakeRain[tile] > 0.0) markActive(tile)
-                snowMelt[tile] += melt
-                meltedTiles += melt
-            }
-        }
-        return meltedTiles / mapping.tilesPerCell
-    }
-
     fun snowWaterMm(cell: Int): Double {
-        var amount = 0.0
-        mapping.forCell(cell) { tile, fraction -> amount += snow[tile] * fraction }
-        return amount / mapping.tilesPerCell
+        if (landFraction[cell] == 0.0) return 0.0
+        var sum = 0.0
+        mapping.forCell(cell) { i, f -> sum += snow[i] * f }
+        return sum / mapping.tilesPerCell
     }
-
-    fun groundwaterMm(cell: Int): Double {
-        var amount = 0.0
-        mapping.forCell(cell) { tile, fraction ->
-            val unit = responseUnits.unitOfTile[tile]
-            if (unit >= 0) amount += (unitGroundwater[unit] / responseUnits.tileCountPerUnit[unit]) * fraction
-        }
-        return amount / mapping.tilesPerCell
-    }
-
     fun rootZoneMm(cell: Int): Double {
-        var amount = 0.0
-        mapping.forCell(cell) { tile, fraction -> amount += soil[tile] * fraction }
-        return amount / mapping.tilesPerCell
+        if (landFraction[cell] == 0.0) return 0.0
+        var sum = 0.0
+        mapping.forCell(cell) { i, f -> sum += soil[i] * f }
+        return sum / mapping.tilesPerCell
     }
-
-    override fun orographicUpliftMetersPerSecond(cell: Int, eastWind: Double, northWind: Double): Double =
+    override fun orographicUpliftMetersPerSecond(cell: Int, eastWind: Double, northWind: Double) =
         terrain.upliftMetersPerSecond(cell, eastWind, northWind)
-
     override fun momentumDragMultiplier(cell: Int): Double {
-        if (roughnessRevision != world.biomeRevision) refreshRoughness()
-        return dragMultiplier[cell]
-    }
-
-    private fun refreshRoughness() {
-        for (cell in dragMultiplier.indices) {
-            var roughness = 0.0
-            mapping.forCell(cell) { tile, fraction ->
-                val cover = world.treeCover(tile % width, tile / width)
-                val grass = world.grassCover(tile % width, tile / width)
-                val base = when (world[tile % width, tile / width].terrain) {
-                    Terrain.OCEAN -> 1.0
-                    Terrain.MOUNTAINS -> 5.0
-                    else -> 1.0
+        if (roughnessRevision != world.biomeRevision) {
+            for (c in drag.indices) {
+                var sum = 0.0
+                mapping.forCell(c) { i, f ->
+                    val x = i % width; val y = i / width
+                    val base = if (world[x, y].terrain == Terrain.MOUNTAINS) 5.0 else 1.0
+                    sum += base * (1 + 1.4 * world.treeCover(x, y) + 0.7 * world.grassCover(x, y)) * f
                 }
-                val vegetation = 1.0 + 1.4 * cover + 0.7 * grass
-                roughness += (base * vegetation) * fraction
+                drag[c] = sum / mapping.tilesPerCell
             }
-            dragMultiplier[cell] = roughness / mapping.tilesPerCell
+            roughnessRevision = world.biomeRevision
         }
-        roughnessRevision = world.biomeRevision
+        return drag[cell]
     }
-
     override fun evaporate(cell: Int, potentialMm: Double): Double {
-        check(!transferred && pendingFluxBatch == null)
-        require(potentialMm.isFinite() && potentialMm >= 0.0)
+        require(potentialMm.isFinite() && potentialMm >= 0)
         if (potentialMm == 0.0) return 0.0
-        // Open-ocean cells are pure area averages; skip the tile-overlap loop.
-        if (landFraction[cell] <= 0.0) {
-            return hydrology.evaporateOceanWaterMmTiles(potentialMm * mapping.tilesPerCell) / mapping.tilesPerCell
+        if (landFraction[cell] == 0.0) {
+            export(-potentialMm * mapping.tilesPerCell)
+            return potentialMm
         }
-        var actualMmTiles = 0.0
-        var oceanRequest = 0.0
-        mapping.forCell(cell) { i, fraction ->
-            val request = potentialMm * fraction
-            val snowLimit = 1 - (snow[i] / SNOW_ALBEDO_DEPTH_MM).coerceIn(0.0, 0.95)
-            val availableRequest = request * snowLimit
-            val actual = when {
-                wetLake[i] -> hydrology.evaporateLakeWaterMmTiles(i % width, i / width, availableRequest)
-                // Root-zone withdrawal: dry soil restricts actual ET rather than paying
-                // full demand until empty. A small deep-root access to groundwater keeps
-                // vegetation alive through short dry spells without erasing drought.
-                land[i] -> {
-                    val shallow = min(availableRequest, soil[i] * decayResponse(availableRequest / FIELD_CAPACITY_MM))
-                    soil[i] -= shallow
-                    val deficit = availableRequest - shallow
-                    val unit = responseUnits.unitOfTile[i]
-                    val share = if (unit >= 0) unitGroundwater[unit] / responseUnits.tileCountPerUnit[unit] else 0.0
-                    val deep = if (deficit > 0 && share > 0)
-                        min(deficit, share * GROUNDWATER_ACCESS * decayResponse(deficit / GROUNDWATER_CAPACITY_MM))
-                    else 0.0
-                    if (unit >= 0) unitGroundwater[unit] -= deep
-                    shallow + deep
-                }
-                else -> { oceanRequest += availableRequest; 0.0 }
+        var actual = 0.0
+        mapping.forCell(cell) { i, f ->
+            val demand = potentialMm * f
+            if (!land[i]) { actual += demand; export(-demand) } else {
+                val affordable = min(demand, soil[i] * relaxationFraction(demand / 120.0))
+                soil[i] -= affordable; actual += affordable
             }
-            actualMmTiles += actual
         }
-        actualMmTiles += hydrology.evaporateOceanWaterMmTiles(oceanRequest)
-        return actualMmTiles / mapping.tilesPerCell
+        return actual / mapping.tilesPerCell
     }
-
-    override fun receiveRain(cell: Int, amountMm: Double, snowFraction: Double) =
-        recordRain(cell, amountMm, continuous = false, snowFraction = snowFraction)
-
-    /** Source-funded rainfall held for constant-forcing bucket integration, never duplicated in soil. */
-    fun receiveClimateRain(cell: Int, amountMm: Double, wetFraction: Double = 1.0, snowFraction: Double = 0.0) =
-        recordRain(cell, amountMm, continuous = true, wetFraction = wetFraction, snowFraction = snowFraction)
-
-    private fun recordRain(cell: Int, amountMm: Double, continuous: Boolean, wetFraction: Double = 1.0,
-        snowFraction: Double = 0.0) {
-        check(!transferred && pendingFluxBatch == null)
-        require(amountMm.isFinite() && amountMm >= 0.0)
-        require(wetFraction.isFinite() && wetFraction > 0.0 && wetFraction <= 1.0)
-        require(snowFraction.isFinite() && snowFraction in 0.0..1.0)
-        check(continuous || !climateRainQueued)
-        if (amountMm == 0.0) return
-        if (continuous) climateRainQueued = true
-        var oceanRain = 0.0
-        mapping.forCell(cell) { i, fraction ->
-            val amount = amountMm * fraction
-            // Snow is a land reservoir. Lake and ocean precipitation stays liquid and
-            // enters the hydrology-owned store directly, avoiding a duplicated inventory.
-            val asSnow = if (land[i] && !wetLake[i]) amount * snowFraction else 0.0
-            val liquid = amount - asSnow
-            if (asSnow > 0.0) {
-                snow[i] += asSnow
-                val unit = responseUnits.unitOfTile[i]
-                if (unit >= 0) unitSnow[unit] += asSnow
-                cellSnowMm[mapping.cellOfTile[i]] += asSnow
-            }
-            if (continuous) wetFractionWeightedRain[i] += amount * wetFraction
-            rain[i] += amount
-            stepRain[i] += amount
-            observedRain[i] += amount
-            when {
-                wetLake[i] -> { lakeRain[i] += amount; markActive(i) }
-                land[i] -> queuedSoilRain[i] += liquid
-                else -> oceanRain += amount
-            }
+    override fun receiveRain(cell: Int, amountMm: Double, snowFraction: Double) = recordRain(cell, amountMm, 1.0, snowFraction)
+    fun receiveClimateRain(cell: Int, amountMm: Double, wetFraction: Double, snowFraction: Double) =
+        recordRain(cell, amountMm, wetFraction, snowFraction)
+    private fun recordRain(cell: Int, amountMm: Double, wet: Double, frozen: Double) {
+        require(amountMm.isFinite() && amountMm >= 0 && wet > 0 && wet <= 1 && frozen in 0.0..1.0)
+        mapping.forCell(cell) { i, f ->
+            val amount = amountMm * f
+            rain[i] += amount; stepRain[i] += amount; weightedWet[i] += amount * wet
+            if (land[i]) { snow[i] += amount * frozen; queuedRain[i] += amount * (1 - frozen) }
+            else export(amount)
         }
-        hydrology.receiveOceanWaterMmTiles(oceanRain)
     }
-
+    fun meltSnowEnergyMm(cell: Int, energyJoules: Double): Double {
+        var melted = 0.0
+        val available = snowWaterMm(cell)
+        if (available <= 0 || energyJoules <= 0) return 0.0
+        val fraction = min(1.0, energyJoules / (334000.0 * available))
+        mapping.forCell(cell) { i, f ->
+            val amount = snow[i] * fraction * f
+            snow[i] -= amount; queuedRain[i] += amount; melted += amount
+        }
+        return melted / mapping.tilesPerCell
+    }
     fun beginUpdate() {
-        check(transferred) { "Accept the pending surface water before starting another update" }
-        pendingFluxBatch = null
-        postClimateTotals = null
-        updateRevision++
-        updateDurationSeconds = 0.0
-        for (k in 0 until activeTileCount) activeFlag[activeTiles[k]] = false
-        activeTileCount = 0
-        rainWetSeconds.fill(0.0); wetFractionWeightedRain.fill(0.0); snowMelt.fill(0.0)
-        rain.fill(0.0); drainage.fill(0.0); overflow.fill(0.0); lakeRain.fill(0.0); peakRainRate.fill(0.0)
-        transferred = false
+        rain.fill(0.0); drainage.fill(0.0); overflow.fill(0.0); peakRainRate.fill(0.0)
     }
-
-    fun finishStep(seconds: Double) {
-        check(!transferred && pendingFluxBatch == null && !climateRainQueued)
-        require(seconds.isFinite() && seconds > 0.0)
-        val climateResponse = 1 - exp(-seconds / (30 * 86400.0))
-        val drainageDecay = kotlin.math.exp(-seconds / DRAINAGE_SECONDS)
-        val groundwaterDecay = kotlin.math.exp(-seconds / GROUNDWATER_RECESSION_SECONDS)
-        val groundwaterMidDecay = kotlin.math.exp(-seconds / (2 * GROUNDWATER_RECESSION_SECONDS))
-        meltUnitSnow(seconds)
-        unitPercolation.fill(0.0)
+    fun finishStep(seconds: Double) = finishClimateStep(seconds, energyLimitedSnowMelt = false)
+    fun finishClimateStep(seconds: Double, energyLimitedSnowMelt: Boolean = true, totals: ClimateFluxTotals? = null) {
+        require(seconds.isFinite() && seconds > 0)
+        val response = relaxationFraction(seconds / (30 * 86400.0))
+        val decay = exp(-seconds / DRAINAGE_SECONDS)
         for (i in 0 until count) {
-            val percolation = if (land[i] && (queuedSoilRain[i] > 0.0 || soil[i] > FIELD_CAPACITY_MM))
-                integrateRainBucket(i, queuedSoilRain[i], seconds, seconds, drainageDecay) else 0.0
-            queuedSoilRain[i] = 0.0
-            val unit = responseUnits.unitOfTile[i]
-            if (unit >= 0) unitPercolation[unit] += percolation
-            if (drainage[i] + overflow[i] + lakeRain[i] > 0.0) markActive(i)
-            rainRate[i] = stepRain[i] * 3600 / seconds
-            peakRainRate[i] = max(peakRainRate[i], rainRate[i])
-            climateRainRate[i] += (rainRate[i] - climateRainRate[i]) * climateResponse
-        }
-        for (unit in 0 until responseUnits.count) {
-            releaseUnitBaseflow(unit, unitPercolation[unit], unitPercolation[unit] * groundwaterMidDecay, groundwaterDecay)
-        }
-        stepRain.fill(0.0)
-        updateDurationSeconds += seconds
-    }
-
-    /** Exact rain-plus-drainage solution for each constant-forcing phase, including saturation time.
-     * Climate exchange uses this same root-zone and groundwater ownership as detailed weather.
-     */
-    fun finishClimateStep(seconds: Double, energyLimitedSnowMelt: Boolean = false,
-        totals: ClimateFluxTotals? = null) {
-        check(!transferred && pendingFluxBatch == null)
-        require(seconds.isFinite() && seconds > 0.0)
-        val climateResponse = -expm1(-seconds / (30 * 86400.0))
-        val drainageDecay = kotlin.math.exp(-seconds / DRAINAGE_SECONDS)
-        val groundwaterDecay = kotlin.math.exp(-seconds / GROUNDWATER_RECESSION_SECONDS)
-        val groundwaterMidDecay = kotlin.math.exp(-seconds / (2 * GROUNDWATER_RECESSION_SECONDS))
-        if (!energyLimitedSnowMelt) meltUnitSnow(seconds)
-        unitPercolation.fill(0.0)
-        for (i in 0 until count) {
-            val fraction = if (stepRain[i] > 0.0) (wetFractionWeightedRain[i] / stepRain[i]).coerceIn(1e-6, 1.0) else 1.0
-            val wetSeconds = seconds * fraction
-            // One exact bucket update; percolation is aggregated by response unit
-            // before a single analytic linear-reservoir baseflow release.
-            val percolation = if (land[i] && (queuedSoilRain[i] > 0.0 || soil[i] > FIELD_CAPACITY_MM))
-                integrateRainBucket(i, queuedSoilRain[i], seconds, wetSeconds, drainageDecay) else 0.0
-            queuedSoilRain[i] = 0.0
-            val unit = responseUnits.unitOfTile[i]
-            if (unit >= 0) unitPercolation[unit] += percolation
-            if (drainage[i] + overflow[i] + lakeRain[i] > 0.0) markActive(i)
-            rainRate[i] = stepRain[i] * 3600 / seconds
-            rainWetSeconds[i] = if (stepRain[i] > 0.0) wetSeconds else 0.0
-            peakRainRate[i] = max(peakRainRate[i], stepRain[i] * 3600 / wetSeconds)
-            climateRainRate[i] += (rainRate[i] - climateRainRate[i]) * climateResponse
-            if (totals != null) {
-                totals.peakRain[i] = max(totals.peakRain[i], peakRainRate[i])
-                totals.rain[i] += rain[i]
-                totals.overflow[i] += overflow[i]
-                totals.lakeRain[i] += lakeRain[i]
-                totals.wetSeconds[i] += rainWetSeconds[i]
-                totals.intenseRain[i] += max(0.0, rain[i] -
-                    FastClimateStepper.INTENSE_RAIN_MM_PER_HOUR * rainWetSeconds[i] / 3600)
+            if (!energyLimitedSnowMelt && snow[i] > 0) {
+                val c = mapping.cellOfTile[i]
+                val melt = min(snow[i], max(0.0, temperatureC[c]) * 3.2 * seconds / 86400)
+                snow[i] -= melt; queuedRain[i] += melt
+            }
+            val wet = if (stepRain[i] > 0) (weightedWet[i] / stepRain[i]).coerceIn(1e-6, 1.0) else 1.0
+            val previousOverflow = overflow[i]
+            val drained = if (land[i]) integrateRainBucket(i, queuedRain[i], seconds, wet * seconds, decay) else 0.0
+            drainage[i] += drained
+            export(drained + overflow[i] - previousOverflow)
+            queuedRain[i] = 0.0
+            val rate = stepRain[i] * 3600 / seconds
+            val peak = rate / wet
+            peakRainRate[i] = max(peakRainRate[i], peak)
+            climateRainRate[i] += (rate - climateRainRate[i]) * response
+            totals?.let {
+                it.peakRain[i] = max(it.peakRain[i], peak)
+                it.rain[i] += rain[i]; it.drainage[i] += drainage[i]; it.overflow[i] += overflow[i]
+                it.wetSeconds[i] += if (stepRain[i] > 0) seconds * wet else 0.0
+                it.intenseRain[i] += max(0.0, stepRain[i] - 2 * seconds * wet / 3600)
             }
         }
-        for (unit in 0 until responseUnits.count) {
-            releaseUnitBaseflow(unit, unitPercolation[unit], unitPercolation[unit] * groundwaterMidDecay, groundwaterDecay, totals)
-        }
-        postClimateTotals = totals
-        climateRainQueued = false
-        stepRain.fill(0.0)
-        updateDurationSeconds += seconds
-    }
-
-    /** Empirical fallback for uncoupled surface callers. Local temperatures preserve cold upland snow. */
-    private fun meltUnitSnow(seconds: Double) {
-        for (unit in 0 until responseUnits.count) {
-            if (unitSnow[unit] <= 0.0) continue
-            var melted = 0.0
-            for (tile in responseUnits.tiles[unit]) {
-                if (snow[tile] <= 0.0) continue
-                val cell = mapping.cellOfTile[tile]
-                val tileElevation = max(0.0, world[tile % width, tile / width].elevation - world.seaLevel) * 10_000.0
-                val temperature = cellTemperatureC[cell] - ColumnThermodynamics.LAPSE_K_PER_METER * (tileElevation - terrain.meanElevationMeters[cell])
-                val share = min(snow[tile], max(0.0, temperature - SNOW_MELT_THRESHOLD_C) *
-                    SNOW_MELT_MM_PER_DAY_C * seconds / 86400.0)
-                if (share <= 0.0) continue
-                melted += share
-                snow[tile] -= share
-                cellSnowMm[cell] -= share
-                snowMelt[tile] += share
-                when {
-                    wetLake[tile] -> lakeRain[tile] += share
-                    land[tile] -> {
-                        soil[tile] += share
-                        val excess = max(0.0, soil[tile] - SOIL_CAPACITY_MM)
-                        soil[tile] -= excess
-                        overflow[tile] += excess
-                    }
-                    else -> overflow[tile] += share
-                }
-            }
-            unitSnow[unit] = max(0.0, unitSnow[unit] - melted)
-        }
-    }
-
-    private fun releaseUnitBaseflow(unit: Int, percolation: Double, weightedPercolation: Double,
-        groundwaterDecay: Double, totals: ClimateFluxTotals? = null) {
-        val start = unitGroundwater[unit]
-        if (start <= 0.0 && percolation <= 0.0) return
-        val unitCount = responseUnits.tileCountPerUnit[unit]
-        val cap = GROUNDWATER_CAPACITY_MM * unitCount
-        val unboundedEnd = start * groundwaterDecay + weightedPercolation
-        val end = min(cap, unboundedEnd)
-        val released = start + percolation - end
-        unitGroundwater[unit] = end
-        if (released > 0.0) {
-            val outlet = responseUnits.outletTile[unit]
-            drainage[outlet] += released
-            totals?.let { it.drainage[outlet] += released }
-            markActive(outlet)
-        }
+        stepRain.fill(0.0); weightedWet.fill(0.0)
     }
 
     /**
      * Exact constant-rate root-zone solution. Rain above the infiltration capacity runs
      * off; the remainder fills the root zone, drains toward field capacity on the
-     * drainage timescale and percolates to groundwater. Every branch is derived from
+     * drainage timescale and leaves as runoff. Every branch is derived from
      * the mass balance, so no rounding path can create water.
      */
     private fun integrateRainBucket(tile: Int, amount: Double, seconds: Double,
@@ -549,66 +255,14 @@ internal class TerrainMoistSurface(
         return max(0.0, store + input - endStore - spill)
     }
 
-    fun sealFluxBatch(seconds: Double): WaterFluxBatch {
-        check(!transferred && pendingFluxBatch == null && !climateRainQueued)
-        require(seconds.isFinite() && seconds > 0.0 &&
-            kotlin.math.abs(seconds - updateDurationSeconds) <= 1e-9 * max(1.0, seconds)) {
-            "Flux duration must match the completed surface interval"
-        }
-        val revision = updateRevision
-        val active = if (activeTileCount == 0) EMPTY_TILES else activeTiles.copyOf(activeTileCount)
-        return WaterFluxBatch.borrowed(width, world.height, seconds, this,
-            { drainage[it] + overflow[it] }, { lakeRain[it] }, { 0.0 },
-            { updateRevision == revision && !transferred }, active).also { pendingFluxBatch = it }
-    }
 
-    fun updateLakeMask(mask: BooleanArray) { require(mask.size == count); wetLake = mask.copyOf() }
-    override fun updateLakeWaterMask(mask: BooleanArray) = updateLakeMask(mask)
-    override fun returnLakeEvaporationMm(x: Int, y: Int, amountMm: Double) {
-        check(amountMm == 0.0) { "Coupled evaporation must be withdrawn during surface exchange" }
-    }
-    override fun hydrologyAccepted() = transferredToHydrology()
-
-    override fun waterMm(cell: Int): Double {
-        var amount = 0.0
-        mapping.forCell(cell) { i, f -> amount += (soil[i] + if (land[i]) 0.0 else hydrology.meanOceanDepthMm) * f }
-        return amount / mapping.tilesPerCell
-    }
-
-    override val totalWaterKg: Double
-        get() = (soilWaterMmTiles + groundwaterMmTiles + snowWaterMmTiles + unacceptedWaterMmTiles +
-            hydrology.storedAndPendingWaterMmTiles) * mapping.tileAreaM2
-
-    override val exportedWaterKg: Double get() = 0.0 // River outlets are internal ocean returns.
-
-    /** Once hydrology has accepted these arrays it owns their water, including its pending interval. */
-    fun transferredToHydrology() { check(!transferred); transferred = true }
-
+    override fun waterMm(cell: Int) = rootZoneMm(cell) + snowWaterMm(cell)
+    override val totalWaterKg get() = (soil.sum() + snow.sum() + queuedRain.sum()) * mapping.tileAreaM2
+    override val exportedWaterKg get() = boundaryMmTiles * mapping.tileAreaM2
     private companion object {
-        // exp is a JVM intrinsic; expm1 is expensive on every fine soil tile.
-        // The series retains precision at detailed-weather timestep scales.
-        fun decayResponse(x: Double): Double = if (x < 1e-3)
-            x * (1 - x * (0.5 - x * (1.0 / 6 - x / 24))) else 1 - exp(-x)
         const val SOIL_CAPACITY_MM = 250.0
         const val FIELD_CAPACITY_MM = 120.0
         const val DRAINAGE_SECONDS = 5 * 86400.0
-        const val INITIAL_ROOT_ZONE_MM = 120.0
-        const val INITIAL_GROUNDWATER_MM = 150.0
-        const val GROUNDWATER_CAPACITY_MM = 600.0
-        const val GROUNDWATER_RECESSION_SECONDS = 140 * 86400.0
-        const val GROUNDWATER_ACCESS = 0.18
-        const val SNOW_ALBEDO_DEPTH_MM = 25.0
-        const val SNOW_ALBEDO = 0.45
-        const val SNOW_MELT_THRESHOLD_C = -1.0
-        const val SNOW_MELT_MM_PER_DAY_C = 3.2
-        const val LATENT_HEAT_FUSION_J_PER_KG = 334_000.0
-        val EMPTY_TILES = IntArray(0)
         const val INFILTRATION_MM_PER_HOUR = 2.0
-        const val OCEAN_ALBEDO = 0.07
-        const val LAND_ALBEDO = 0.25
-        const val OCEAN_MIXED_LAYER_HEAT_CAPACITY = 1.6e8
-        const val LAND_HEAT_CAPACITY = 2.0e6
-        const val WATER_HEAT_CAPACITY_PER_MM = 4.186e6
-        const val MAX_SOIL_HEAT_CAPACITY = 1.2e6
     }
 }

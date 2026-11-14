@@ -8,8 +8,6 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import terra.atmosphere.PlanetLatitude
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyTopology
 import terra.world.Terrain
 import terra.world.World
 import terra.weather.DynamicalWeather
@@ -26,10 +24,10 @@ fun main(args: Array<String>) {
     require(years in 2..1000)
     val year = 365.0 * 86400.0
     val world = World(seed)
-    val hydrology = HydrologySimulation(HydrologyTopology(world))
-    val weather = DynamicalWeather(world, hydrology)
+
+    val weather = DynamicalWeather(world)
     val detailed = weather.advanceBudgeted(40.0, 1, publishSnapshot = false)
-    hydrology.acceptWeatherStep(weather, detailed)
+
     var residual = 0.0
     val started = System.nanoTime()
     var remaining = years - 1
@@ -72,7 +70,6 @@ fun main(args: Array<String>) {
     val tileMetersX = weather.config.domainWidthMeters / width
     val tileMetersY = weather.config.domainHeightMeters / height
     var meanWind = 0.0; var maxWind = 0.0
-    weather.climateRowBudget?.reset()
     for (month in 0 until 12) {
         val step = weather.advanceClimateInterval(year / 12)
         residual = max(residual, abs(step.relativeWaterResidual))
@@ -84,9 +81,6 @@ fun main(args: Array<String>) {
             bandU[b] += weather.windUTilesPerDay(x, y) * tileMetersX / 86400.0 / 12
             // Tile rows increase southward; report northward-positive wind.
             bandV[b] -= weather.windVTilesPerDay(x, y) * tileMetersY / 86400.0 / 12
-            if (y == 0 && x == 0) weather.climateZonalStructure?.let { z ->
-                println("ZONAL month=$month itcz=${"%.1f".format(z[0])} hadley=${"%.1f".format(z[1])}/${"%.1f".format(z[2])} storm=${"%.1f".format(z[3])}/${"%.1f".format(z[4])}")
-            }
             if (month == 0) bandJanuary[b] += weather.surfaceTemperatureC(x, y)
             if (month == 6) bandJuly[b] += weather.surfaceTemperatureC(x, y)
         }
@@ -143,7 +137,7 @@ fun main(args: Array<String>) {
             (40 + 190 * tree).toInt().coerceIn(0, 255),
             (30 + 30 * grass).toInt().coerceIn(0, 255)).rgb)
     }
-    val output = File("build/experiments").apply { mkdirs() }
+    val output = File(args.firstOrNull { it.startsWith("--output=") }?.substringAfter('=') ?: "build/experiments").apply { mkdirs() }
     ImageIO.write(image, "png", File(output, "climate-atlas.png"))
     val area = weather.config.domainWidthMeters * weather.config.domainHeightMeters
     val text = buildString {
@@ -160,6 +154,7 @@ fun main(args: Array<String>) {
         appendLine("wind_mean=${"%.2f".format(meanWind)} m/s wind_max=${"%.1f".format(maxWind)} m/s land_fraction=${"%.2f".format(land.toDouble() / (land + ocean))}")
         appendLine("soil_mean=${"%.0f".format(soilTotal / max(1, land))} mm canopy_mean=${"%.2f".format(treeTotal / max(1, land))} fire_disturbances=${world.fireCount}")
         appendLine("biomes=${world.snapshot(1).landBiomeSummary().replace('\n', ' ')}")
+        appendLine("snow_kg=${(0 until weather.config.cellCount).sumOf { weather.surfaceState.snowMmInCell(it) } * weather.config.cellArea}")
         appendLine("observed_years=${climate.observedYears} aggregate=${climate.containsAggregateEstimates}")
         appendLine("  lat   landfr  rainL  rainO    T_L    T_O  T_jan  T_jul   u_low   v_low  tree")
         for (b in 0 until bands) {
@@ -172,44 +167,7 @@ fun main(args: Array<String>) {
                 bandJanuary[b] / bandCount[b], bandJuly[b] / bandCount[b],
                 bandU[b] / bandCount[b], bandV[b] / bandCount[b], bandTree[b] / max(1, bandLand[b])))
         }
-        val budget = weather.climateRowBudget
-        if (budget != null) {
-            appendLine("surface energy budget, annual mean W/m² (rows south → north)")
-            appendLine("  lat    TOA     SW  SWatm   LWup   LWdn    OLR     SH     LH    net    Ts    Ta  cloud    RH     W")
-            val groups = 12
-            for (g in 0 until groups) {
-                val r0 = g * budget.rows / groups; val r1 = (g + 1) * budget.rows / groups
-                fun avg(field: DoubleArray): Double { var s = 0.0; var w = 0.0
-                    for (r in r0 until r1) { s += field[r]; w += budget.weight[r] }; return s / max(1e-9, w) }
-                val latitude = Math.toDegrees(PlanetLatitude.atmosphereRowRadians((r0 + r1 - 1) / 2, budget.rows))
-                val sw = avg(budget.shortwave); val up = avg(budget.longwaveUp); val dn = avg(budget.longwaveDown)
-                val sh = avg(budget.sensible); val lh = avg(budget.latent)
-                append("%5.0f  %5.0f  %5.0f  %5.0f  %5.0f  %5.0f  %5.0f  %5.0f  %5.0f  %5.0f  %5.1f %5.1f  %5.2f".format(latitude,
-                    avg(budget.topIncoming), sw, avg(budget.atmosphereShortwave), up, dn, avg(budget.outgoingLongwave), sh, lh, sw + dn - up - sh - lh,
-                    avg(budget.surfaceK) - 273.15, avg(budget.airK) - 273.15, avg(budget.cloud)) +
-                    "  %4.2f  %4.0f\n".format(avg(budget.humidity), avg(budget.waterMm)))
-            }
-            appendLine("air-layer budget W/m² (coarse rows south → north)")
-            appendLine("  row  radGain  SHgain  cond  radLoss  transport  down  up")
-            for (r in 0 until budget.airRows) {
-                val w = max(1e-9, budget.airWeight[r])
-                appendLine("%4d  %7.0f  %6.0f  %5.0f  %7.0f  %8.0f".format(r, budget.airRadiativeGain[r] / w,
-                    budget.airSensibleGain[r] / w, budget.airCondensationGain[r] / w, budget.airRadiativeLoss[r] / w,
-                    budget.airTransport[r] / w) + "  %5.0f %5.0f  fine %5.0f".format(budget.airDown[r] / w, budget.airUp[r] / w, budget.airDownFine[r] / max(1e-9, budget.airFineWeight[r])))
-            }
-            appendLine("ocean-only surface budget W/m²")
-            appendLine("  lat     SW  LWnet     SH     LH    net    Ts   Tbl")
-            for (g in 0 until groups) {
-                val r0 = g * budget.rows / groups; val r1 = (g + 1) * budget.rows / groups
-                fun avg(field: DoubleArray): Double { var s = 0.0; var w = 0.0
-                    for (r in r0 until r1) { s += field[r]; w += budget.oceanWeight[r] }; return s / max(1e-9, w) }
-                val latitude = Math.toDegrees(PlanetLatitude.atmosphereRowRadians((r0 + r1 - 1) / 2, budget.rows))
-                val sw = avg(budget.oceanShortwave); val lw = avg(budget.oceanNetLongwave)
-                val sh = avg(budget.oceanSensible); val lh = avg(budget.oceanLatent)
-                appendLine("%5.0f  %5.0f  %5.0f  %5.0f  %5.0f  %5.0f  %5.1f %5.1f".format(latitude, sw, lw, sh, lh,
-                    sw - lw - sh - lh, avg(budget.oceanSurfaceK) - 273.15, avg(budget.oceanBoundaryK) - 273.15))
-            }
-        }
+
     }
     File(output, "climate-atlas.txt").writeText(text)
     print(text)

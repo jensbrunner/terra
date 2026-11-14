@@ -43,7 +43,7 @@ internal object ClimateCirculation {
             }
         }
         if (weatherPhase != null) for (y in 1 until height - 1) {
-            // Baroclinic activity follows the thermal gradient. Perturb pressure shape
+            // Thermal contrast sets initial disturbance amplitude. Perturb pressure shape
             // first, then derive balanced winds with the actual thermal pressure law.
             val gradient = abs(mean[minOf(height - 1, y + 1)] - mean[maxOf(0, y - 1)])
             val activity = (gradient / 8).coerceIn(0.0, 1.0) * rotationalWeight[y]

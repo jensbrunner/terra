@@ -1,7 +1,7 @@
 package terra.render
 
 import korlibs.image.color.Colors
-import terra.hydrology.HydrologySnapshot
+import terra.hydrology.SurfaceWaterSnapshot
 import kotlin.math.abs
 
 /** Pure CPU water appearance; completed buffers are uploaded by the render thread. */
@@ -11,13 +11,13 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
     private val riverColor = Colors["#3b9cbd"].withA(232)
     private val lakeBankColor = Colors["#22546a"].withA(225)
     private val lakeColor = Colors["#347f9d"].withA(190)
-    fun render(hydrology: HydrologySnapshot): RasterFrame {
+    fun render(hydrology: SurfaceWaterSnapshot): RasterFrame {
         canvas = RasterCanvas(width * PIXELS_PER_TILE, height * PIXELS_PER_TILE)
         drawLakeTiles(hydrology)
         drawRiverLinks(hydrology)
         return canvas.finish()
     }
-    private fun drawLakeTiles(hydrology: HydrologySnapshot) {
+    private fun drawLakeTiles(hydrology: SurfaceWaterSnapshot) {
         val scale = PIXELS_PER_TILE
         for (y in 0 until height) for (x in 0 until width) {
             if (!hydrology.isLakeTileWet(x, y)) continue
@@ -47,7 +47,7 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
         }
     }
 
-    private fun drawRiverLinks(hydrology: HydrologySnapshot) {
+    private fun drawRiverLinks(hydrology: SurfaceWaterSnapshot) {
         val scale = PIXELS_PER_TILE
         for (y in 0 until height) for (x in 0 until width) {
             if (!hydrology.isLandTile(x, y) || !hydrology.isStreamTile(x, y)) continue

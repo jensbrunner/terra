@@ -1,10 +1,8 @@
 package terra.simulation
 
-import kotlin.math.ceil
 import kotlin.math.max
-import kotlin.math.min
 
-internal data class FidelityDecision(val mode: SimulationFidelity, val quantumSeconds: Double, val coarsenedForLoad: Boolean)
+internal data class FidelityDecision(val mode: SimulationFidelity, val quantumSeconds: Double)
 
 /** Owner-thread cost estimates and hysteresis. Camera/frame timing never chooses model fidelity. */
 internal class AdaptiveFidelity(private val detailedStep: Double, private val year: Double = 365 * 86400.0) {
@@ -13,18 +11,15 @@ internal class AdaptiveFidelity(private val detailedStep: Double, private val ye
     private var overloadedAt: Double? = null
     private var underloadedAt: Double? = null
     private var detailedMean = 0.0
-    private var climateMean = 0.0
     private var detailedSamples = 0
     private var measuredSince = Double.NaN
-    private var quantum = 3600.0
-    private var quantumChangedAt = Double.NEGATIVE_INFINITY
 
     fun observe(mode: SimulationFidelity, wallCost: Double, now: Double) {
         require(wallCost.isFinite() && wallCost >= 0)
         if (mode == SimulationFidelity.DETAILED) {
             if (detailedSamples == 0) measuredSince = now
             detailedMean = if (detailedSamples++ == 0) wallCost else detailedMean * 0.9 + wallCost * 0.1
-        } else climateMean = if (climateMean == 0.0) wallCost else climateMean * 0.9 + wallCost * 0.1
+        }
     }
 
     fun decide(speed: SimulationSpeed, manual: SimulationFidelity?, now: Double, explicitSpeedChange: Boolean = false): FidelityDecision {
@@ -55,14 +50,10 @@ internal class AdaptiveFidelity(private val detailedStep: Double, private val ye
                 if (mode == SimulationFidelity.CLIMATE && now - underloadedAt!! >= 1.5 && now - switchedAt >= 1.0) select(SimulationFidelity.DETAILED)
             } else underloadedAt = null
         }
-        val base = baseQuantum(speed, year)
-        val needed = max(base, rate * climateMean / 0.6).coerceAtMost(20 * year)
-        if (explicitSpeedChange || quantum < base || needed > quantum * 1.25 || (needed < quantum * 0.7 && now - quantumChangedAt >= 2.0)) {
-            quantum = ceil(needed)
-            quantumChangedAt = now
-        }
-        return FidelityDecision(mode, if (mode == SimulationFidelity.DETAILED) detailedStep else quantum,
-            mode == SimulationFidelity.CLIMATE && quantum > base)
+        // Climate cost scales with represented time: growing a batch in response
+        // to its total cost creates positive feedback, not more throughput. Keep
+        // calendar-sized transactions and expose any real backlog to the user.
+        return FidelityDecision(mode, if (mode == SimulationFidelity.DETAILED) detailedStep else baseQuantum(speed, year))
     }
 
     companion object {

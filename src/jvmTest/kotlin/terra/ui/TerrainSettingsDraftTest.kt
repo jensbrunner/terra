@@ -25,7 +25,7 @@ class TerrainSettingsDraftTest {
     @Test
     fun discardRestoresTheLastAppliedSettingsAcrossTabs() {
         val draft = TerrainSettingsDraft(TerrainGenerationSettings())
-        draft.current = draft.current.copy(equatorTemperatureC = 20.0)
+        draft.current = draft.current.copy(mountainRelief = 0.2)
         val applied = draft.commit()
         draft.current = TerrainGenerationSettings()
         draft.current = draft.current.copy(baseElevation = 0.5)

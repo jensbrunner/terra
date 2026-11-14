@@ -6,7 +6,6 @@ internal class ClimateFluxTotals(fields: Array<DoubleArray>) {
     val rain = fields[1]
     val drainage = fields[2]
     val overflow = fields[3]
-    val lakeRain = fields[4]
-    val wetSeconds = fields[5]
-    val intenseRain = fields[6]
+    val wetSeconds = fields[4]
+    val intenseRain = fields[5]
 }

@@ -15,7 +15,7 @@ import terra.simulation.SimulationProgress
 /** A short, opt-in live baseline, not a benchmark suite or a gameplay scheduler. */
 class DesktopPerformanceProbe private constructor(environment: String) : PerformanceProbe {
     override val timings = SimulationTimings(System::nanoTime)
-    private val output = File(System.getProperty("terra.profile.output", "build/experiments/phase-7/baseline")).apply { mkdirs() }
+    private val output = File(System.getProperty("terra.profile.output", "build/experiments/desktop-profile")).apply { mkdirs() }
     private val seconds = System.getProperty("terra.profile.seconds", "2.0").toDouble()
     private val warmup = System.getProperty("terra.profile.warmup", "0.5").toDouble()
     private val selectedSpeeds = System.getProperty("terra.profile.speeds", "").takeIf { it.isNotBlank() }
@@ -59,7 +59,7 @@ class DesktopPerformanceProbe private constructor(environment: String) : Perform
                 "backend=single simulation worker; worker totals come from immutable publications. Render offered-time column is diagnostic, not worker demand.\n")
         report.write("speed,clouds,frames,wall_seconds,completed_sim_seconds,achieved_days_per_second,requested_days_per_second,offered_sim_seconds,pending_start,pending_end,p50_ms,p95_ms,p99_ms,max_ms")
         for (work in SimulationWork.entries) report.write(",${work.name.lowercase()}_total_ms,${work.name.lowercase()}_calls,${work.name.lowercase()}_max_ms")
-        report.write(",worker_advance_ms,worker_publication_ms,worker_transactions,unserved_requested_seconds,rate_limited,automatic_fidelity,quantum_seconds,coarsened_for_load,snapshot_publications,gc_collections,gc_ms,heap_start_bytes,heap_end_bytes")
+        report.write(",worker_advance_ms,worker_publication_ms,worker_transactions,unserved_requested_seconds,rate_limited,automatic_fidelity,quantum_seconds,snapshot_publications,gc_collections,gc_ms,heap_start_bytes,heap_end_bytes")
         report.newLine()
     }
 
@@ -98,7 +98,7 @@ class DesktopPerformanceProbe private constructor(environment: String) : Perform
                 report.write(",${((worker?.advanceWallSeconds ?: 0.0) - (start?.advanceWallSeconds ?: 0.0)) * 1000}," +
                     "${((worker?.publicationWallSeconds ?: 0.0) - (start?.publicationWallSeconds ?: 0.0)) * 1000}," +
                     "${(worker?.completedTransactions ?: 0) - (start?.completedTransactions ?: 0)}," +
-                    "${(worker?.unservedRequestedSeconds ?: 0.0) - (start?.unservedRequestedSeconds ?: 0.0)},${worker?.rateLimited ?: false},${worker?.automaticFidelity ?: false},${worker?.quantumSeconds ?: 0.0},${worker?.coarsenedForLoad ?: false}")
+                    "${(worker?.unservedRequestedSeconds ?: 0.0) - (start?.unservedRequestedSeconds ?: 0.0)},${worker?.rateLimited ?: false},${worker?.automaticFidelity ?: false},${worker?.quantumSeconds ?: 0.0}")
                 report.write(",${(worker?.revision ?: 0) - (start?.revision ?: 0)},${gcCount() - startGcCount},${gcMillis() - startGcMillis},$startHeap,${heapBytes()}")
                 report.newLine(); report.flush()
                 println("PROFILE ${settings.speed.name} clouds=${settings.clouds}: p95=%.2fms, p99=%.2fms, achieved=%.4f days/s".format(

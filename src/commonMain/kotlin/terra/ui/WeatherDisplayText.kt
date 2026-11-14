@@ -24,7 +24,6 @@ internal object WeatherDisplayText {
     }
     fun quality(period: WeatherFieldSemantics): String = when {
         period.quality == WeatherFieldQuality.RESOLVED_NOW -> "resolved weather"
-        period.aggregateYears -> "aggregate climate estimate"
         else -> "representative climate"
     }
     fun period(period: WeatherFieldSemantics, year: Double): String =

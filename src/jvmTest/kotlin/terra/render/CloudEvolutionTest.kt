@@ -8,8 +8,6 @@ import kotlin.math.exp
 import kotlin.test.Test
 import kotlin.test.assertTrue
 import terra.atmosphere.DryAtmosphereConfig
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyTopology
 import terra.weather.DynamicalWeather
 import terra.world.World
 
@@ -18,8 +16,8 @@ class CloudEvolutionTest {
     @Test
     fun inspectInitialDayAndClimateClouds() {
         val world = World(31742, 96, 72)
-        val hydrology = HydrologySimulation(HydrologyTopology(world))
-        val weather = DynamicalWeather(world, hydrology, DryAtmosphereConfig())
+
+        val weather = DynamicalWeather(world, DryAtmosphereConfig())
         val renderer = CloudRenderer(world.width, world.height, world.seed)
         val frames = mutableListOf<Pair<String, RasterFrame>>()
         val rawFrames = mutableListOf<BufferedImage>()
@@ -63,7 +61,7 @@ class CloudEvolutionTest {
         record("Initial")
         for (hour in 1..6) {
             repeat(180) { step ->
-                hydrology.acceptWeatherStep(weather, weather.advanceBudgeted(20.0, 1, publishSnapshot = false))
+                weather.advanceBudgeted(20.0, 1, publishSnapshot = false)
                 if (step % 36 == 35) { weather.refreshSnapshot(); renderer.update(weather, 0.2) }
             }
             if (hour in listOf(1, 6)) { weather.refreshSnapshot(); record("Hour $hour") }

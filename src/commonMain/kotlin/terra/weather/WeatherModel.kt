@@ -1,8 +1,5 @@
 package terra.weather
 
-import terra.hydrology.HydrologyExchange
-import terra.hydrology.WaterFluxBatch
-
 /** Quality of representative fields, independently of integrated rainfall totals. */
 enum class WeatherFieldQuality { RESOLVED_NOW, REPRESENTATIVE_FOR_INTERVAL }
 
@@ -11,22 +8,20 @@ data class RainEventSummary(val wetFraction: Double, val intenseRainMm: Double)
 
 data class WeatherFieldSemantics(
     val quality: WeatherFieldQuality, val intervalStartSeconds: Double = 0.0,
-    val intervalDurationSeconds: Double = 0.0, val energyApproximate: Boolean = false, val aggregateYears: Boolean = false
+    val intervalDurationSeconds: Double = 0.0, val energyApproximate: Boolean = false
 ) {
     companion object { val RESOLVED = WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW) }
 }
 
 /** Tile-space view; water fluxes belong to one completed update, and wind V points down-map. */
-interface WeatherModel : HydrologyExchange {
-    /** No resolved dynamics are fabricated for prescribed/fast climate or pending reentry. */
+interface WeatherModel {
+    /** Reduced climate exposes representative fields rather than fabricated resolved dynamics. */
     val hasResolvedDynamics: Boolean get() = false
     fun pressureAnomalyPercent(x: Int, y: Int): Double? = null
     fun relativeVorticityPerSecond(x: Int, y: Int): Double? = null
     /** Rain totals are integrated over the update; representative peaks describe subperiods. */
     val fieldSemantics: WeatherFieldSemantics get() = WeatherFieldSemantics.RESOLVED
     fun rainEventSummary(x: Int, y: Int): RainEventSummary? = null
-    /** Owner-only handoff; immutable presentation models leave this null. */
-    val pendingWaterFluxBatch: WaterFluxBatch? get() = null
     val width: Int
     val height: Int
     /** Completed simulation time; presentation never advances the model clock. */
@@ -41,8 +36,6 @@ interface WeatherModel : HydrologyExchange {
     fun rainMmThisUpdate(x: Int, y: Int): Double
     fun drainageMmThisUpdate(x: Int, y: Int): Double
     fun overflowMmThisUpdate(x: Int, y: Int): Double
-    fun lakeDirectRainMmThisUpdate(x: Int, y: Int): Double
-    fun lakePotentialEvaporationMmThisUpdate(x: Int, y: Int): Double
     fun thirtyDayRainMmPerHour(x: Int, y: Int): Double
     fun annualizedRainMmPerYear(x: Int, y: Int): Double
     fun solarInputFactor(x: Int, y: Int): Double

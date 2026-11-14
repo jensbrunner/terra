@@ -7,20 +7,18 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import terra.atmosphere.ColumnThermodynamics
 import terra.atmosphere.DryAtmosphereConfig
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyTopology
 import terra.render.CloudRenderer
 import terra.world.World
 
-/** One moist-world trajectory, with actual physical columns even while presentation is held at reentry. */
+/** One moist-world trajectory, with physical columns throughout reentry. */
 class CloudRainConsistencyTest {
     @Test
     fun centuryReentryRetainsCloudRegimesAndReportsRainFrequencyAndIntensity() {
         val world = World(31742, 48, 36)
-        val hydrology = HydrologySimulation(HydrologyTopology(world))
+
         val config = DryAtmosphereConfig(width = 24, height = 18)
-        val weather = DynamicalWeather(world, hydrology, config)
-        val initialWater = weather.diagnostics.totalWaterKg
+        val weather = DynamicalWeather(world, config)
+        val initialWater = weather.diagnostics.let { it.totalWaterKg + it.exportedWaterKg }
         repeat(12) { weather.advanceClimateInterval(20 * 365 * 86400.0) }
         weather.advanceClimateInterval(15 * 365 * 86400.0)
         weather.refreshSnapshot()
@@ -29,8 +27,7 @@ class CloudRainConsistencyTest {
             val view = weather.atmosphereSnapshot
             var cloudyBands = 0
             val renderer = CloudRenderer(world.width, world.height, world.seed)
-            // Reentry's held representative publication is intentional. Physical columns
-            // below are read directly; only resolved stages use pixel diagnostics.
+            // Read physical columns directly; resolved stages also inspect fresh pixels.
             renderer.update(weather)
             for (band in 0..5) {
                 var vapor = 0.0; var capacity = 0.0; var rh = 0.0; var cloud = 0.0; var rain = 0.0
@@ -70,7 +67,7 @@ class CloudRainConsistencyTest {
         var finalBands = 0
         for (step in 1..3600) {
             weather.advanceBudgeted(20.0, 1, publishSnapshot = false)
-            hydrology.acceptWeatherStep(weather, 20.0)
+
             // Sample ten-minute snapshots, not every physical step's publication cost.
             if (step % 30 == 0) {
                 weather.refreshSnapshot()
@@ -92,7 +89,7 @@ class CloudRainConsistencyTest {
         }
         assertTrue(finalBands >= 2, "Cloud recovery must extend across regimes, not just one surviving pixel")
         assertTrue(drySamples > wetSamples, "Most resolved cells in this fixture should be dry")
-        assertEquals(initialWater, weather.diagnostics.totalWaterKg, initialWater * 1e-10)
+        assertEquals(initialWater, weather.diagnostics.let { it.totalWaterKg + it.exportedWaterKg }, initialWater * 1e-10)
         assertTrue(abs(weather.diagnostics.relativeWaterResidual) < 1e-10)
         val output = File("build/reports/clouds/physical-reentry-255.csv")
         output.parentFile.mkdirs(); output.writeText(records.toString())

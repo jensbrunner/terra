@@ -2,8 +2,7 @@ package terra.simulation
 
 /** Optional, single-threaded timing probe. Ordinary gameplay does not create one. */
 enum class SimulationWork {
-    INTEGRATION, SURFACE_BUCKET, CLIMATE_OBSERVATION, SNAPSHOT, HYDROLOGY,
-    CLIMATE_VIEW, BIOME_RESPONSE, CLOUD_BITMAP, OTHER_OVERLAYS, WATER_RASTER, TERRAIN_TILES, FRAME_UPDATE
+    INTEGRATION, SURFACE_BUCKET, CLIMATE_OBSERVATION, SNAPSHOT, CLOUD_BITMAP, OTHER_OVERLAYS, WATER_RASTER, TERRAIN_TILES, FRAME_UPDATE
 }
 
 class SimulationTimings(val nanoTime: () -> Long) {

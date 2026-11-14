@@ -23,7 +23,7 @@ suspend fun main() {
             }
         }
         sceneContainer().changeTo {
-            AtlasScene(dynamicalAtmosphere = System.getProperty("terra.weatherModel") == "dynamical",
+            AtlasScene(
                 performanceProbe = DesktopPerformanceProbe.fromProperties(
                     "vsync=${gameWindow.vsync}; configured_fps=${gameWindow.fps}; preferred_fps=${gameWindow.preferredFps}"))
         }

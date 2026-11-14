@@ -2,8 +2,6 @@ package terra.experiments
 
 import java.io.File
 import kotlin.math.abs
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyTopology
 import terra.world.World
 import terra.weather.DynamicalWeather
 
@@ -18,12 +16,12 @@ fun main(args: Array<String>) {
     require(warmupYears >= 0 && measuredYears in 1..200)
     val year = 365.0 * 86400.0
     val world = World(31742)
-    val hydrology = HydrologySimulation(HydrologyTopology(world))
-    val weather = DynamicalWeather(world, hydrology)
+
+    val weather = DynamicalWeather(world, terra.atmosphere.DryAtmosphereConfig(stepSeconds = 40.0))
     val detailed = weather.advanceBudgeted(40.0, 1, publishSnapshot = false)
-    hydrology.acceptWeatherStep(weather, detailed)
+
     weather.refreshSnapshot()
-    val waterStart = weather.diagnostics.totalWaterKg
+    val waterStart = weather.diagnostics.let { it.totalWaterKg + it.exportedWaterKg }
 
     repeat(warmupYears) { weather.advanceClimateInterval(year) }
 
@@ -60,17 +58,15 @@ fun main(args: Array<String>) {
     val handoffWater = handoff.waterAfterKg + weather.surfaceState.totalWaterKg
     val reentryStart = System.nanoTime()
     weather.advanceBudgeted(86400.0, Int.MAX_VALUE, publishSnapshot = false)
-    hydrology.acceptWeatherStep(weather, 86400.0)
+
     weather.refreshSnapshot()
     val reentryWall = (System.nanoTime() - reentryStart) / 1e9
     val detailedResidual = weather.diagnostics.relativeWaterResidual
     val finalWater = weather.diagnostics.totalWaterKg
     val conservation = abs(handoffWater - climateWater) / climateWater
-    val wholeRunDrift = abs(finalWater - waterStart) / waterStart
+    val wholeRunDrift = abs(finalWater + weather.diagnostics.exportedWaterKg - waterStart) / waterStart
     val climate = weather.seasonalClimate
     val summary = world.snapshot(1).landBiomeSummary()
-    val units = weather.surfaceState.responseUnits
-    val landTiles = units.tileCountPerUnit.sum()
 
     lines.appendLine("one_year_wall_seconds=${"%.3f".format(oneYearWall)} ms_per_year=${"%.1f".format(msPerYear)} years_per_second=${"%.2f".format(measuredYears / oneYearWall)}")
     lines.appendLine("batch_wall_seconds=${"%.3f".format(batchWall)} ms_per_year=${"%.1f".format(batchWall * 1000 / measuredYears)}")
@@ -78,7 +74,6 @@ fun main(args: Array<String>) {
     lines.appendLine("rain_kg=$rainKg evaporation_kg=$evaporationKg maximum_wind_ms=$maximumWind mean_wind_ms=${meanWind / measuredYears}")
     lines.appendLine("reentry_day_seconds=${"%.3f".format(reentryWall)} reentry_water_residual=$detailedResidual handoff_water_relative_error=$conservation whole_run_drift=$wholeRunDrift")
     lines.appendLine("handoff_cloud_kg=${handoff.cloudKg} handoff_vapor_kg=${handoff.vaporKg} reentry_cloud_present=${handoff.cloudKg > 0}")
-    lines.appendLine("response_units=${units.count} land_tiles=$landTiles unit_vs_tile_slow_store_updates=${landTiles - units.count}")
     if (climate != null) {
         lines.appendLine("observed_years=${climate.observedYears} aggregate=${climate.containsAggregateEstimates}")
     }

@@ -52,13 +52,13 @@ class SeasonalClimateTest {
         bulk.observe(7.0, { 99.0 }, { 7.0 })
         fine.observe(40.0, { 99.0 }, { 40.0 })
         fun interval(start: Double, seconds: Double, temperature: Double, rain: Double,
-            low: Double = temperature, high: Double = temperature, peak: Double = rain * 3600 / seconds) =
-            ClimateIntervalSummary(1, 1, start, seconds, doubleArrayOf(temperature * seconds),
+            low: Double = temperature, high: Double = temperature, peak: Double = rain * 3600 / seconds) {
+            bulk.observePhase(start, seconds, doubleArrayOf(temperature * seconds),
                 doubleArrayOf(rain), doubleArrayOf(low), doubleArrayOf(high), doubleArrayOf(peak))
-        bulk.observeInterval(interval(7.0, 33.0, 99.0, 33.0))
-        assertEquals(null, bulk.snapshot) // The whole spin-up year is still discarded.
-        val summary = interval(40.0, 80.0, 10.0, 80.0, low = -2.0, high = 25.0, peak = 10000.0)
-        bulk.observeInterval(summary)
+        }
+        interval(7.0, 33.0, 99.0, 33.0)
+        assertEquals(null, bulk.snapshot)
+        interval(40.0, 80.0, 10.0, 80.0, low = -2.0, high = 25.0, peak = 10000.0)
         repeat(80) { fine.observe(1.0, { 10.0 }, { 1.0 }) }
         val published = bulk.snapshot!!
         assertEquals(120.0, bulk.elapsedSeconds)
@@ -71,11 +71,10 @@ class SeasonalClimateTest {
         assertEquals(-2.0, published.minimumSurfaceTemperatureC(0))
         assertEquals(25.0, published.maximumSurfaceTemperatureC(0))
         assertEquals(10000.0, published.peakRainMmPerHour(0))
-        assertFailsWith<IllegalArgumentException> { bulk.observeInterval(summary) }
-        assertFailsWith<IllegalArgumentException> { bulk.observeInterval(interval(121.0, 1.0, 10.0, 1.0)) }
+        assertFailsWith<IllegalArgumentException> { interval(40.0, 80.0, 10.0, 80.0) }
+        assertFailsWith<IllegalArgumentException> { interval(121.0, 1.0, 10.0, 1.0) }
         assertEquals(120.0, bulk.elapsedSeconds)
         assertTrue(published === bulk.snapshot)
-        assertFailsWith<IllegalArgumentException> { interval(120.0, 10.0, 10.0, 1.0, low = 11.0) }
     }
 
     @Test

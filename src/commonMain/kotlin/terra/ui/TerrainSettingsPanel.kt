@@ -42,7 +42,7 @@ class TerrainSettingsPanel(
         panel.atlasText(font, "World settings", 28.0, 24.0, 25.0)
         panel.atlasText(font, "Edit a draft, then rebuild when you’re ready.", 28.0, 60.0, muted = true)
         AtlasButton(panel, font, "Close", 732.0, 24.0, 80.0) { closeMenus() }
-        listOf("Landforms", "Climate", "Advanced").forEachIndexed { index, name ->
+        listOf("Landforms", "Advanced").forEachIndexed { index, name ->
             tabs += AtlasButton(panel, font, name, 28 + index * 156.0, 104.0, 146.0) { tab = index; renderTab() }
         }
         content = panel.container { }.xy(28.0, 166.0)
@@ -101,12 +101,6 @@ class TerrainSettingsPanel(
         slider("Erosion strength", { it.erosionStrength }, 0.0, 1.0, 0.05, 2) { s, v -> s.copy(erosionStrength = v) }
     )
 
-    private fun climateSliders() = listOf(
-        slider("Equator temperature (°C)", { it.equatorTemperatureC }, -10.0, 45.0, 0.5, 1) { s, v -> s.copy(equatorTemperatureC = v) },
-        slider("Pole temperature drop (°C)", { it.poleTemperatureDropC }, 0.0, 65.0, 0.5, 1) { s, v -> s.copy(poleTemperatureDropC = v) },
-        slider("Elevation cooling (°C/unit)", { it.elevationCoolingCOPerUnit }, 0.0, 80.0, 0.5, 1) { s, v -> s.copy(elevationCoolingCOPerUnit = v) }
-    )
-
     private fun slider(label: String, value: (TerrainGenerationSettings) -> Double,
         minimum: Double, maximum: Double, step: Double, decimals: Int,
         update: (TerrainGenerationSettings, Double) -> TerrainGenerationSettings
@@ -120,11 +114,7 @@ class TerrainSettingsPanel(
         val all = elevationSliders()
         val basic = setOf("Base elevation", "Sea level", "Mountain cutoff", "Continent scale",
             "Continent strength", "Regional strength", "Mountain relief", "Erosion strength")
-        val selected = when (tab) {
-            0 -> all.filter { it.label in basic }
-            1 -> climateSliders()
-            else -> all.filter { it.label !in basic }
-        }
+        val selected = if (tab == 0) all.filter { it.label in basic } else all.filter { it.label !in basic }
         selected.forEachIndexed { index, setting ->
             val x = (index % 2) * 408.0
             val y = (index / 2) * 86.0
@@ -137,9 +127,7 @@ class TerrainSettingsPanel(
                 value.text = formatNumber(next, setting.decimals); setting.update(next)
             }
         }
-        if (tab == 1) content.atlasText(font,
-            "Sets the geographic temperature baseline.\nWeather and seasons evolve from this starting geography.",
-            0.0, 220.0, 14.0, muted = true)
+
     }
 
     private fun refreshPendingChanges() {

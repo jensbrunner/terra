@@ -7,7 +7,6 @@ import terra.atmosphere.MoistAtmosphereSnapshot
 import terra.atmosphere.MoistCell
 import terra.atmosphere.MoistPhysicsConfig
 import terra.atmosphere.PlanetarySunlight
-import terra.hydrology.HydrologySimulation
 import terra.world.World
 import terra.simulation.SimulationTimings
 import terra.simulation.SimulationWork
@@ -16,23 +15,20 @@ import kotlin.math.floor
 import kotlin.math.min
 
 /** Coarse prognostic atmosphere, conservative fine surface, and a stable tile-space render view.
- * Atmosphere and terrain wrap longitude; hydrology returns river discharge to its finite ocean.
+ * Atmosphere and terrain wrap longitude; the surface owns soil and snow.
  */
 class DynamicalWeather(
     private val world: World,
-    private val hydrology: HydrologySimulation,
     val config: DryAtmosphereConfig = DryAtmosphereConfig(),
     val physics: MoistPhysicsConfig = MoistPhysicsConfig(),
-    private val timings: SimulationTimings? = null,
-    private val oceanTransport: OceanTransportMode = OceanTransportMode.LATERAL_MIXING
+    private val timings: SimulationTimings? = null
 ) : WeatherModel {
     override val width = world.width
     override val height = world.height
     private val mapping = AtmosphereTileMapping(width, height, config)
     internal val surfaceState get() = surface
     internal val surfaceThermalState get() = model.surfaceThermalState
-    override val pendingWaterFluxBatch get() = surface.pendingFluxBatch
-    private val surface = TerrainMoistSurface(world, mapping, hydrology)
+    private val surface = TerrainMoistSurface(world, mapping)
     private val initialWeather = InitialWeather(world.seed, config)
     private val model = MoistAtmosphere(config, physics, seed = world.seed, surface = surface, initializeFlow = initialWeather::flow, initializeColumns = { x, y ->
         val c = min(config.height - 1, (y / config.dy).toInt()) * config.width +
@@ -46,33 +42,26 @@ class DynamicalWeather(
     })
     private val sunlight = PlanetarySunlight(width, height, physics.solar, northUp = false)
     private var view: MoistAtmosphereSnapshot = model.snapshot()
-    private val temperatureIntegral = DoubleArray(config.cellCount)
     private val climate = SeasonalClimate(config.width, config.height, physics.solar.yearSeconds, physics.solar.initialYearFraction)
     private val climateSurfaceTemperature: (Int) -> Double = { model.surfaceTemperatureKelvinAt(it) - 273.15 }
     private val climateRain: (Int) -> Double = model::rainMmThisStepAt
     internal val climateHistory get() = climate
-    internal val climateNormals by lazy { ClimateNormals(world, surface, physics.solar) }
-    internal fun estimateClimate(worldSeconds: Double): ClimateEstimateSnapshot =
-        climateNormals.estimate(worldSeconds, seasonalClimate)
     val seasonalClimate: SeasonalClimateSnapshot? get() = climate.snapshot
     val observedClimateYears: Int get() = climate.observedYears
     val atmosphereSnapshot: MoistAtmosphereSnapshot get() = view
     private var fastClimate: FastClimateStepper? = null
     internal val isClimateMode: Boolean get() = fastClimate != null
     internal val climateDiagnostics: ClimateIntervalDiagnostics? get() = climateResult?.diagnostics
-    private var heldRepresentative: FastClimateResult? = null
-    internal var detailedReentryPending = false
-        private set
     internal var lastHandoff: terra.atmosphere.AtmosphereHandoff? = null
         private set
     internal val hasRepresentativeFields get() = climateResult != null
-    private val climateResult get() = fastClimate?.latest ?: heldRepresentative
+    private val climateResult get() = fastClimate?.latest
     override fun rainEventSummary(x: Int, y: Int) = climateResult?.rainEvents(index(x, y))
     override val fieldSemantics get() = climateResult?.semantics ?: WeatherFieldSemantics(WeatherFieldQuality.RESOLVED_NOW, elapsedSeconds - updateSeconds, updateSeconds)
     internal val detailedCompletedSteps get() = model.completedSteps
     private var updateSeconds = 0.0
     internal var dynamicsSuppressedForClimate = false
-    override val hasResolvedDynamics get() = !dynamicsSuppressedForClimate && !isClimateMode && !detailedReentryPending
+    override val hasResolvedDynamics get() = !dynamicsSuppressedForClimate && !isClimateMode
     override fun pressureAnomalyPercent(x: Int, y: Int): Double? = if (!hasResolvedDynamics) null else
         sample(x, y, view.horizontalDynamics::pressureAnomalyPercentAt)
     override fun relativeVorticityPerSecond(x: Int, y: Int): Double? = if (!hasResolvedDynamics) null else
@@ -96,14 +85,9 @@ class DynamicalWeather(
             timings?.end(SimulationWork.SURFACE_BUCKET)
             timings?.begin(SimulationWork.CLIMATE_OBSERVATION)
             climate.observe(config.stepSeconds, climateSurfaceTemperature, climateRain)
-            for (c in temperatureIntegral.indices) temperatureIntegral[c] +=
-                (model.temperatureKelvinAt(c) - 273.15) * config.stepSeconds / 86400.0
             timings?.end(SimulationWork.CLIMATE_OBSERVATION)
         }
         updateSeconds = steps * config.stepSeconds
-        surface.sealFluxBatch(updateSeconds)
-        detailedReentryPending = false
-        heldRepresentative = null
         if (publishSnapshot) refreshSnapshot()
         return updateSeconds
     }
@@ -111,31 +95,21 @@ class DynamicalWeather(
     /** Explicit owner entry only. Automatic speed/fidelity selection is a later step. */
     internal fun advanceClimateInterval(seconds: Double): ClimateIntervalDiagnostics {
         require(seconds.isFinite() && seconds >= FastClimateStepper.MIN_INTERVAL_SECONDS && seconds <= 20 * physics.solar.yearSeconds)
-        val engine = fastClimate ?: FastClimateStepper(surface, hydrology, model, climate, climateNormals, elapsedSeconds,
-            { duration, moisture -> world.advanceClimateBiomes(seasonalClimate, duration, moisture) },
-            oceanTransport)
+        val engine = fastClimate ?: FastClimateStepper(surface, model, climate, elapsedSeconds,
+            { duration, moisture -> world.advanceClimateBiomes(seasonalClimate, duration, moisture) })
         val result = engine.advance(seconds)
         fastClimate = engine
-        detailedReentryPending = false
-        heldRepresentative = null
         updateSeconds = seconds
         // The immutable presentation is refreshed by snapshot(); avoid rebuilding the
         // detailed view and diagnostics for every climate request boundary.
         return result.diagnostics
     }
 
-    /** Review-only access to the running reduced climate's zonal energy budget. */
-    internal val climateRowBudget: ClimateRowBudget? get() = fastClimate?.rowBudget
-    internal val climateZonalStructure: List<Double>? get() = fastClimate?.zonalStructure
-
     /** Rebuild only atmosphere; no surface/history/calendar integration is performed here. */
     internal fun resumeDetailed(): terra.atmosphere.AtmosphereHandoff? {
         val engine = fastClimate ?: return null
-        check(surface.pendingFluxBatch?.consumed != false)
         val handoff = model.initializeFromClimate(engine.completedSeconds, engine.reentryAirTemperatureKelvin())
-        heldRepresentative = engine.latest
         fastClimate = null
-        detailedReentryPending = true
         lastHandoff = handoff
         refreshSnapshot()
         return handoff
@@ -151,21 +125,13 @@ class DynamicalWeather(
     internal fun captureReadOnly(): WeatherModel = DynamicalWeatherPresentation(
         width, height, config, physics, view, elapsedSeconds, updateSeconds,
         climateResult?.captureFields(surface) ?: arrayOf(surface.peakRainRate.copyOf(), surface.rain.copyOf(), surface.drainage.copyOf(),
-            surface.overflow.copyOf(), surface.lakeRain.copyOf(), surface.climateRainRate.copyOf(),
+            surface.overflow.copyOf(), surface.climateRainRate.copyOf(),
             surface.soil.copyOf()), climateResult, hasResolvedDynamics)
 
     override fun step(seconds: Double) {
         require(seconds.isFinite() && seconds >= 0)
         require(seconds / config.stepSeconds == floor(seconds / config.stepSeconds)) { "Use whole atmospheric steps" }
         if (seconds > 0) advanceBudgeted(seconds, Int.MAX_VALUE)
-    }
-
-    fun observedClimate(): ClimateSnapshot? {
-        if (elapsedSeconds == 0.0 || model.worldSeconds != model.elapsedSeconds || hasRepresentativeFields) return null
-        val temperature = DoubleArray(width * height) { i -> sample(i % width, i / width) { x, y ->
-            temperatureIntegral[y * config.width + x]
-        } }
-        return ClimateSnapshot(width, height, elapsedSeconds / 86400.0, surface.observedRain.copyOf(), temperature)
     }
 
     /** State interpolation is for display. Water transfers always use exact rectangle overlaps. */
@@ -204,9 +170,7 @@ class DynamicalWeather(
     override fun rainMmThisUpdate(x: Int, y: Int) = climateResult?.field(1, index(x, y)) ?: surface.rain[index(x, y)]
     override fun drainageMmThisUpdate(x: Int, y: Int) = climateResult?.field(2, index(x, y)) ?: surface.drainage[index(x, y)]
     override fun overflowMmThisUpdate(x: Int, y: Int) = climateResult?.field(3, index(x, y)) ?: surface.overflow[index(x, y)]
-    override fun lakeDirectRainMmThisUpdate(x: Int, y: Int) = climateResult?.field(4, index(x, y)) ?: surface.lakeRain[index(x, y)]
     // Lake evaporation is already withdrawn; detailed physics pays latent heat, climate labels its energy approximation.
-    override fun lakePotentialEvaporationMmThisUpdate(x: Int, y: Int) = 0.0
     override fun thirtyDayRainMmPerHour(x: Int, y: Int) = surface.climateRainRate[index(x, y)]
     override fun annualizedRainMmPerYear(x: Int, y: Int) = thirtyDayRainMmPerHour(x, y) * 24 * 365
     override fun soilWaterMm(x: Int, y: Int) = surface.soil[index(x, y)]
@@ -219,9 +183,4 @@ class DynamicalWeather(
         sunlight.update(elapsedSeconds)
         return sunlight.nightOpacity(x, y)
     }
-    override fun updateLakeWaterMask(mask: BooleanArray) = surface.updateLakeMask(mask)
-    override fun returnLakeEvaporationMm(x: Int, y: Int, amountMm: Double) {
-        check(amountMm == 0.0) { "Dynamical lake evaporation must be withdrawn during surface heat exchange" }
-    }
-    override fun hydrologyAccepted() = surface.transferredToHydrology()
 }

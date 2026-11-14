@@ -9,7 +9,7 @@ class CloudAnimationWorkerTest {
     @Test
     fun detailedRealtimeTexturePublishesBetweenStepsWithoutAdvancingTimeOrMovingWhilePaused() {
         val worker = SimulationWorker(WorldRequest(generation = 1, width = 48, height = 36,
-            dynamical = true, atmosphere = DryAtmosphereConfig(width = 12, height = 8)))
+            atmosphere = DryAtmosphereConfig(width = 12, height = 8)))
         fun await(condition: () -> Boolean) {
             val deadline = System.nanoTime() + 3_000_000_000L
             while (!condition() && System.nanoTime() < deadline) Thread.sleep(2)
@@ -35,7 +35,7 @@ class CloudAnimationWorkerTest {
     @Test
     fun climateCloudsAnimateBetweenCommitsAndFreezeWhenPaused() {
         val worker = SimulationWorker(WorldRequest(generation = 1, width = 48, height = 36,
-            dynamical = true, atmosphere = DryAtmosphereConfig(width = 12, height = 8)))
+            atmosphere = DryAtmosphereConfig(width = 12, height = 8)))
         fun await(condition: () -> Boolean) {
             val deadline = System.nanoTime() + 3_000_000_000L
             while (!condition() && System.nanoTime() < deadline) Thread.sleep(2)

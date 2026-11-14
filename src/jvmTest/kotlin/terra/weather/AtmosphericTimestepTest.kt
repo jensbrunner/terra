@@ -5,8 +5,6 @@ import kotlin.math.sqrt
 import kotlin.test.Test
 import kotlin.test.assertTrue
 import terra.atmosphere.DryAtmosphereConfig
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyTopology
 import terra.world.World
 
 class AtmosphericTimestepTest {
@@ -14,11 +12,11 @@ class AtmosphericTimestepTest {
     fun fortySecondNativeStepsRetainSixHourWeatherAccuracyAndCflHeadroom() {
         val world = World(31742)
         val states = listOf(20.0, 40.0).map { dt ->
-            val hydrology = HydrologySimulation(HydrologyTopology(world))
-            val weather = DynamicalWeather(world, hydrology, DryAtmosphereConfig(stepSeconds = dt))
+
+            val weather = DynamicalWeather(world, DryAtmosphereConfig(stepSeconds = dt))
             val started = System.nanoTime()
             repeat((21600 / dt).toInt()) {
-                hydrology.acceptWeatherStep(weather, weather.advanceBudgeted(dt, 1, publishSnapshot = false))
+                weather.advanceBudgeted(dt, 1, publishSnapshot = false)
             }
             weather.refreshSnapshot()
             weather.atmosphereSnapshot.also { view ->

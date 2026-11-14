@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
 import terra.weather.WeatherModel
 import terra.weather.WeatherFieldSemantics
 import terra.weather.WeatherFieldQuality
-import terra.weather.WeatherSimulation
+import terra.weather.testWeather
 import terra.world.World
 
 class CloudRendererTest {
@@ -178,7 +178,7 @@ class CloudRendererTest {
 }
 
 private class CloudFixture(private val uniform: Boolean = false, private val representative: Boolean = false,
-    override val width: Int = 96, override val height: Int = 72) : WeatherModel by WeatherSimulation(World(31742, width, height)) {
+    override val width: Int = 96, override val height: Int = 72) : WeatherModel by testWeather(World(31742, width, height)) {
     override val fieldSemantics get() = if (representative)
         WeatherFieldSemantics(WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL, 0.0, 20 * 365 * 86400.0)
         else WeatherFieldSemantics.RESOLVED

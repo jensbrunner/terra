@@ -20,7 +20,7 @@ internal object ColumnThermodynamics {
     /** Subgrid saturated parcels in a moist mean column; diagnostic only until handoff partitions water. */
     fun cloudMm(totalWaterMm: Double, saturationMm: Double): Double {
         val humidity = totalWaterMm / max(1e-12, saturationMm)
-        val subgrid = min(totalWaterMm, 0.3 * ((humidity - 0.75) / 0.25).coerceIn(0.0, 1.0))
+        val subgrid = min(totalWaterMm, 0.08 * ((humidity - 0.75) / 0.25).coerceIn(0.0, 1.0))
         return totalWaterMm - min(max(0.0, totalWaterMm - subgrid), saturationMm)
     }
 }

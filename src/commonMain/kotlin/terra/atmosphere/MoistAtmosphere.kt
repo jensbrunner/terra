@@ -136,7 +136,8 @@ data class AtmosphereHandoff(
 /**
  * Thermal shallow water (pressure = g*h²*T/(2*Tref)) plus dilute vapor/cloud tracers.
  * T=Tref recovers the dry pressure law. Phase heating changes pressure forces.
- * A finite ocean exchanges water and heat; only radiation is an external energy flux.
+ * An attached surface owns soil/snow and tracks open-boundary exchange. Standalone
+ * numerical experiments retain their own closed surface-water store.
  */
 class MoistAtmosphere(
     val config: DryAtmosphereConfig = DryAtmosphereConfig(),
@@ -229,6 +230,27 @@ class MoistAtmosphere(
             require(it.size == config.cellCount && it.all { kelvin -> kelvin.isFinite() && kelvin > 0.0 })
         }?.copyOf() ?: DoubleArray(config.cellCount) { surfaceTemperature[it] - CLIMATE_AIR_SURFACE_OFFSET_K }
         val circulation = flow.initializeClimateCirculation(temperature, atWorldSeconds / (7 * 86400.0))
+        // Resolve some of each local moisture inventory into low-pressure moist
+        // sectors and dry sectors. No storm history or new water is required.
+        val pressure = DoubleArray(config.cellCount) { i ->
+            val h = flow.depthAt(i)
+            h * h * temperature[i]
+        }
+        for (by in 0 until config.height step 4) for (bx in 0 until config.width step 4) {
+            var inventory = 0.0; var weighted = 0.0; var meanPressure = 0.0; var cells = 0
+            for (y in by until min(config.height, by + 4)) for (x in bx until min(config.width, bx + 4)) {
+                val i = y * config.width + x
+                inventory += water[i]; meanPressure += pressure[i]; cells++
+            }
+            meanPressure /= cells
+            for (y in by until min(config.height, by + 4)) for (x in bx until min(config.width, bx + 4)) {
+                val i = y * config.width + x
+                val weight = exp(((meanPressure - pressure[i]) / (0.01 * meanPressure)).coerceIn(-0.6, 0.6))
+                water[i] *= weight; weighted += water[i]
+            }
+            if (weighted > 0) for (y in by until min(config.height, by + 4)) for (x in bx until min(config.width, bx + 4))
+                water[y * config.width + x] *= inventory / weighted
+        }
         val vaporTarget = 1.0
         var vaporTotal = 0.0
         var cloudTotal = 0.0
@@ -455,7 +477,8 @@ class MoistAtmosphere(
     /** One phase adjustment at one represented temperature, with latent heating/cooling in the solve. */
     private fun phaseTransfer(vapor: Double, cloud: Double, t: Double, pressure: Double, mass: Double, capacity: Double): Double {
         val saturation = mass * physics.humidColumnFraction * WarmCloud.saturationMixingRatio(t, pressure)
-        if (vapor == saturation || (vapor < saturation && cloud == 0.0)) return 0.0
+        val water = vapor + cloud
+        if (ColumnThermodynamics.cloudMm(water, saturation) == cloud) return 0.0
         var transfer = 0.0
         repeat(3) {
             val trialTemperature = t + physics.latentHeatJkg * transfer / capacity
@@ -464,11 +487,17 @@ class MoistAtmosphere(
             val saturationMass = mass * physics.humidColumnFraction * 0.622 * e / (pressure - e)
             val derivative = mass * physics.humidColumnFraction * 0.622 * pressure * e *
                 WarmCloud.saturationLatentHeat / (461.5 * trialTemperature * trialTemperature * (pressure - e) * (pressure - e))
-            transfer += (vapor - transfer - saturationMass) / (1 + physics.latentHeatJkg * derivative / capacity)
+            // The same unresolved saturated-parcel closure is used by climate,
+            // reentry and detailed microphysics. Solve its phase partition with
+            // latent heat, so reconstructed subgrid cloud is an equilibrium state.
+            val target = ColumnThermodynamics.cloudMm(water, saturationMass)
+            val epsilon = max(1e-6, saturationMass * 1e-5)
+            val vaporDerivative = (target - ColumnThermodynamics.cloudMm(water, saturationMass + epsilon)) / epsilon
+            transfer += (target - cloud - transfer) / (1 + physics.latentHeatJkg * vaporDerivative * derivative / capacity)
             // Transfer limits are donor availability, not corrections to a negative state.
             transfer = min(vapor, max(-cloud, transfer))
         }
-        return transfer * if (vapor > saturation) condensationResponse else cloudEvaporationResponse
+        return transfer * if (transfer > 0) condensationResponse else cloudEvaporationResponse
     }
 }
 

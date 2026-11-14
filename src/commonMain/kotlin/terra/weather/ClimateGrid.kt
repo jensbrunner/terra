@@ -151,7 +151,7 @@ internal class GridOverlap(sourceWidth: Int, sourceHeight: Int, targetWidth: Int
 
 /**
  * Shared reduced climate mesh. It is deliberately coarse in the horizontal
- * (at most 48x36) while the surface energetics and every physical reservoir stay
+ * (at most 36x27) while the surface energetics and every physical reservoir stay
  * on their authoritative grids. Climate cells never own water or heat themselves.
  */
 internal class ClimateGrid(val fine: DryAtmosphereConfig) {

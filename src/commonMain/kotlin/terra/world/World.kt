@@ -1,12 +1,10 @@
 package terra.world
 
-import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.expm1
 import kotlin.math.max
 import terra.MAP_HEIGHT_TILES
 import terra.MAP_WIDTH_TILES
-import terra.weather.ClimateSnapshot
 import terra.weather.SeasonalClimateSnapshot
 
 /** Why a tile cannot support more cover, kept separate from the cover itself. */
@@ -24,10 +22,9 @@ class World private constructor(
 
     private val elevation = elevationOverride?.copyOf() ?: TerrainGenerator(seed, width, height, settings).generate()
     private val cells = Array(width * height) {
-        Cell(0.0, 0.0, Terrain.OCEAN)
+        Cell(0.0, Terrain.OCEAN)
     }
     private val publishedTerrainChanges = BooleanArray(width * height)
-    private var climateBiomesApplied = false
     private val trees = DoubleArray(width * height)
     private val grasses = DoubleArray(width * height) { 0.55 }
     private val bare = DoubleArray(width * height) { 0.45 }
@@ -67,52 +64,11 @@ class World private constructor(
     }
 
     private fun generate() {
-        val temperature = generateTemperature(elevation)
-
         for (i in cells.indices) {
             val e = elevation[i]
-            val temp = temperature[i]
             val terrain = classifyPhysicalTerrain(e)
-            cells[i] = Cell(e, temp, terrain)
+            cells[i] = Cell(e, terrain)
         }
-    }
-
-    /** Establish a mature-looking initial ecology consistent with the observed climate. */
-    fun applyClimateBiomes(climate: ClimateSnapshot) {
-        check(!climateBiomesApplied) { "Climate biomes have already been applied" }
-        require(climate.width == width && climate.height == height) {
-            "Climate snapshot dimensions must match the world"
-        }
-        for (i in cells.indices) {
-            val cell = cells[i]
-            if (cell.terrain == Terrain.OCEAN) { trees[i] = 0.0; grasses[i] = 0.0; bare[i] = 1.0; continue }
-            val x = i % width
-            val y = i / width
-            val rain = climate.annualPrecipitationMmPerYear(x, y)
-            val temperature = climate.meanAirTemperatureC(x, y)
-            val pet = ClimateBiomeClassifier.potentialEvaporationMmPerYear(temperature)
-            val moisture = (rain / max(1.0, pet)).coerceIn(0.0, 2.0)
-            val warmth = smoothstep(temperature, -6.0, 12.0)
-            val cold = smoothstep(temperature, -14.0, 3.0)
-            val treePotential = ((moisture - 0.32) / 0.85).coerceIn(0.0, 1.0) * warmth * cold
-            val grassPotential = ((moisture + 0.15) / 0.95).coerceIn(0.0, 1.0) * max(0.2, warmth)
-            trees[i] = (0.82 * treePotential).coerceIn(0.0, 0.92)
-            grasses[i] = (grassPotential * (1 - trees[i])).coerceIn(0.0, 1 - trees[i])
-            bare[i] = (1 - trees[i] - grasses[i]).coerceIn(0.0, 1.0)
-            evergreen[i] = smoothstep(temperature, 0.0, 16.0) * (0.5 + 0.5 * (1 - moisture.coerceIn(0.0, 1.0)))
-            seedBank[i] = treePotential
-            droughtStress[i] = 0.0
-            limitation[i] = when {
-                cell.terrain == Terrain.MOUNTAINS -> GrowthLimitation.ROCK
-                cold < 0.3 -> GrowthLimitation.COLD
-                moisture < 0.25 -> GrowthLimitation.WATER
-                else -> GrowthLimitation.NONE
-            }
-            val next = classifyCover(i, cell, trees[i], grasses[i], moisture, temperature)
-            if (next != Terrain.OCEAN && next != Terrain.MOUNTAINS) cells[i] = cell.copy(terrain = next)
-        }
-        climateBiomesApplied = true
-        biomeRevision++
     }
 
     /**
@@ -262,26 +218,6 @@ class World private constructor(
         return cubic(row(top - 1), row(top), row(top + 1), row(top + 2), py - top).coerceIn(0.0, 1.0)
     }
 
-    private fun generateTemperature(elevation: DoubleArray): DoubleArray {
-        val temperature = DoubleArray(width * height)
-
-        for (y in 0 until height) {
-            // This map is treated as a north-to-south slice of a planet:
-            // latitude is 0 at the equator (center) and 1 at either pole (edge).
-            val latitude = if (height <= 1) 0.0 else abs(2.0 * y / (height - 1) - 1.0)
-
-            for (x in 0 until width) {
-                val i = index(x, y)
-                val elevationAboveSea = max(0.0, elevation[i] - settings.seaLevel)
-                temperature[i] = settings.equatorTemperatureC -
-                    latitude * settings.poleTemperatureDropC -
-                    elevationAboveSea * settings.elevationCoolingCOPerUnit
-            }
-        }
-
-        return temperature
-    }
-
     private fun classifyPhysicalTerrain(elevation: Double): Terrain = when {
         elevation < settings.seaLevel -> Terrain.OCEAN
         elevation > settings.mountainThreshold -> Terrain.MOUNTAINS
@@ -301,7 +237,6 @@ class World private constructor(
             "Mountains ${percent(Terrain.MOUNTAINS)}%"
     }
 
-    private fun index(x: Int, y: Int) = y * width + x
 
     internal companion object {
         private const val FIRE_MINIMUM_AGE_YEARS = 25.0

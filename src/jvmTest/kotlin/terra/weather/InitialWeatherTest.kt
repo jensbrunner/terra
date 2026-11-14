@@ -6,8 +6,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import terra.atmosphere.DryAtmosphereConfig
 import terra.atmosphere.PlanetLatitude
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyTopology
 import terra.world.World
 
 class InitialWeatherTest {
@@ -44,8 +42,8 @@ class InitialWeatherTest {
         }
         assertTrue(equatorialHumidCells > 0)
         val world = World(31742, 31, 23)
-        val hydro = HydrologySimulation(HydrologyTopology(world))
-        val model = DynamicalWeather(world, hydro, config)
+
+        val model = DynamicalWeather(world, config)
         assertTrue(model.diagnostics.totalWaterKg.isFinite() && model.diagnostics.totalWaterKg > 0)
         assertTrue(model.diagnostics.totalModelEnergyJoules.isFinite())
         assertEquals(0.0, model.elapsedSeconds)

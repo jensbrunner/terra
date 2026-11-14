@@ -19,10 +19,10 @@ suspend fun main() {
         val output = File("build/reports/ui").apply { mkdirs() }
         val previewViews = views
         sceneContainer().changeTo {
-            AtlasScene(dynamicalAtmosphere = true, onReviewReady = { scene, root ->
+            AtlasScene( onReviewReady = { scene, root ->
                 CoroutineScope(previewViews.coroutineContext).launch {
                     try {
-                        val states = System.getProperty("terra.uiReviewStates", "overview,inspection,details,speed,settings,climate-settings,advanced-settings,settings-edited,help").split(',')
+                        val states = System.getProperty("terra.uiReviewStates", "overview,inspection,details,speed,settings,advanced-settings,settings-edited,help").split(',')
                         for (state in states) {
                             scene.prepareUiReview(state)
                             val bitmap = root.renderToBitmap(previewViews, Rectangle(0, 0, 1440, 960))

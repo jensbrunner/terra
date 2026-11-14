@@ -10,7 +10,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
     private data class WorkerFailure(val generation: Long, val message: String)
     private val running = AtomicBoolean(true)
     private val desiredWorld = AtomicReference(request)
-    private val desiredControls = AtomicReference(Controls(0, if (request.dynamical) SimulationSpeed.ONE_HOUR else SimulationSpeed.REALTIME, false))
+    private val desiredControls = AtomicReference(Controls(0, SimulationSpeed.ONE_HOUR, false))
     private val cloudsVisible = AtomicBoolean(false)
     private val mailbox = AtomicReference<WorldPresentationSnapshot?>()
     private val error = AtomicReference<WorkerFailure?>()
@@ -67,7 +67,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
         var revision = 0L
         var previousWall = System.nanoTime()
         var publishedAt = 0L
-        var hydrologyPublishedAt = 0L
+        var drainagePublishedAt = 0L
         var publishedClouds = false
         var rateStarted = previousWall
         var rateStartSim = 0.0
@@ -92,7 +92,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     demand.controls(active.speed, active.paused, stepSeconds = created.stepSeconds)
                     previousWall = System.nanoTime()
                     rateStarted = previousWall; rateStartSim = 0.0; achieved = 0.0
-                    publishedAt = 0L; hydrologyPublishedAt = 0L; revision = 0L
+                    publishedAt = 0L; drainagePublishedAt = 0L; revision = 0L
                     advanceNanos = 0L; publicationNanos = 0L; transactions = 0L
                     forcePublish = true
                 }
@@ -100,7 +100,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                 val now = System.nanoTime()
                 val command = desiredControls.get()
                 // Account elapsed work under the controls that were actually active.
-                if (simulation.climateReady) demand.request((now - previousWall) / 1e9)
+                demand.request((now - previousWall) / 1e9)
                 previousWall = now
                 var speedChanged = false
                 var resetPending = false
@@ -111,9 +111,8 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     rateStarted = now; rateStartSim = simulation.completedSeconds; achieved = 0.0
                     forcePublish = true
                 }
-                val decision = if (requested.dynamical) policy.decide(active.speed,
+                val decision = policy.decide(active.speed,
                     if (active.automatic) null else active.fidelity, now / 1e9, speedChanged)
-                    else FidelityDecision(SimulationFidelity.DETAILED, simulation.stepSeconds, false)
                 if (decision.mode != simulation.fidelity) {
                     simulation.setFidelity(decision.mode)
                     rateStarted = now; rateStartSim = simulation.completedSeconds; achieved = 0.0
@@ -126,19 +125,15 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                 while (running.get() && !active.paused && work < 4 && System.nanoTime() < deadline &&
                     desiredWorld.get().generation == requested.generation && desiredControls.get().revision == active.revision &&
                     (simulation.fidelity != SimulationFidelity.CLIMATE || System.nanoTime() >= nextClimateAt) &&
-                    (!simulation.climateReady || demand.pendingSeconds >= simulation.quantum(active.speed))) {
+                    demand.pendingSeconds >= simulation.quantum(active.speed)) {
                     val started = System.nanoTime()
-                    val wasReady = simulation.climateReady
                     val consumed = simulation.advance(demand.pendingSeconds, active.speed)
-                    if (wasReady) demand.consume(consumed)
-                    else if (simulation.climateReady) {
-                        rateStarted = System.nanoTime(); rateStartSim = simulation.completedSeconds
-                    }
+                    demand.consume(consumed)
                     val finishedWork = System.nanoTime()
                     val cost = finishedWork - started
                     advanceNanos += cost
-                    if (wasReady && requested.dynamical) policy.observe(simulation.fidelity, cost / 1e9, finishedWork / 1e9)
-                    if (simulation.fidelity == SimulationFidelity.CLIMATE) nextClimateAt = finishedWork + 50_000_000L
+                    policy.observe(simulation.fidelity, cost / 1e9, finishedWork / 1e9)
+                    if (simulation.fidelity == SimulationFidelity.CLIMATE) nextClimateAt = started + 50_000_000L
                     transactions++
                     work++
                 }
@@ -147,7 +142,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                 if (showClouds != publishedClouds) forcePublish = true
                 val rateWindow = maxOf(0.5, minOf(20.0, simulation.stepSeconds / active.speed.simulatedSecondsPerRealSecond))
                 if ((finished - rateStarted) / 1e9 >= rateWindow) {
-                    achieved = if (active.paused || !simulation.climateReady) 0.0 else
+                    achieved = if (active.paused) 0.0 else
                         (simulation.completedSeconds - rateStartSim) / ((finished - rateStarted) / 1e9)
                     rateStarted = finished; rateStartSim = simulation.completedSeconds
                 }
@@ -158,19 +153,19 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                         simulation.completedSeconds, active.speed, if (active.paused) 0.0 else achieved,
                         demand.pendingSeconds, demand.unservedSeconds, demand.limitSeconds, active.paused,
                         advanceNanos / 1e9, publicationNanos / 1e9, transactions,
-                        active.automatic && requested.dynamical, simulation.quantum(active.speed), decision.coarsenedForLoad)
+                        active.automatic, simulation.quantum(active.speed))
                     val started = System.nanoTime()
                     val previous = mailbox.get()
-                    val refreshWater = hydrologyPublishedAt == 0L || finished - hydrologyPublishedAt >= 500_000_000L
+                    val refreshWater = drainagePublishedAt == 0L || finished - drainagePublishedAt >= 500_000_000L
                     val snapshot = if (previous?.progress?.generation == requested.generation &&
                         previous.progress.completedSeconds == simulation.completedSeconds && previous.fidelityRevision == simulation.fidelityRevision && showClouds == publishedClouds &&
-                        !(refreshWater && previous.hydrologyCompletedSeconds != simulation.completedSeconds) &&
+                        !(refreshWater && previous.drainageCompletedSeconds != simulation.completedSeconds) &&
                         !(showClouds && !active.paused))
                         previous.copy(progress = progress)
                     else {
-                        simulation.snapshot(progress, refreshHydrology = refreshWater, cloudsVisible = showClouds,
+                        simulation.snapshot(progress, refreshDrainage = refreshWater, cloudsVisible = showClouds,
                             visualElapsedSeconds = if (publishedAt == 0L) 0.0 else ((finished - publishedAt) / 1e9).coerceIn(0.0, 0.25)).also {
-                            if (refreshWater) hydrologyPublishedAt = finished
+                            if (refreshWater) drainagePublishedAt = finished
                         }
                     }
                     publishedClouds = showClouds

@@ -7,15 +7,22 @@ import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import terra.atmosphere.DryAtmosphereConfig
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyTopology
 import terra.weather.DynamicalWeather
 import terra.weather.WeatherModel
 import terra.world.World
 
 class SimulationWorkerTest {
-    private val request = WorldRequest(generation = 1, width = 15, height = 11, dynamical = true,
-        atmosphere = DryAtmosphereConfig(width = 8, height = 6))
+    @Test
+    fun climateWorkLongerThanQuarterSecondStillRequestsAllElapsedTime() {
+        val year = 365 * 86400.0
+        val demand = SimulationDemand(year)
+        demand.controls(SimulationSpeed.TEN_YEARS, false)
+        demand.request(0.3)
+        assertEquals(3 * year, demand.pendingSeconds, 1e-6)
+        assertEquals(0.0, demand.unservedSeconds)
+    }
+
+    private val request = WorldRequest(generation = 1, width = 15, height = 11, atmosphere = DryAtmosphereConfig(width = 8, height = 6))
 
     @Test
     fun demandIsBoundedAccountedAndPausedWithoutAdvancingPhysicalTime() {
@@ -42,35 +49,35 @@ class SimulationWorkerTest {
     fun ownerCommitsIdenticalDetailedTransfersAndPublishesImmutableViews() {
         val owner = WorldSimulation(request)
         fun capture(refreshWater: Boolean = true) = owner.snapshot(SimulationProgress(1, 1, 0, owner.completedSeconds,
-            SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, 920.0, false, 0.0, 0.0, 0), refreshHydrology = refreshWater)
+            SimulationSpeed.ONE_HOUR, 0.0, 0.0, 0.0, 920.0, false, 0.0, 0.0, 0), refreshDrainage = refreshWater)
         val initial = capture()
         val initialVapor = initial.weather.atmosphericWaterMm(3, 3)
         val directWorld = World(request.seed, request.width, request.height)
-        val hydrology = HydrologySimulation(HydrologyTopology(directWorld))
-        val direct = DynamicalWeather(directWorld, hydrology, request.atmosphere)
+
+        val direct = DynamicalWeather(directWorld, request.atmosphere)
         repeat(4320) {
             assertEquals(20.0, owner.advance(20.0, SimulationSpeed.ONE_HOUR))
             val advanced = direct.advanceBudgeted(20.0, 1)
-            hydrology.acceptWeatherStep(direct, advanced)
+
         }
         val heldWater = capture(refreshWater = false)
         assertTrue(heldWater.world === initial.world)
-        assertTrue(heldWater.hydrology === initial.hydrology)
+        assertTrue(heldWater.drainage === initial.drainage)
         assertTrue(heldWater.surfaceWater === initial.surfaceWater)
-        assertEquals(0.0, heldWater.hydrologyCompletedSeconds)
+        assertEquals(0.0, heldWater.drainageCompletedSeconds)
         val final = capture()
         assertTrue(final.weather === heldWater.weather)
         assertTrue(final.surfaceWater !== initial.surfaceWater)
-        assertEquals(final.progress.completedSeconds, final.hydrologyCompletedSeconds)
+        assertEquals(final.progress.completedSeconds, final.drainageCompletedSeconds)
         assertTrue(capture().surfaceWater === final.surfaceWater)
         assertEquals(86400.0, final.progress.completedSeconds)
-        assertTrue(final.hydrology.routedPeriodRevision > initial.hydrology.routedPeriodRevision)
-        assertEquals(0L, initial.hydrology.routedPeriodRevision)
+        assertTrue(final.drainage.revision > initial.drainage.revision)
+        assertEquals(1L, initial.drainage.revision)
         assertEquals(final.progress.completedSeconds, final.weather.elapsedSeconds)
         fun fields(model: WeatherModel): List<(Int, Int) -> Double> = listOf(
             model::relativeHumidity, model::cloudCover, model::precipitationMmPerHour,
             model::peakSubstepPrecipitationMmPerHour, model::rainMmThisUpdate, model::drainageMmThisUpdate,
-            model::overflowMmThisUpdate, model::lakeDirectRainMmThisUpdate, model::lakePotentialEvaporationMmThisUpdate,
+            model::overflowMmThisUpdate,
             model::thirtyDayRainMmPerHour, model::annualizedRainMmPerYear, model::solarInputFactor,
             model::surfaceTemperatureC, model::airTemperatureC, model::windUTilesPerDay, model::windVTilesPerDay,
             model::nightOpacity, model::atmosphericWaterMm, model::cloudWaterMm, model::soilWaterMm, model::soilMoisture)
@@ -84,9 +91,7 @@ class SimulationWorkerTest {
         assertTrue(abs(final.diagnostics!!.relativeWaterResidual) < 1e-10)
         assertTrue(abs(final.diagnostics.unexplainedEnergyResidualJoules / final.diagnostics.totalModelEnergyJoules) < 1e-10)
         assertFailsWith<IllegalStateException> { final.weather.step(20.0) }
-        val legacy = WorldSimulation(request.copy(dynamical = false))
-        while (!legacy.climateReady) legacy.advance(0.0, SimulationSpeed.REALTIME)
-        assertEquals(210 * 86400.0, legacy.completedSeconds)
+
     }
 
     @Test

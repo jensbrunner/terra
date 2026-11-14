@@ -15,7 +15,7 @@ class AdaptiveFidelityTest {
         assertEquals(SimulationFidelity.DETAILED, policy.decide(SimulationSpeed.ONE_HOUR, null, 100.1).mode)
     }
     @Test
-    fun measuredCostHysteresisManualOverrideAndOverloadCoarseningAreBounded() {
+    fun measuredCostHysteresisAndManualOverrideKeepBoundedCalendarTransactions() {
         val policy = AdaptiveFidelity(20.0)
         assertEquals(SimulationFidelity.DETAILED, policy.decide(SimulationSpeed.ONE_HOUR, null, 0.0).mode)
         repeat(8) { policy.observe(SimulationFidelity.DETAILED, 0.02, it * 0.05) }
@@ -29,16 +29,13 @@ class AdaptiveFidelityTest {
         assertEquals(SimulationFidelity.CLIMATE, normal.mode)
         policy.observe(SimulationFidelity.CLIMATE, 0.8, 2.4)
         val overloaded = policy.decide(SimulationSpeed.ONE_YEAR, null, 2.5)
-        assertTrue(overloaded.coarsenedForLoad)
-        assertTrue(overloaded.quantumSeconds > normal.quantumSeconds)
-        assertTrue(overloaded.quantumSeconds <= 20 * 365 * 86400.0)
+        assertEquals(normal.quantumSeconds, overloaded.quantumSeconds)
         assertTrue(AdaptiveFidelity.baseQuantum(SimulationSpeed.TEN_YEARS) > AdaptiveFidelity.baseQuantum(SimulationSpeed.ONE_YEAR))
     }
 
     @Test
     fun automaticWorkerReachesYearRateClimateAndReturnsOnExplicitLowSpeed() {
-        val worker = SimulationWorker(WorldRequest(generation = 1, width = 15, height = 11, dynamical = true,
-            atmosphere = terra.atmosphere.DryAtmosphereConfig(width = 8, height = 6)))
+        val worker = SimulationWorker(WorldRequest(generation = 1, width = 15, height = 11, atmosphere = terra.atmosphere.DryAtmosphereConfig(width = 8, height = 6)))
         try {
             worker.updateControls(SimulationSpeed.ONE_YEAR, false)
             await { worker.latestSnapshot()?.let { it.fidelity == SimulationFidelity.CLIMATE && it.progress.completedSeconds >= 86400.0 } == true }

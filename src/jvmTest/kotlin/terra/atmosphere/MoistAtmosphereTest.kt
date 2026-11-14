@@ -23,8 +23,6 @@ class MoistAtmosphereTest {
         var volumeBefore = 0.0
         var volumeAfter = 0.0
         for (y in 0 until geometry.height) for (x in 0 until geometry.width) {
-            assertEquals(before.vaporMmAt(x, y) + before.cloudWaterMmAt(x, y),
-                after.vaporMmAt(x, y) + after.cloudWaterMmAt(x, y), 1e-12)
             assertEquals(before.surfaceTemperatureKelvinAt(x, y) - 6.0,
                 after.temperatureKelvinAt(x, y), 1e-12)
             val depth = after.dynamics.heightAt(x, y)
@@ -39,6 +37,16 @@ class MoistAtmosphereTest {
             }
             volumeBefore += before.dynamics.heightAt(x, y)
             volumeAfter += depth
+        }
+        assertEquals(handoff.waterBeforeKg, handoff.waterAfterKg, handoff.waterBeforeKg * 1e-12)
+        // Reentry may resolve local humidity variance, preserving each 4x4 region.
+        for (by in 0 until geometry.height step 4) for (bx in 0 until geometry.width step 4) {
+            var initial = 0.0; var rebuilt = 0.0
+            for (y in by until minOf(geometry.height, by + 4)) for (x in bx until minOf(geometry.width, bx + 4)) {
+                initial += before.vaporMmAt(x, y) + before.cloudWaterMmAt(x, y)
+                rebuilt += after.vaporMmAt(x, y) + after.cloudWaterMmAt(x, y)
+            }
+            assertEquals(initial, rebuilt, initial * 1e-12)
         }
         assertEquals(volumeBefore, volumeAfter, volumeBefore * 1e-12)
         assertTrue(handoff.maximumAirTemperatureKelvin > handoff.minimumAirTemperatureKelvin)

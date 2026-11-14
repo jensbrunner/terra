@@ -1,6 +1,6 @@
 package terra.atmosphere
 
-/** Sole coarse surface-temperature store, shared by detailed and future climate evolution.
+/** Sole coarse surface-temperature store, shared by detailed and reduced climate evolution.
  * Mutations are owner-thread only. A climate energy approximation must account for its own forcing;
  * exposing this state does not turn a prescribed temperature change into conserved energy.
  */

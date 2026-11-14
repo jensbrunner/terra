@@ -59,12 +59,10 @@ internal class DynamicalWeatherPresentation(
     override fun rainMmThisUpdate(x: Int, y: Int) = fields[1][index(x, y)]
     override fun drainageMmThisUpdate(x: Int, y: Int) = fields[2][index(x, y)]
     override fun overflowMmThisUpdate(x: Int, y: Int) = fields[3][index(x, y)]
-    override fun lakeDirectRainMmThisUpdate(x: Int, y: Int) = fields[4][index(x, y)]
     // Lake evaporation is already withdrawn; detailed physics pays latent heat, climate labels its energy approximation.
-    override fun lakePotentialEvaporationMmThisUpdate(x: Int, y: Int) = 0.0
-    override fun thirtyDayRainMmPerHour(x: Int, y: Int) = fields[5][index(x, y)]
+    override fun thirtyDayRainMmPerHour(x: Int, y: Int) = fields[4][index(x, y)]
     override fun annualizedRainMmPerYear(x: Int, y: Int) = thirtyDayRainMmPerHour(x, y) * 24 * 365
-    override fun soilWaterMm(x: Int, y: Int) = fields[6][index(x, y)]
+    override fun soilWaterMm(x: Int, y: Int) = fields[5][index(x, y)]
     override fun soilMoisture(x: Int, y: Int) = soilWaterMm(x, y) / 250.0
     override fun solarInputFactor(x: Int, y: Int): Double {
         return sunlight.inputFactor(x, y)
@@ -73,7 +71,4 @@ internal class DynamicalWeatherPresentation(
         return sunlight.nightOpacity(x, y)
     }
     override fun step(seconds: Double): Unit = error("Presentation cannot advance physics")
-    override fun updateLakeWaterMask(mask: BooleanArray): Unit = error("Presentation is immutable")
-    override fun returnLakeEvaporationMm(x: Int, y: Int, amountMm: Double): Unit = error("Presentation is immutable")
-    override fun hydrologyAccepted(): Unit = error("Presentation cannot accept fluxes")
 }

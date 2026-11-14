@@ -7,8 +7,6 @@ import javax.imageio.ImageIO
 import kotlin.math.sqrt
 import kotlin.math.exp
 import terra.atmosphere.DryAtmosphereConfig
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyTopology
 import terra.world.World
 import terra.weather.DynamicalWeather
 
@@ -18,19 +16,28 @@ fun main(args: Array<String>) {
     val world = if (native) World(31742) else World(31742, 96, 72)
     val config = if (native) DryAtmosphereConfig(stepSeconds = 40.0) else DryAtmosphereConfig(width = 48, height = 36)
     val aw = config.width; val ah = config.height; val scale = if (native) 2 else 3
-    val hydrology = HydrologySimulation(HydrologyTopology(world))
-    val weather = DynamicalWeather(world, hydrology, config)
+
+    val weather = DynamicalWeather(world, config)
+    val climateYears = args.firstOrNull { it.startsWith("--climate-years=") }?.substringAfter('=')?.toInt() ?: 0
+    require(climateYears in 0..1000)
+    var remaining = climateYears
+    while (remaining > 0) {
+        val years = minOf(20, remaining)
+        weather.advanceClimateInterval(years * weather.physics.solar.yearSeconds)
+        remaining -= years
+    }
+    if (climateYears > 0) weather.resumeDetailed()
+    val epoch = weather.elapsedSeconds
     val lastDay = args.firstOrNull { it.startsWith("--days=") }?.substringAfter('=')?.toDouble() ?: 14.0
     require(lastDay in 0.25..14.0)
     val labels = (listOf(0.0, 0.25, 1.0, 3.0, 7.0, 14.0).filter { it <= lastDay } + lastDay).distinct().sorted()
     val image = BufferedImage(aw * 4 * scale, ah * labels.size * scale, BufferedImage.TYPE_INT_RGB)
     val metrics = StringBuilder()
-    val output = File("build/experiments/atmosphere-upgrade").apply { mkdirs() }
+    val output = File(if (climateYears > 0) "build/experiments/reentry-$climateYears" else "build/experiments/atmosphere-upgrade").apply { mkdirs() }
     val started = System.nanoTime()
     for ((row, day) in labels.withIndex()) {
-        while (weather.elapsedSeconds + 1e-6 < day * 86400) {
-            val advanced = weather.advanceBudgeted(config.stepSeconds, 1, publishSnapshot = false)
-            hydrology.acceptWeatherStep(weather, advanced)
+        while (weather.elapsedSeconds + 1e-6 < epoch + day * 86400) {
+            weather.advanceBudgeted(config.stepSeconds, 1, publishSnapshot = false)
         }
         weather.refreshSnapshot()
         val snapshot = weather.atmosphereSnapshot

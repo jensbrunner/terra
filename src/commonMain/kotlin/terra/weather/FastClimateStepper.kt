@@ -3,31 +3,23 @@ package terra.weather
 import terra.atmosphere.MoistAtmosphere
 import terra.atmosphere.ColumnThermodynamics
 import terra.atmosphere.RainAutoconversion
-import terra.hydrology.HydrologySimulation
+import kotlin.math.floor
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/** Explicitly approximate energy; water always belongs to existing atmosphere/surface/hydrology. */
+/** Explicitly approximate energy; water always belongs to existing atmosphere and soil/snow; boundary exchange is explicit. */
 data class ClimateIntervalDiagnostics(
     val startSeconds: Double, val durationSeconds: Double, val subperiods: Int,
     val waterBeforeKg: Double, val waterAfterKg: Double, val relativeWaterResidual: Double,
-    val evaporationKg: Double, val rainfallKg: Double, val requestedRainfallKg: Double,
-    val surfaceRelaxationEnergyJoules: Double, val detailedCompletedSteps: Long,
-    val energyApproximate: Boolean = true, val routingPasses: Long = 0,
-    val representedHydrologySeconds: Double = 0.0, val aggregateYears: Boolean = false,
+    val evaporationKg: Double, val rainfallKg: Double, val detailedCompletedSteps: Long,
+    val boundaryExportKg: Double = 0.0, val energyApproximate: Boolean = true,
     val ecologyEligibleSeconds: Double = 0.0,
     val absorbedShortwaveJoules: Double = 0.0,
     val outgoingLongwaveJoules: Double = 0.0,
-    val sensibleHeatJoules: Double = 0.0,
     val latentHeatJoules: Double = 0.0,
-    val airTransportJoules: Double = 0.0,
-    val oceanTransportJoules: Double = 0.0,
     val snowMeltEnergyJoules: Double = 0.0,
     val condensationHeatingJoules: Double = 0.0,
-    val seaIcePhaseChangeJoules: Double = 0.0,
-    val coldFloorAdjustmentJoules: Double = 0.0,
-    val namedEnergyResidualJoules: Double = 0.0,
     val potentialEvaporationMm: Double = 0.0,
     val actualEvaporationMm: Double = 0.0,
     val maximumWindMetersPerSecond: Double = 0.0,
@@ -43,16 +35,16 @@ internal class FastClimateResult(
     private val representativeHumidity: DoubleArray
 ) {
     val semantics = WeatherFieldSemantics(WeatherFieldQuality.REPRESENTATIVE_FOR_INTERVAL,
-        diagnostics.startSeconds, diagnostics.durationSeconds, energyApproximate = true, aggregateYears = diagnostics.aggregateYears)
+        diagnostics.startSeconds, diagnostics.durationSeconds, energyApproximate = true)
     fun field(field: Int, tile: Int) = fields[field][tile]
-    fun rainEvents(tile: Int) = RainEventSummary(fields[5][tile] / diagnostics.durationSeconds, fields[6][tile])
+    fun rainEvents(tile: Int) = RainEventSummary(fields[4][tile] / diagnostics.durationSeconds, fields[5][tile])
     fun cloudMm(cell: Int) = representativeCloud[cell]
     fun relativeHumidity(cell: Int) = representativeHumidity[cell].coerceIn(0.0, 1.0)
-    fun windUTilesPerDay(cell: Int) = fields[7][cell]
-    fun windVTilesPerDay(cell: Int) = fields[8][cell]
-    fun airTemperatureC(cell: Int) = fields[9][cell]
-    fun captureFields(surface: TerrainMoistSurface) = arrayOf(fields[0], fields[1], fields[2], fields[3], fields[4],
-        surface.climateRainRate.copyOf(), surface.soil.copyOf(), fields[7], fields[8])
+    fun windUTilesPerDay(cell: Int) = fields[6][cell]
+    fun windVTilesPerDay(cell: Int) = fields[7][cell]
+    fun airTemperatureC(cell: Int) = fields[8][cell]
+    fun captureFields(surface: TerrainMoistSurface) = arrayOf(fields[0], fields[1], fields[2], fields[3],
+        surface.climateRainRate.copyOf(), surface.soil.copyOf(), fields[6], fields[7])
 }
 
 /**
@@ -60,35 +52,26 @@ internal class FastClimateResult(
  *
  * One phase visits, in order: seasonal energy exchange, diagnosed circulation,
  * conservative moisture transport and precipitation, land-water integration,
- * hydrology routing, and periodic ecology. No phase applies accumulated forcing
+ * and periodic ecology. No phase applies accumulated forcing
  * retrospectively, and no worker transaction can skip a seasonal boundary.
  */
 internal class FastClimateStepper(
-    private val surface: TerrainMoistSurface, private val hydrology: HydrologySimulation,
+    private val surface: TerrainMoistSurface,
     private val atmosphere: MoistAtmosphere, private val history: SeasonalClimate,
-    private val normals: ClimateNormals, startSeconds: Double,
-    private val evolveEcology: (Double, DoubleArray) -> Unit = { _, _ -> },
-    oceanTransport: OceanTransportMode = OceanTransportMode.LATERAL_MIXING
+    startSeconds: Double,
+    private val evolveEcology: (Double, DoubleArray) -> Unit = { _, _ -> }
 ) {
     private val fineConfig = surface.mapping.config
     private val fineCount = fineConfig.cellCount
     private val grid = ClimateGrid(fineConfig)
     private val geography = ClimateGeography(surface.worldForClimate, grid)
-    private val regimes = WeatherRegimes(grid, surface.worldSeedForClimate)
-    private val energy = ClimateEnergyModel(grid, geography, surface, atmosphere, atmosphere.physics,
-        normals.solarConfig(), oceanTransport)
-    private val circulation = DiagnosticCirculation(grid, geography)
-    private val moisture = ClimateMoisture(grid, geography, atmosphere.physics, regimes)
+    private val climate = ReducedClimate(grid, geography, surface, atmosphere)
+    private val solar = atmosphere.physics.solar
     private val coarseWater = DoubleArray(grid.count)
-    private val coarseSurfaceC = DoubleArray(grid.count)
-    private val coarseSurfaceK = DoubleArray(grid.count)
-    private val coarseHumidity = DoubleArray(grid.count)
-    private val coarseWeight = DoubleArray(grid.count)
-    private val coarseWetFraction = DoubleArray(grid.count)
     private val fineWaterScratch = DoubleArray(fineCount)
-    private val fineElevation = DoubleArray(fineCount) { surface.terrain.meanElevationMeters[it] }
     private val fineTemperatureAfter = DoubleArray(fineCount)
     private val soilExposureScratch = DoubleArray(surface.soil.size)
+    private var soilExposureSeconds = 0.0
     private val fineTemperature = DoubleArray(fineCount)
     private val fineOldTemperature = DoubleArray(fineCount)
     private val finePeakRain = DoubleArray(fineCount)
@@ -100,71 +83,42 @@ internal class FastClimateStepper(
     private val minimumTemperature = DoubleArray(fineCount)
     private val maximumTemperature = DoubleArray(fineCount)
     private var totalMoistureResidual = 0.0
-    private var lastCirculation: CirculationState? = null
-    val maximumIntervalSeconds get() = 20 * normals.yearSeconds
+    val maximumIntervalSeconds get() = 20 * solar.yearSeconds
     var completedSeconds = startSeconds
         private set
     var latest: FastClimateResult? = null
         private set
 
-    /** Zonal energy budget accumulated by the energy model; diagnostic only. */
-    val rowBudget: ClimateRowBudget get() = energy.rowBudget
-    /** Last diagnosed zonal overturning structure (degrees), for review output. */
-    val zonalStructure: List<Double> get() = listOf(circulation.thermalEquatorDegrees,
-        circulation.hadleyEdgeSouthDegrees, circulation.hadleyEdgeNorthDegrees,
-        circulation.stormTrackSouthDegrees, circulation.stormTrackNorthDegrees)
-
-    /** Preserve the diagnosed free-air climate instead of discarding it at reentry. */
-    fun reentryAirTemperatureKelvin(): DoubleArray = energy.detailedAirTemperatureKelvin()
+    fun reentryAirTemperatureKelvin(): DoubleArray = climate.detailedAirTemperatureKelvin()
 
     init {
-        check(surface.pendingFluxBatch?.consumed != false) { "Accept detailed water before entering climate evolution" }
         check(history.elapsedSeconds == startSeconds)
         atmosphere.markClimateEvolution()
-        val estimate = normals.estimate(startSeconds)
-        energy.initialize { cell -> estimate.temperatureC(cell) }
-        atmosphere.surfaceThermalState.let { thermal ->
-            // Preserve any detailed surface temperature already present; the energy model
-            // only overwrites it when it has no prior state. Initialization is explicit.
-            for (cell in 0 until fineCount) if (!thermal[cell].isFinite() || thermal[cell] <= 0.0)
-                thermal[cell] = estimate.temperatureC(cell) + 273.15
-        }
     }
 
     fun advance(seconds: Double): FastClimateResult {
         require(seconds.isFinite() && seconds >= MIN_INTERVAL_SECONDS && seconds <= maximumIntervalSeconds)
         require((completedSeconds + seconds).isFinite() && completedSeconds + seconds > completedSeconds)
-        check(surface.pendingFluxBatch?.consumed != false)
         check(history.elapsedSeconds == completedSeconds)
         val start = completedSeconds
         val before = atmosphere.atmosphericWaterKg + surface.totalWaterKg
+        val boundaryBefore = surface.exportedWaterKg
         val tileCount = surface.mapping.tileWidth * surface.mapping.tileHeight
-        val fields = Array(10) { field -> DoubleArray(if (field < 7) tileCount else fineCount) }
+        val fields = Array(9) { field -> DoubleArray(if (field < 6) tileCount else fineCount) }
         val fluxTotals = ClimateFluxTotals(fields)
-        val throughput = DoubleArray(surface.mapping.tileWidth * surface.mapping.tileHeight)
-        val lakeInflow = DoubleArray(hydrology.lakeCount)
-        var representedHydrologySeconds = 0.0
-        var outlet = 0.0
-        val routingBefore = hydrology.completedRoutingPasses
         val representativeCloud = DoubleArray(fineCount)
         val representativeHumidity = DoubleArray(fineCount)
-        val plan = ClimatePhasePlan(start, seconds, normals.yearSeconds)
+        val plan = ClimatePhasePlan(start, seconds, solar.yearSeconds)
         var phaseClock = start
         var evaporated = 0.0
         var rainfall = 0.0
-        var requestedRain = 0.0
-        val demandEstimate = normals.estimate(start + seconds / 2, calibration)
-        for (cell in 0 until fineCount) {
-            requestedRain += demandEstimate.precipitationMmPerDay(cell) * seconds / DAY_SECONDS *
-                fineConfig.dx * fineConfig.dy
-        }
         var moistureResidual = 0.0
         var totalTransportSteps = 0
         var maximumCourant = 0.0
         var maximumWind = 0.0
         var meanWindSum = 0.0
         var windSamples = 0
-        energy.resetIntervalTotals()
+        climate.resetIntervalTotals()
         totalMoistureResidual = 0.0
         for (phase in plan.phases) {
             val phaseStart = phaseClock
@@ -176,59 +130,33 @@ internal class FastClimateStepper(
                 maximumTemperature[cell] = fineOldTemperature[cell]
             }
 
-            // Restrict the current surface state and diagnose one mass-consistent circulation.
-            atmosphere.surfaceThermalState.let { thermal ->
-                for (cell in 0 until fineCount) fineTemperature[cell] = thermal[cell]
-            }
-            grid.restrict(fineTemperature, coarseSurfaceK)
-            for (cell in 0 until grid.count) coarseSurfaceC[cell] = coarseSurfaceK[cell] - 273.15
-            val yearFraction = ((mid / normals.yearSeconds + normals.initialYearFraction) % 1.0)
-
-            val state = circulation.advance(energy.airTemperatureK, coarseSurfaceK, phaseSeconds, yearFraction)
-            lastCirculation = state
-            maximumWind = max(maximumWind, state.maximumSpeed)
-            meanWindSum += state.rmsSpeed; windSamples++
-
+            climate.diagnoseWinds()
+            maximumWind = max(maximumWind, climate.maximumSpeed)
+            meanWindSum += climate.meanSpeed; windSamples++
             surface.beginUpdate()
-            energy.beginPhase(mid)
-
-            // Seasonal energy, surface heat, and moisture-limited evaporation for this phase.
-
-            computeFineHumidity()
-            val firstEvaporation = energy.exchange(phaseSeconds, mid, state,
-                { cell -> fineHumidity[cell] })
-            atmosAdd(firstEvaporation)
-            for (cell in 0 until fineCount) {
-                if (firstEvaporation[cell] > 0) evaporated += firstEvaporation[cell] * fineConfig.cellArea
-            }
-
-            // Coarse humidity includes the evaporation just committed.
-            computeFineHumidity()
-            computeCoarseHumidity()
+            val evaporation = climate.exchange(phaseSeconds, mid)
+            saturationReady = false
+            atmosAdd(evaporation)
+            for (amount in evaporation) evaporated += amount * fineConfig.cellArea
             for (cell in 0 until fineCount) fineWaterScratch[cell] = atmosphere.effectiveMoistureMmAt(cell)
             grid.restrict(fineWaterScratch, coarseWater)
-
-            val result = moisture.advance(coarseWater, phaseSeconds, mid, normals.yearSeconds, state,
-                energy.airTemperatureK, coarseSurfaceC, { coarseHumidity[it] },
-                fineElevation)
-            moistureResidual = max(moistureResidual, abs(result.moistureResidualMm))
-            totalTransportSteps += result.transportSteps
-            maximumCourant = max(maximumCourant, result.maximumCourant)
+            val rain = climate.transport(coarseWater, phaseSeconds)
+            moistureResidual = max(moistureResidual, abs(climate.moistureResidual))
+            totalTransportSteps += climate.transportSteps
+            maximumCourant = max(maximumCourant, climate.maximumCourant)
             // Commit the transported coarse inventory back to the authoritative fine columns.
             grid.prolongUniform(coarseWater, fineTemperature) // reuse as a fine scratch
             for (cell in 0 until fineCount) atmosphere.setEffectiveMoistureMm(cell, fineTemperature[cell])
-            for (coarse in 0 until grid.count) coarseWetFraction[coarse] = regimes.wetFraction(coarse, mid, normals.yearSeconds)
             // Distribute fine rain, including snow, to the physical surface.
             finePeakRain.fill(0.0)
             for (cell in 0 until fineCount) {
                 val fineCell = cell
-                val amount = result.fineRainMm[cell]
+                val amount = rain[cell]
                 if (amount <= 0.0) continue
-                val coarse = grid.overlap.targetOfSource[cell]
                 // The same autoconversion closure sets an onset-sized event's mean
-                // intensity. Regimes may organize stronger rain, but weak interval
+                // intensity. Weak interval
                 // means shorten wet time instead of becoming continuous drizzle.
-                val wet = min(coarseWetFraction[coarse], amount * 3600 / phaseSeconds /
+                val wet = min(0.35, amount * 3600 / phaseSeconds /
                     representativeRainIntensity).coerceIn(1e-6, 1.0)
                 finePeakRain[cell] = amount * 3600 / (phaseSeconds * wet)
                 val snow = if (atmosphere.surfaceThermalState[fineCell] - 273.15 < 0.0) 1.0 else 0.0
@@ -240,8 +168,7 @@ internal class FastClimateStepper(
             for (cell in 0 until fineCount)
                 surface.setCellTemperature(cell, atmosphere.surfaceThermalState[cell] - 273.15)
             surface.finishClimateStep(phaseSeconds, energyLimitedSnowMelt = true, totals = fluxTotals)
-            energy.addCondensationHeat(result.fineRainMm, phaseSeconds)
-            energy.mix(phaseSeconds, state)
+            climate.condense(rain, phaseSeconds)
             saturationReady = false
 
             // Publish the actual subgrid chronology diagnostics.
@@ -251,68 +178,56 @@ internal class FastClimateStepper(
                 minimumTemperature[cell] = min(minimumTemperature[cell], fineTemperatureAfter[cell])
                 maximumTemperature[cell] = max(maximumTemperature[cell], fineTemperatureAfter[cell])
                 val coarse = grid.overlap.targetOfSource[cell]
-                // Display the representative low-level flow, not the vertically integrated
-                // column transport used by the moisture budget.
-                fields[7][cell] = state.lowEast[coarse] * 86400 * surface.mapping.tileWidth / fineConfig.domainWidthMeters
-                fields[8][cell] = -state.lowNorth[coarse] * 86400 * surface.mapping.tileHeight / fineConfig.domainHeightMeters
-                fields[9][cell] = energy.detailedAirTemperatureAt(cell) - 273.15
+                // Publish the same flow used for conservative moisture transport.
+                fields[6][cell] = climate.east[coarse] * 86400 * surface.mapping.tileWidth / fineConfig.domainWidthMeters
+                fields[7][cell] = -climate.north[coarse] * 86400 * surface.mapping.tileHeight / fineConfig.domainHeightMeters
+                fields[8][cell] = climate.detailedAirTemperatureAt(cell) - 273.15
             }
 
-            val batch = surface.sealFluxBatch(phaseSeconds)
-            val routingBeforePhase = hydrology.completedRoutingPasses
-            representedHydrologySeconds += hydrology.acceptClimateFluxBatch(batch, forceRoute = false)
-            if (hydrology.completedRoutingPasses > routingBeforePhase) {
-                for (tile in throughput.indices) throughput[tile] += hydrology.routedMmTiles(tile % hydrology.width, tile / hydrology.width)
-                for (lake in lakeInflow.indices) lakeInflow[lake] += hydrology.lakeInflowMmTilesLastPeriod(lake)
-                outlet += hydrology.outletMmTilesLastPeriod
-            }
-            val yearsBefore = history.observedYears
-            history.observePhase(phaseStart, phaseSeconds, temperatureIntegral, result.fineRainMm,
+            for (tile in soilExposureScratch.indices)
+                soilExposureScratch[tile] += (surface.soil[tile] / 120.0).coerceIn(0.0, 1.0) * phaseSeconds
+            soilExposureSeconds += phaseSeconds
+            history.observePhase(phaseStart, phaseSeconds, temperatureIntegral, rain,
                 minimumTemperature, maximumTemperature, finePeakRain)
-            if (history.observedYears > yearsBefore) {
-                for (tile in soilExposureScratch.indices) {
-                    soilExposureScratch[tile] = (surface.soil[tile] / 120.0).coerceIn(0.0, 1.0)
+            if (floor((history.elapsedSeconds + 1e-6) / solar.yearSeconds) > floor((phaseStart + 1e-6) / solar.yearSeconds)) {
+                // Ecology sees the year's moisture exposure, not just winter's last bucket.
+                if (history.snapshot != null) {
+                    for (tile in soilExposureScratch.indices) soilExposureScratch[tile] /= soilExposureSeconds
+                    evolveEcology(soilExposureSeconds, soilExposureScratch)
                 }
-                evolveEcology(normals.yearSeconds, soilExposureScratch)
+                soilExposureScratch.fill(0.0)
+                soilExposureSeconds = 0.0
             }
             // Diagnose humidity AFTER transport, rainout, and temperature evolution;
             // the value computed before the phase is stale at publication time.
             computeFineHumidity()
             // Representative cloud and humidity depend on phase-mean moisture and rain rate.
             for (cell in 0 until fineCount) {
-                val hourlyRain = result.fineRainMm[cell] * 3600 / phaseSeconds
                 val humidity = fineHumidity[cell]
                 val weight = phaseSeconds / seconds
                 representativeHumidity[cell] += humidity * weight
-                representativeCloud[cell] += cloudProxyMm(atmosphere.effectiveMoistureMmAt(cell), humidity, hourlyRain) * weight
+                representativeCloud[cell] += ColumnThermodynamics.cloudMm(atmosphere.effectiveMoistureMmAt(cell), fineSaturation[cell]) * weight
             }
             phaseClock += phaseSeconds
         }
 
         // The energy interval is one aggregate diagnostic; the approximation is named.
-        hydrology.publishClimateThroughput(representedHydrologySeconds, throughput, lakeInflow, outlet)
         val after = atmosphere.atmosphericWaterKg + surface.totalWaterKg
-        val residual = (after - before) / max(1.0, abs(before))
+        val boundary = surface.exportedWaterKg - boundaryBefore
+        val residual = (after - before + boundary) / max(1.0, abs(before))
         check(residual.isFinite() && abs(residual) < 1e-10) { "Climate water transaction did not reconcile: $residual before=$before after=$after" }
         totalMoistureResidual = max(totalMoistureResidual, moistureResidual)
         completedSeconds = history.elapsedSeconds
         val diagnostics = ClimateIntervalDiagnostics(start, seconds, plan.phases.size, before, after, residual,
-            evaporated, rainfall, requestedRain, 0.0, atmosphere.completedSteps,
-            routingPasses = hydrology.completedRoutingPasses - routingBefore, representedHydrologySeconds = representedHydrologySeconds,
-            aggregateYears = false, ecologyEligibleSeconds = seconds,
-            absorbedShortwaveJoules = energy.absorbedShortwaveJoules,
-            outgoingLongwaveJoules = energy.outgoingLongwaveJoules,
-            sensibleHeatJoules = energy.sensibleHeatJoules,
-            latentHeatJoules = energy.latentHeatJoules,
-            airTransportJoules = energy.airTransportJoules,
-            oceanTransportJoules = energy.oceanTransportJoules,
-            snowMeltEnergyJoules = energy.snowMeltJoules,
-            condensationHeatingJoules = energy.condensationJoules,
-            seaIcePhaseChangeJoules = energy.seaIceJoules,
-            coldFloorAdjustmentJoules = energy.coldFloorJoules,
-            namedEnergyResidualJoules = energy.surfaceResidualJoules + energy.airResidualJoules,
-            potentialEvaporationMm = energy.potentialEvaporationMm(),
-            actualEvaporationMm = energy.actualEvaporationMm(),
+            evaporated, rainfall, atmosphere.completedSteps,
+            boundaryExportKg = boundary, ecologyEligibleSeconds = seconds,
+            absorbedShortwaveJoules = climate.shortwaveJoules,
+            outgoingLongwaveJoules = climate.outgoingJoules,
+            latentHeatJoules = climate.latentJoules,
+            condensationHeatingJoules = rainfall * atmosphere.physics.latentHeatJkg,
+            snowMeltEnergyJoules = climate.snowMeltJoules,
+            potentialEvaporationMm = climate.potentialMm,
+            actualEvaporationMm = climate.actualMm,
             maximumWindMetersPerSecond = maximumWind,
             meanWindMetersPerSecond = if (windSamples > 0) meanWindSum / windSamples else 0.0,
             moistureTransportResidual = totalMoistureResidual,
@@ -335,37 +250,14 @@ internal class FastClimateStepper(
         // condensation/mixing stage, so all intra-phase water updates share capacity.
         if (!saturationReady) {
             for (cell in 0 until fineCount)
-                fineSaturation[cell] = atmosphere.saturatedVaporMmAt(cell, energy.detailedAirTemperatureAt(cell))
+                fineSaturation[cell] = atmosphere.saturatedVaporMmAt(cell, climate.detailedAirTemperatureAt(cell))
             saturationReady = true
         }
         for (cell in 0 until fineCount)
-            fineHumidity[cell] = humidityProxy(atmosphere.effectiveMoistureMmAt(cell), fineSaturation[cell])
+            fineHumidity[cell] = (atmosphere.effectiveMoistureMmAt(cell) / max(1e-12, fineSaturation[cell])).coerceIn(0.0, 1.0)
     }
-
-    private fun computeCoarseHumidity() {
-        for (cell in 0 until grid.count) { coarseHumidity[cell] = 0.0; coarseWeight[cell] = 0.0 }
-        for (cell in 0 until fineCount) {
-            val coarse = grid.overlap.targetOfSource[cell]
-            coarseHumidity[coarse] += fineHumidity[cell]
-            coarseWeight[coarse] += 1.0
-        }
-        for (cell in 0 until grid.count) if (coarseWeight[cell] > 0) coarseHumidity[cell] /= coarseWeight[cell]
-    }
-
-    private val calibration get() = history.snapshot?.takeUnless { it.containsAggregateEstimates }
 
     companion object {
-        // Appearance estimates only: no mass/heat exchange and no history feedback.
-        internal fun humidityProxy(meanMoistureMm: Double, saturationMm: Double): Double =
-            (meanMoistureMm / max(1e-12, saturationMm)).coerceIn(0.0, 1.0)
-
-        internal fun cloudProxyMm(meanMoistureMm: Double, humidity: Double, fundedHourlyRain: Double): Double {
-            val humidityCloud = ColumnThermodynamics.cloudMm(meanMoistureMm,
-                meanMoistureMm / max(1e-12, humidity))
-            val rainCloud = min(0.6, fundedHourlyRain * 1.5)
-            return min(0.6, max(humidityCloud, rainCloud))
-        }
-
         /** Diagnostic rain above 2 mm/h, not an Earth-calibrated infiltration cutoff. */
         const val INTENSE_RAIN_MM_PER_HOUR = 2.0
         const val MIN_INTERVAL_SECONDS = 1.0

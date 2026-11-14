@@ -29,14 +29,13 @@ kotlin {
 // applications to explicitly allow native access for unnamed modules.
 tasks.withType<JavaExec>().configureEach {
     jvmArgs("--enable-native-access=ALL-UNNAMED")
-    systemProperty("terra.weatherModel", providers.gradleProperty("weatherModel").orElse("prescribed").get())
     systemProperty("terra.profile", providers.gradleProperty("performanceProfile").orElse("false").get())
     systemProperty("terra.profile.seconds", providers.gradleProperty("profileSeconds").orElse("2.0").get())
     systemProperty("terra.profile.warmup", providers.gradleProperty("profileWarmup").orElse("0.5").get())
     systemProperty("terra.profile.speeds", providers.gradleProperty("profileSpeeds").orElse("").get())
     systemProperty("terra.profile.dayNight", providers.gradleProperty("profileDayNight").orElse("false").get())
     systemProperty("terra.profile.clouds", providers.gradleProperty("profileClouds").orElse("").get())
-    systemProperty("terra.profile.output", providers.gradleProperty("profileOutput").orElse("build/experiments/phase-7/baseline").get())
+    systemProperty("terra.profile.output", providers.gradleProperty("profileOutput").orElse("build/experiments/desktop-profile").get())
     systemProperty("terra.atmosphereGeometry", providers.gradleProperty("atmosphereGeometry").orElse("LATITUDE_CHANNEL").get())
 }
 
@@ -55,7 +54,7 @@ tasks.register<JavaExec>("atlasUiPreview") {
     classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
     jvmArgs((tasks.named("runJvm").get() as JavaExec).jvmArgs)
     systemProperty("terra.uiReviewStates", providers.gradleProperty("uiReviewStates")
-        .orElse("overview,inspection,details,speed,settings,climate-settings,advanced-settings,settings-edited,help").get())
+        .orElse("overview,inspection,details,speed,settings,advanced-settings,settings-edited,help").get())
 }
 tasks.register<JavaExec>("dryAtmospherePreview") {
     group = "application"
@@ -102,20 +101,6 @@ tasks.register<JavaExec>("climateAtlas") {
     mainClass.set("terra.experiments.ClimateAtlasKt")
     classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
     args(providers.gradleProperty("climateAtlasArgs").orElse("").get().split(' ').filter { it.isNotBlank() })
-}
-
-tasks.register<JavaExec>("oceanTransportBenchmark") {
-    group = "verification"
-    description = "Compare lateral and basin-grown ocean heat redistribution."
-    mainClass.set("terra.experiments.OceanTransportBenchmarkKt")
-    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
-}
-
-tasks.register<JavaExec>("responseUnitsBenchmark") {
-    group = "verification"
-    description = "Compare per-tile and response-unit linear store update costs."
-    mainClass.set("terra.experiments.ResponseUnitsBenchmarkKt")
-    classpath(experimentCompilation.output.allOutputs, experimentCompilation.runtimeDependencyFiles)
 }
 
 tasks.register<JavaExec>("climateBenchmark") {

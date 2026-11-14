@@ -13,8 +13,6 @@ import kotlin.math.sqrt
 import terra.atmosphere.AtmosphereGeometry
 import terra.atmosphere.DryAtmosphereConfig
 import terra.atmosphere.DryAtmosphereSnapshot
-import terra.hydrology.HydrologySimulation
-import terra.hydrology.HydrologyTopology
 import terra.weather.DynamicalWeather
 import terra.world.World
 import terra.atmosphere.MoistAtmosphereSnapshot
@@ -54,8 +52,7 @@ fun main(args: Array<String>) {
     val output = File(values["output"] ?: "build/experiments/${if (moist) "moist" else "dry"}-atmosphere").apply { mkdirs() }
     require(!terrain || scenario == DryScenario.JET) { "Coupled terrain uses the game JET initializer" }
     val world = if (terrain) World(seed, config.width * 2 - 1, config.height * 2 - 1) else null
-    val hydrology = world?.let { HydrologySimulation(HydrologyTopology(it)) }
-    val coupled = world?.let { DynamicalWeather(it, hydrology!!, config) }
+    val coupled = world?.let { DynamicalWeather(it, config) }
     val wetModel = if (moist && !terrain) MoistAtmosphere(config, scenario = scenario, seed = seed) else null
     val model = if (moist) null else DryScenarios.create(scenario, config, seed)
     fun elapsedSeconds() = coupled?.elapsedSeconds ?: wetModel?.elapsedSeconds ?: model!!.elapsedSeconds
@@ -66,7 +63,7 @@ fun main(args: Array<String>) {
     val initialImage = DryAtmosphereImages.frame(initial, initialMoist)
     ImageIO.write(initialImage, "png", File(output, "initial.png"))
     println("${if (moist) "Moist" else "Dry"} $scenario ${config.width}×${config.height}: $steps fixed ${config.stepSeconds}s steps")
-    val budgets = StringBuilder("day,relative_water_residual,energy_residual_J,numerical_transport_energy_J,unexplained_energy_residual_J,ocean_mm_tiles,soil_mm_tiles,lake_and_pending_mm_tiles,observed_years\n")
+    val budgets = StringBuilder("day,relative_water_residual,energy_residual_J,numerical_transport_energy_J,unexplained_energy_residual_J,boundary_export_kg,soil_mm_tiles,observed_years\n")
     AnimatedGif(File(output, "atmosphere.gif")).use { animation ->
         animation.add(initialImage)
         while (completedSteps() < steps) {
@@ -75,7 +72,7 @@ fun main(args: Array<String>) {
                 val batch = minOf(maxOf(1L, (3600 / config.stepSeconds).toLong()),
                     steps - completedSteps(), stride - completedSteps() % stride).toInt()
                 val advanced = coupled.advanceBudgeted(batch * config.stepSeconds, batch)
-                hydrology!!.acceptWeatherStep(coupled, advanced)
+
                 world.advanceClimateBiomes(coupled.seasonalClimate, advanced)
             } else if (wetModel != null) wetModel.step() else model!!.step()
             if (completedSteps() % stride == 0L || completedSteps() == steps) {
@@ -87,11 +84,10 @@ fun main(args: Array<String>) {
                     val diagnostics = wet!!.diagnostics
                     val soil = (0 until coupled.height).sumOf { y -> (0 until coupled.width).sumOf { x -> coupled.soilWaterMm(x, y) } }
                     budgets.append("${elapsedSeconds() / 86400},${diagnostics.relativeWaterResidual},${diagnostics.energyResidualJoules}," +
-                        "${diagnostics.numericalTransportEnergyJoules},${diagnostics.unexplainedEnergyResidualJoules},${hydrology!!.oceanWaterMmTiles},$soil,${hydrology.storedAndPendingWaterMmTiles - hydrology.oceanWaterMmTiles},${coupled.observedClimateYears}\n")
+                        "${diagnostics.numericalTransportEnergyJoules},${diagnostics.unexplainedEnergyResidualJoules},${diagnostics.exportedWaterKg},$soil,${coupled.observedClimateYears}\n")
                     println("water_residual=${diagnostics.relativeWaterResidual}; energy_residual_J=${diagnostics.energyResidualJoules}; " +
                         "transport_energy_J=${diagnostics.numericalTransportEnergyJoules}; unexplained_energy_J=${diagnostics.unexplainedEnergyResidualJoules}; " +
-                        "ocean_mm_tiles=${hydrology.oceanWaterMmTiles}; soil_mm_tiles=$soil; " +
-                        "lake_and_pending_mm_tiles=${hydrology.storedAndPendingWaterMmTiles - hydrology.oceanWaterMmTiles}; " +
+                        "boundary_export_kg=${diagnostics.exportedWaterKg}; soil_mm_tiles=$soil; " +
                         "observed_years=${coupled.observedClimateYears}; biome_revision=${world.biomeRevision}")
                 }
             }
@@ -133,7 +129,7 @@ fun main(args: Array<String>) {
                 (0..3).maxOf { climate.seasonMeanSurfaceTemperatureC(it, cell) } -
                     (0..3).minOf { climate.seasonMeanSurfaceTemperatureC(it, cell) }
             }.average()}\n" +
-            "biome_revision=${world.biomeRevision}\nocean_mm_tiles=${hydrology!!.oceanWaterMmTiles}\n"
+            "biome_revision=${world.biomeRevision}\nboundary_export_kg=${coupled.diagnostics.exportedWaterKg}\n"
     } ?: ""
     File(output, "state.txt").writeText(text + wetText + climateText)
     if (coupled != null) File(output, "budgets.csv").writeText(budgets.toString())
