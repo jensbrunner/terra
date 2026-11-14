@@ -156,7 +156,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     val started = System.nanoTime()
                     val previous = mailbox.get()
                     val snapshot = if (previous?.progress?.generation == requested.generation &&
-                        previous.progress.completedSeconds == simulation.completedSeconds && previous.fidelityRevision == simulation.fidelityRevision && showClouds == publishedClouds &&
+                        previous.progress.completedSeconds == simulation.completedSeconds && previous.progress.paused == active.paused && previous.fidelityRevision == simulation.fidelityRevision && showClouds == publishedClouds &&
                         !(showClouds && !active.paused))
                         previous.copy(progress = progress)
                     else {

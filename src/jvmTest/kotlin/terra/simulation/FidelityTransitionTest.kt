@@ -22,11 +22,11 @@ class FidelityTransitionTest {
         val initial = capture()
         val water = initial.diagnostics!!.let { it.totalWaterKg + it.exportedWaterKg }
         assertTrue((0 until initial.world.height).any { y -> (0 until initial.world.width).any { x ->
-            initial.drainage.isLakeTileWet(x, y) } }, "Generated lakes must have visible fixed footprints")
+            initial.drainage.isLakeTileWet(x, y) } }, "Generated lakes must have finite initial footprints")
         repeat(12) { owner.advanceClimateInterval(20 * 365 * day) }
         owner.advanceClimateInterval(15 * 365 * day)
         val coarse = capture()
-        assertTrue(initial.drainage === coarse.drainage && initial.surfaceWater === coarse.surfaceWater)
+        assertTrue(initial.drainage !== coarse.drainage && initial.surfaceWater !== coarse.surfaceWater)
         owner.setFidelity(SimulationFidelity.DETAILED)
         val pending = capture()
         assertEquals(coarse.progress.completedSeconds, pending.progress.completedSeconds)
@@ -37,7 +37,7 @@ class FidelityTransitionTest {
         assertEquals(1L, pending.lastHandoff.physicalStepsAtHandoff)
         assertTrue(pending.weather.hasResolvedDynamics)
         assertEquals(0.0, pending.weather.fieldSemantics.intervalDurationSeconds)
-        assertTrue(pending.surfaceWater === initial.surfaceWater)
+        assertTrue(pending.surfaceWater === coarse.surfaceWater)
         for (y in 0 until pending.world.height) for (x in 0 until pending.world.width) {
             assertEquals(coarse.weather.soilWaterMm(x, y), pending.weather.soilWaterMm(x, y))
             assertEquals(coarse.weather.surfaceTemperatureC(x, y), pending.weather.surfaceTemperatureC(x, y))
@@ -46,7 +46,7 @@ class FidelityTransitionTest {
         val resolved = capture()
         assertEquals(coarse.progress.completedSeconds + 3600, owner.completedSeconds)
         assertTrue(resolved.weather.hasResolvedDynamics)
-        assertTrue(resolved.surfaceWater === initial.surfaceWater && resolved.drainage === initial.drainage)
+        assertTrue(resolved.surfaceWater === coarse.surfaceWater && resolved.drainage === coarse.drainage)
         var pressureChange = 0.0
         var pressureAmplitude = 0.0
         var cloud = 0.0

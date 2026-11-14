@@ -1,13 +1,13 @@
 package terra.weather
 
 import terra.atmosphere.*
+import terra.hydrology.SurfaceWater
 import terra.world.World
 import terra.world.Terrain
 import kotlin.math.*
 
-/** Shared soil and snow. Open water is a boundary moisture source; surplus land water
- * leaves as runoff. No groundwater, channel inventories, or duplicate climate stores.
- * exportedWaterKg is a signed boundary ledger, not a finite ocean reservoir.
+/** Shared soil, snow and slow drainage stores. Ocean exchange is a signed boundary
+ * ledger; inland water is finite and included in every conservation diagnostic.
  */
 internal class TerrainMoistSurface(private val world: World, val mapping: AtmosphereTileMapping) : MoistSurface {
     private val width = world.width
@@ -15,6 +15,7 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
     private val count = width * height
     internal val worldForClimate get() = world
     private val land = BooleanArray(count) { world[it % width, it / width].terrain != Terrain.OCEAN }
+    internal val surfaceWater = SurfaceWater(world)
     val soil = DoubleArray(count) { if (land[it]) 120.0 else 0.0 }
     private val snow = DoubleArray(count)
     private val queuedRain = DoubleArray(count)
@@ -129,7 +130,9 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
         var actual = 0.0
         mapping.forCell(cell) { i, f ->
             val demand = potentialMm * f
-            if (!land[i]) { actual += demand; export(-demand) } else {
+            if (!land[i]) { actual += demand; export(-demand) }
+            else if (surfaceWater.isLakeWet(i)) actual += surfaceWater.evaporateLake(i, demand)
+            else {
                 val affordable = min(demand, soil[i] * relaxationFraction(demand / 120.0))
                 soil[i] -= affordable; actual += affordable
             }
@@ -144,7 +147,11 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
         mapping.forCell(cell) { i, f ->
             val amount = amountMm * f
             rain[i] += amount; stepRain[i] += amount; weightedWet[i] += amount * wet
-            if (land[i]) { snow[i] += amount * frozen; queuedRain[i] += amount * (1 - frozen) }
+            if (land[i]) {
+                snow[i] += amount * frozen
+                if (surfaceWater.isLakeWet(i)) surfaceWater.receiveLakeRain(i, amount * (1 - frozen))
+                else queuedRain[i] += amount * (1 - frozen)
+            }
             else export(amount)
         }
     }
@@ -177,7 +184,7 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
             val previousOverflow = overflow[i]
             val drained = if (land[i]) integrateRainBucket(i, queuedRain[i], seconds, wet * seconds, decay) else 0.0
             drainage[i] += drained
-            export(drained + overflow[i] - previousOverflow)
+            surfaceWater.receive(i, drained, overflow[i] - previousOverflow)
             queuedRain[i] = 0.0
             val rate = stepRain[i] * 3600 / seconds
             val peak = rate / wet
@@ -190,6 +197,7 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
                 it.intenseRain[i] += max(0.0, stepRain[i] - 2 * seconds * wet / 3600)
             }
         }
+        export(surfaceWater.advance(seconds))
         stepRain.fill(0.0); weightedWet.fill(0.0)
     }
 
@@ -257,12 +265,12 @@ internal class TerrainMoistSurface(private val world: World, val mapping: Atmosp
 
 
     override fun waterMm(cell: Int) = rootZoneMm(cell) + snowWaterMm(cell)
-    override val totalWaterKg get() = (soil.sum() + snow.sum() + queuedRain.sum()) * mapping.tileAreaM2
+    override val totalWaterKg get() = (soil.sum() + snow.sum() + queuedRain.sum() + surfaceWater.totalWaterMmTiles) * mapping.tileAreaM2
     override val exportedWaterKg get() = boundaryMmTiles * mapping.tileAreaM2
     private companion object {
         const val SOIL_CAPACITY_MM = 250.0
         const val FIELD_CAPACITY_MM = 120.0
         const val DRAINAGE_SECONDS = 5 * 86400.0
-        const val INFILTRATION_MM_PER_HOUR = 2.0
+        const val INFILTRATION_MM_PER_HOUR = 10.0
     }
 }

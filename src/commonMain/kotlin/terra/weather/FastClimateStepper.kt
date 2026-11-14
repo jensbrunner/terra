@@ -2,7 +2,6 @@ package terra.weather
 
 import terra.atmosphere.MoistAtmosphere
 import terra.atmosphere.ColumnThermodynamics
-import terra.atmosphere.RainAutoconversion
 import kotlin.math.floor
 import kotlin.math.abs
 import kotlin.math.max
@@ -16,10 +15,10 @@ data class ClimateIntervalDiagnostics(
     val boundaryExportKg: Double = 0.0, val energyApproximate: Boolean = true,
     val ecologyEligibleSeconds: Double = 0.0,
     val absorbedShortwaveJoules: Double = 0.0,
-    val outgoingLongwaveJoules: Double = 0.0,
+    val netSurfaceHeatLossJoules: Double = 0.0,
     val latentHeatJoules: Double = 0.0,
     val snowMeltEnergyJoules: Double = 0.0,
-    val condensationHeatingJoules: Double = 0.0,
+    val convectiveHeatExportJoules: Double = 0.0,
     val potentialEvaporationMm: Double = 0.0,
     val actualEvaporationMm: Double = 0.0,
     val maximumWindMetersPerSecond: Double = 0.0,
@@ -78,7 +77,6 @@ internal class FastClimateStepper(
     private val fineHumidity = DoubleArray(fineCount)
     private val fineSaturation = DoubleArray(fineCount)
     private var saturationReady = false
-    private val representativeRainIntensity = RainAutoconversion.eventMeanMmPerHour(atmosphere.physics)
     private val temperatureIntegral = DoubleArray(fineCount)
     private val minimumTemperature = DoubleArray(fineCount)
     private val maximumTemperature = DoubleArray(fineCount)
@@ -153,11 +151,12 @@ internal class FastClimateStepper(
                 val fineCell = cell
                 val amount = rain[cell]
                 if (amount <= 0.0) continue
-                // The same autoconversion closure sets an onset-sized event's mean
-                // intensity. Weak interval
-                // means shorten wet time instead of becoming continuous drizzle.
-                val wet = min(0.35, amount * 3600 / phaseSeconds /
-                    representativeRainIntensity).coerceIn(1e-6, 1.0)
+                // Unresolved rain events turn over a humid column in six hours.
+                // Their rate varies with local moisture capacity; phase rain volume
+                // only determines wet duration. It is never multiplied to make storms.
+                val saturation = atmosphere.saturatedVaporMmAt(cell, climate.detailedAirTemperatureAt(cell))
+                val eventRate = max(0.05, saturation / 6.0)
+                val wet = min(0.35, amount * 3600 / (phaseSeconds * eventRate)).coerceAtLeast(1e-9)
                 finePeakRain[cell] = amount * 3600 / (phaseSeconds * wet)
                 val snow = if (atmosphere.surfaceThermalState[fineCell] - 273.15 < 0.0) 1.0 else 0.0
                 surface.receiveClimateRain(cell, amount, wet, snow)
@@ -168,7 +167,7 @@ internal class FastClimateStepper(
             for (cell in 0 until fineCount)
                 surface.setCellTemperature(cell, atmosphere.surfaceThermalState[cell] - 273.15)
             surface.finishClimateStep(phaseSeconds, energyLimitedSnowMelt = true, totals = fluxTotals)
-            climate.condense(rain, phaseSeconds)
+            climate.finishExchange(phaseSeconds)
             saturationReady = false
 
             // Publish the actual subgrid chronology diagnostics.
@@ -222,9 +221,9 @@ internal class FastClimateStepper(
             evaporated, rainfall, atmosphere.completedSteps,
             boundaryExportKg = boundary, ecologyEligibleSeconds = seconds,
             absorbedShortwaveJoules = climate.shortwaveJoules,
-            outgoingLongwaveJoules = climate.outgoingJoules,
+            netSurfaceHeatLossJoules = climate.outgoingJoules,
             latentHeatJoules = climate.latentJoules,
-            condensationHeatingJoules = rainfall * atmosphere.physics.latentHeatJkg,
+            convectiveHeatExportJoules = rainfall * atmosphere.physics.latentHeatJkg,
             snowMeltEnergyJoules = climate.snowMeltJoules,
             potentialEvaporationMm = climate.potentialMm,
             actualEvaporationMm = climate.actualMm,

@@ -104,8 +104,12 @@ class CoupledContinentCounterfactualTest {
         }
         val (wideWeather, wideWorld) = run(true)
         val (narrowWeather, narrowWorld) = run(false)
-        fun rain(weather: DynamicalWeather, x: Int) =
-            weather.seasonalClimate!!.annualPrecipitationAtTile(x, 5, width, height)
+        // Regional means allow individual desert cells. A continent-wide
+        // transport cutoff is different from a dry point behind a rain shadow.
+        fun rain(weather: DynamicalWeather, x: Int) = (3..7).sumOf { y ->
+            (x-1..x+1).sumOf { column ->
+                weather.seasonalClimate!!.annualPrecipitationAtTile(column,y,width,height)
+            } } / 15
         val wideCoast = rain(wideWeather, 5)
         val wideMid = rain(wideWeather, 16)
         val wideInterior = rain(wideWeather, 24)
@@ -148,12 +152,17 @@ class CoupledContinentCounterfactualTest {
         val winds = DoubleArray(4)
         val oceanTemperatures = DoubleArray(4)
         val landTemperatures = DoubleArray(4)
-        for (season in 0..3) {
-            weather.advanceClimateInterval(year / 4)
+        // Average monthly publications, rather than treating a quarter's last
+        // ten-day phase as a seasonal mean (which depends on weather timing).
+        for (month in 0..11) {
+            weather.advanceClimateInterval(year / 12)
             weather.refreshSnapshot()
-            winds[season] = weather.windUTilesPerDay(3, 5)
-            oceanTemperatures[season] = weather.surfaceTemperatureC(3, 5)
-            landTemperatures[season] = weather.surfaceTemperatureC(6, 5)
+            val season = month / 3
+            for (y in 4..6) {
+                winds[season] += weather.windUTilesPerDay(3,y) / 9
+                oceanTemperatures[season] += weather.surfaceTemperatureC(3,y) / 9
+                landTemperatures[season] += weather.surfaceTemperatureC(6,y) / 9
+            }
         }
         val meanWind = winds.average()
         val summer = winds[1] - meanWind

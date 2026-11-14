@@ -54,7 +54,7 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
             val downstream = hydrology.downstreamTileIndex(x, y)
             val centerX = x * scale + scale / 2
             val centerY = y * scale + scale / 2
-            val brushWidth = riverPixelWidth(hydrology.upstreamLandTileCount(x, y))
+            val brushWidth = riverPixelWidth(hydrology.dischargeMmTilesPerDay(x, y))
 
             if (downstream >= 0) {
                 if (!hydrology.isVirtualSpillLink(x, y)) {
@@ -95,9 +95,9 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
         }
     }
 
-    private fun riverPixelWidth(drainageAreaTiles: Int): Int = when {
-        drainageAreaTiles <= RIVER_WIDTH_1_MAX_AREA_TILES -> 1
-        drainageAreaTiles <= RIVER_WIDTH_2_MAX_AREA_TILES -> 2
+    private fun riverPixelWidth(dischargeMmTilesPerDay: Double): Int = when {
+        dischargeMmTilesPerDay <= 10.0 -> 1
+        dischargeMmTilesPerDay <= 200.0 -> 2
         else -> PIXELS_PER_TILE
     }
 
@@ -150,7 +150,5 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
     companion object {
         const val PIXELS_PER_TILE = 3
         const val RIVER_BANK_EXTRA_PIXELS = 2
-        const val RIVER_WIDTH_1_MAX_AREA_TILES = 80
-        const val RIVER_WIDTH_2_MAX_AREA_TILES = 500
     }
 }

@@ -12,6 +12,25 @@ class MoistAtmosphereTest {
     private val closedPhysics = MoistPhysicsConfig(radiationEnabled = false, surfaceExchangeEnabled = false)
 
     @Test
+    fun subsaturatedCloudPartitionIsAnEquilibriumOfDetailedMicrophysics() {
+        val t = 280.0
+        val sat = ColumnThermodynamics.saturationMm(t, closedPhysics.referenceDryColumnKgM2,
+            geometry.gravity, closedPhysics)
+        val water = 0.85 * sat
+        val cloud = ColumnThermodynamics.cloudMm(water,sat)
+        val model = MoistAtmosphere(geometry,closedPhysics,DryScenario.REST) { _, _ ->
+            MoistCell(temperatureKelvin = t,relativeHumidity = (water-cloud)/sat,cloudWaterKgM2 = cloud)
+        }
+        repeat(180) { model.step() }
+        val after = model.snapshot()
+        assertTrue(cloud > 0)
+        assertEquals(cloud,after.cloudWaterMmAt(3,3),1e-10)
+        assertEquals(t,after.temperatureKelvinAt(3,3),1e-10)
+        assertEquals(0.0,after.rainMmPerHourAt(3,3))
+        assertTrue(abs(after.diagnostics.relativeWaterResidual) < 1e-12)
+    }
+
+    @Test
     fun climateReconstructionPreservesAtmosphericWaterAndCarrierVolumeWithLocalTemperatures() {
         val model = MoistAtmosphere(geometry, closedPhysics, DryScenario.REST) { _, y ->
             MoistCell(relativeHumidity = 0.95, cloudWaterKgM2 = 0.2,

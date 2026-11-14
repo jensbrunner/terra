@@ -18,7 +18,7 @@ fun main(args: Array<String>) {
     val world = World(31742)
 
     val weather = DynamicalWeather(world, terra.atmosphere.DryAtmosphereConfig(stepSeconds = 40.0))
-    val detailed = weather.advanceBudgeted(40.0, 1, publishSnapshot = false)
+    weather.advanceBudgeted(40.0, 1, publishSnapshot = false)
 
     weather.refreshSnapshot()
     val waterStart = weather.diagnostics.let { it.totalWaterKg + it.exportedWaterKg }
@@ -49,7 +49,13 @@ fun main(args: Array<String>) {
 
     // One batched transaction over the same number of years.
     val batchStart = System.nanoTime()
-    val batch = weather.advanceClimateInterval(measuredYears * year)
+    var batchYears = measuredYears
+    var batchResidual = 0.0
+    while (batchYears > 0) {
+        val years = minOf(20,batchYears)
+        batchResidual = maxOf(batchResidual,abs(weather.advanceClimateInterval(years * year).relativeWaterResidual))
+        batchYears -= years
+    }
     val batchWall = (System.nanoTime() - batchStart) / 1e9
 
     weather.refreshSnapshot()
@@ -66,11 +72,10 @@ fun main(args: Array<String>) {
     val conservation = abs(handoffWater - climateWater) / climateWater
     val wholeRunDrift = abs(finalWater + weather.diagnostics.exportedWaterKg - waterStart) / waterStart
     val climate = weather.seasonalClimate
-    val summary = world.snapshot(1).landBiomeSummary()
 
     lines.appendLine("one_year_wall_seconds=${"%.3f".format(oneYearWall)} ms_per_year=${"%.1f".format(msPerYear)} years_per_second=${"%.2f".format(measuredYears / oneYearWall)}")
     lines.appendLine("batch_wall_seconds=${"%.3f".format(batchWall)} ms_per_year=${"%.1f".format(batchWall * 1000 / measuredYears)}")
-    lines.appendLine("one_year_water_residual_max=$maximumResidual batch_residual=${batch.relativeWaterResidual}")
+    lines.appendLine("one_year_water_residual_max=$maximumResidual batch_residual=$batchResidual")
     lines.appendLine("rain_kg=$rainKg evaporation_kg=$evaporationKg maximum_wind_ms=$maximumWind mean_wind_ms=${meanWind / measuredYears}")
     lines.appendLine("reentry_day_seconds=${"%.3f".format(reentryWall)} reentry_water_residual=$detailedResidual handoff_water_relative_error=$conservation whole_run_drift=$wholeRunDrift")
     lines.appendLine("handoff_cloud_kg=${handoff.cloudKg} handoff_vapor_kg=${handoff.vaporKg} reentry_cloud_present=${handoff.cloudKg > 0}")

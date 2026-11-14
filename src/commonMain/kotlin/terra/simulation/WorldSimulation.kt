@@ -2,7 +2,6 @@ package terra.simulation
 
 import terra.atmosphere.DryAtmosphereConfig
 import terra.atmosphere.MoistAtmosphereDiagnostics
-import terra.hydrology.SurfaceWater
 import terra.hydrology.SurfaceWaterSnapshot
 import terra.weather.*
 import terra.render.CloudRenderer
@@ -47,13 +46,15 @@ data class WorldPresentationSnapshot(
 /** Single-owner numerical state. Contains no graphics or threading; worker owns every call. */
 internal class WorldSimulation(val request: WorldRequest) {
     private val world = World(request.seed, request.width, request.height, request.terrain)
-    private val drainageView = SurfaceWater(world).snapshot
     private val weather = DynamicalWeather(world, request.atmosphere)
     private var nextClimateSeconds = 3600.0
     private var lastEcologySeconds = 0.0
     private var worldView: WorldSnapshot? = null
     private var weatherView: WeatherPresentation? = null
-    private val waterFrame = SurfaceWaterRasterizer(request.width, request.height).render(drainageView)
+    private var drainageView = weather.surfaceState.surfaceWater.snapshot()
+    private val waterRasterizer = SurfaceWaterRasterizer(request.width, request.height)
+    private var waterFrame = waterRasterizer.render(drainageView)
+    private var waterViewSeconds = 0.0
     private val cloudRenderer by lazy { CloudRenderer(request.width, request.height, request.seed) }
     private val weatherIdentity = Any()
     private var climateQuantumSeconds = FastClimateStepper.DAY_SECONDS
@@ -117,6 +118,14 @@ internal class WorldSimulation(val request: WorldRequest) {
         if (weatherView?.elapsedSeconds != completedSeconds) {
             weather.refreshSnapshot()
             weatherView = WeatherPresentation.capture(weather, completedSeconds, weatherIdentity)
+        }
+        // Slow water presentation, at most twice per wall second at the selected
+        // speed. Mode changes and paused inspection still expose current stores.
+        if (progress.paused || completedSeconds - waterViewSeconds >=
+            maxOf(21600.0, progress.selectedSpeed.simulatedSecondsPerRealSecond * 0.5)) {
+            val current = weather.surfaceState.surfaceWater.snapshot()
+            if (current !== drainageView) { drainageView = current; waterFrame = waterRasterizer.render(current) }
+            waterViewSeconds = completedSeconds
         }
         val cloudFrame = if (cloudsVisible) {
             cloudRenderer.update(weatherView!!, if (progress.paused) 0.0 else visualElapsedSeconds,

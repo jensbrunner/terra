@@ -466,7 +466,7 @@ class AtlasScene(
                 "Drainage   ${formatNumber(weather.drainageMmThisUpdate(tx, ty), 2)} mm/update\n" +
                 "Overflow   ${formatNumber(weather.overflowMmThisUpdate(tx, ty), 2)} mm/update\n\n" +
                 "Upstream land   ${hydrology.upstreamLandTileCount(tx, ty)} tiles\n" +
-                "Rivers and lakes are fixed at generation\n" +
+                "River flow   ${formatNumber(hydrology.dischargeMmTilesPerDay(tx, ty), 2)} mm·tiles/day\n" +
                 (weather.pressureAnomalyPercent(tx, ty)?.let { "Pressure anomaly   ${formatNumber(it, 2)}%" } ?: "Pressure anomaly   unavailable") + "\n" +
                 (weather.relativeVorticityPerSecond(tx, ty)?.let { "Relative curl   ${formatNumber(it / 1e-5, 2)} ×10⁻⁵ s⁻¹" } ?: "Relative curl   unavailable")
         }

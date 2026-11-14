@@ -11,6 +11,29 @@ class ReducedClimateMechanismsTest {
         regionalStrength = 0.0, detailStrength = 0.0)
 
     @Test
+    fun horizontalMixingConservesHeatAndRetainsRegionalLandOceanContrast() {
+        val gridConfig = DryAtmosphereConfig(width = 24, height = 12,
+            domainWidthMeters = 6_000_000.0, domainHeightMeters = 3_000_000.0)
+        val z = DoubleArray(24 * 12) { if (it % 24 < 12) 0.5 else 0.0 }
+        val world = World.withElevation(42, 24, 12, settings, z)
+        val surface = TerrainMoistSurface(world, AtmosphereTileMapping(24,12,gridConfig))
+        val atmosphere = MoistAtmosphere(gridConfig, surface = surface)
+        val grid = ClimateGrid(gridConfig)
+        val model = ReducedClimate(grid, ClimateGeography(world,grid),surface,atmosphere)
+        model.exchange(1.0,0.0)
+        val capacity = DoubleArray(gridConfig.cellCount) { surface.heatCapacityJm2K(it) +
+            atmosphere.physics.referenceDryColumnKgM2 * atmosphere.physics.airHeatCapacityJkgK }
+        for (i in z.indices) atmosphere.surfaceThermalState[i] = if (i % 24 < 12) 280.0 else 300.0
+        fun heat() = z.indices.sumOf { capacity[it] * atmosphere.surfaceThermalState[it] }
+        val before = heat()
+        model.mixHeat(5 * 86400.0)
+        assertEquals(before, heat(), before * 1e-12)
+        val contrast = atmosphere.surfaceThermalState[6 * 24 + 18] - atmosphere.surfaceThermalState[6 * 24 + 6]
+        assertTrue(contrast > 15.0, "A five-day exchange must retain regional geography: $contrast K")
+        for (i in z.indices) assertTrue(atmosphere.surfaceThermalState[i] in 280.0..300.0)
+    }
+
+    @Test
     fun nativeClimateUsesTheFinerConservativeMesh() {
         val grid = ClimateGrid(DryAtmosphereConfig())
         assertEquals(48, grid.config.width)

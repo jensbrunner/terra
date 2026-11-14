@@ -23,6 +23,11 @@ data class MoistPhysicsConfig(
     val solar: SolarConfig = SolarConfig(),
     /** Weak column-integrated drag, a 30-day e-folding time; dissipated kinetic energy becomes heat. */
     val momentumDragPerSecond: Double = 1.0 / (30 * 86400.0),
+    /** Momentum supplied by unresolved overturning to narrow, potentially unstable jets.
+     * No storm positions or perturbations are supplied. Zero disables this closure.
+     */
+    val overturningWindMetersPerSecond: Double = 60.0,
+    val overturningSeconds: Double = 5 * 86400.0,
     val surfaceAlbedo: Double = 0.18,
     val atmosphericEmissivity: Double = 0.8,
     val cloudSolarReflection: Double = 0.45,
@@ -34,7 +39,7 @@ data class MoistPhysicsConfig(
     // faster than the cloud-autoconversion timescale used by the old drizzle model.
     val rainoutSeconds: Double = 480.0,
     val rainCloudThresholdKgM2: Double = 0.2,
-    val rainOnsetKgM2: Double = 0.30,
+    val rainOnsetKgM2: Double = 0.50,
     /** Diagnostic parcel residence/ascent; no extra atmospheric layer or cloud inventory. */
     val liftResidenceSeconds: Double = 600.0,
     val maximumParcelLiftMeters: Double = 1500.0,
@@ -47,13 +52,13 @@ data class MoistPhysicsConfig(
     init {
         require(listOf(referenceTemperatureKelvin, referenceDryColumnKgM2, surfaceHeatCapacityJm2K,
             airHeatCapacityJkgK, latentHeatJkg, condensationSeconds, cloudEvaporationSeconds, rainoutSeconds,
-            liftResidenceSeconds, convectiveMixingDepthMeters)
+            liftResidenceSeconds, convectiveMixingDepthMeters, overturningSeconds)
             .all { it.isFinite() && it > 0 })
         require(rainOnsetKgM2.isFinite() && rainOnsetKgM2 > rainCloudThresholdKgM2)
         require(humidColumnFraction > 0 && humidColumnFraction <= 1 && cloudPressureFraction > 0 && cloudPressureFraction <= 1)
         require(listOf(surfaceAlbedo, atmosphericEmissivity, cloudSolarReflection).all { it.isFinite() && it in 0.0..1.0 })
         require(listOf(solarPeakWm2, momentumDragPerSecond, bulkExchangeCoefficient, unresolvedGustMetersPerSecond, rainCloudThresholdKgM2,
-            maximumParcelLiftMeters, convectiveVelocityCoefficient, maximumConvectiveVelocityMetersPerSecond)
+            overturningWindMetersPerSecond, maximumParcelLiftMeters, convectiveVelocityCoefficient, maximumConvectiveVelocityMetersPerSecond)
             .all { it.isFinite() && it >= 0 })
     }
 }
@@ -86,7 +91,8 @@ data class MoistAtmosphereDiagnostics(
     /** Measured discrete flow/tracer energy change; it can have either sign. */
     val numericalTransportEnergyJoules: Double = 0.0,
     val includesApproximateHistory: Boolean = false,
-    val atmosphereInitializationEnergyJoules: Double = 0.0
+    val atmosphereInitializationEnergyJoules: Double = 0.0,
+    val overturningEnergyJoules: Double = 0.0
 ) {
     val unexplainedEnergyResidualJoules: Double get() = energyResidualJoules - numericalTransportEnergyJoules
 }
@@ -169,6 +175,16 @@ class MoistAtmosphere(
     private var initialEnergy = 0.0
     private var radiationEnergy = 0.0
     private var frictionHeating = 0.0
+    private var overturningEnergy = 0.0
+    private val overturningResponse = if (physics.overturningWindMetersPerSecond > 0 && physics.radiationEnabled && physics.surfaceExchangeEnabled && !config.periodicY)
+        1 - exp(-config.stepSeconds / physics.overturningSeconds) else 0.0
+    private val overturningTarget = DoubleArray(config.height) { y ->
+        val latitude = PlanetLatitude.atmosphereRowRadians(y, config.height)
+        // Eight-degree shear zones can change the sign of the meridional PV gradient.
+        // The solver, not the forcing, decides whether and where eddies form.
+        physics.overturningWindMetersPerSecond * (exp(-0.5 * ((latitude - 0.70) / 0.14).let { it * it }) +
+            exp(-0.5 * ((latitude + 0.70) / 0.14).let { it * it }))
+    }
     private val transportEnergyChange = CompensatedSum()
     private val sunlight = PlanetarySunlight(config.width, config.height, physics.solar)
     private var evaporationTotal = 0.0
@@ -355,7 +371,7 @@ class MoistAtmosphere(
             vapor.value / config.cellCount, cloud.value / config.cellCount,
             precipitationTotal / (config.cellCount * config.cellArea), peakRain, temperature.value / config.cellCount,
             evaporationTotal, precipitationTotal, energy.value, radiationEnergy,
-            if (initialEnergy > 0) energy.value - initialEnergy - radiationEnergy else 0.0, exported, frictionHeating, transportEnergyChange.value, approximateHistory, initializationEnergy
+            if (initialEnergy > 0) energy.value - initialEnergy - radiationEnergy - overturningEnergy else 0.0, exported, frictionHeating, transportEnergyChange.value, approximateHistory, initializationEnergy, overturningEnergy
         )
     }
 
@@ -385,6 +401,8 @@ class MoistAtmosphere(
             check(roughness.isFinite() && roughness >= 0) { "Invalid surface drag at cell $i" }
             val retention = exp(-physics.momentumDragPerSecond * roughness * dt)
             val dissipated = density * flow.dampMomentumAt(i, retention)
+            if (overturningResponse > 0) overturningEnergy += density *
+                flow.exchangeZonalMomentumAt(i, overturningTarget[y], overturningResponse) * config.cellArea
             var temperature = columns.temperatureAt(i, depth) + dissipated / capacity
             frictionHeating += dissipated * config.cellArea
             var surface = surfaceTemperature[i]

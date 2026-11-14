@@ -196,6 +196,13 @@ class DryAtmosphere internal constructor(
     }
 
     /** Returns the dissipated kinetic energy per unit density and cell area. */
+    /** Unresolved vertical momentum exchange; returns signed kinetic energy input. */
+    internal fun exchangeZonalMomentumAt(i: Int, target: Double, response: Double): Double {
+        val before = kineticEnergyAt(i)
+        mx[i] += (h[i] * target - mx[i]) * response
+        return kineticEnergyAt(i) - before
+    }
+
     internal fun dampMomentumAt(i: Int, retention: Double): Double {
         val before = kineticEnergyAt(i)
         mx[i] *= retention

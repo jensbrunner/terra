@@ -37,11 +37,20 @@ internal class ReducedClimate(
     private val weightScratch = DoubleArray(grid.count)
     private val albedo = DoubleArray(fine.cellCount)
     private val heatCapacity = DoubleArray(fine.cellCount)
+    private val inverseHeatCapacity = DoubleArray(fine.cellCount) { i ->
+        1 / (surface.heatCapacityJm2K(i) + physics.referenceDryColumnKgM2 * physics.airHeatCapacityJkgK)
+    }
+    private val dailySunlight = DoubleArray(fine.height)
     private val fineAir = DoubleArray(fine.cellCount)
     private val evaporation = DoubleArray(fine.cellCount)
     private val seaLevelK = DoubleArray(grid.count)
     private val coarseCapacity = DoubleArray(grid.count)
     private val fineHeat = DoubleArray(fine.cellCount)
+    private val heatEastCell = IntArray(fine.cellCount) { it / fine.width * fine.width + (it % fine.width + 1) % fine.width }
+    private val heatNorthCell = IntArray(fine.cellCount) { if (it / fine.width + 1 < fine.height) it + fine.width else -1 }
+    private val heatEastExchange = DoubleArray(fine.cellCount)
+    private val heatNorthExchange = DoubleArray(fine.cellCount)
+    private var heatExchangeSeconds = Double.NaN
     private val elevation = surface.terrain.meanElevationMeters
     private val slopeEast = DoubleArray(fine.cellCount)
     private val slopeNorth = DoubleArray(fine.cellCount)
@@ -126,15 +135,18 @@ internal class ReducedClimate(
     }
 
     /** Exact integration of C dT/dt = absorbed sunlight - (A+B Tsea) - LE + heat
-     * exchange. A=203 W/m², B=3 W/m²/K is an effective outgoing-radiation law.
+     * exchange. A=100 W/m², B=2 W/m²/K parameterizes net infrared/sensible loss;
+     * 0.75 clear-sky transmission accounts for solar absorption above the surface.
      * Conservative neighbour heat exchange uses sea-level potential temperature,
      * keeping elevation cooling separate from horizontal heat transport.
      */
     fun exchange(seconds: Double, midSeconds: Double): DoubleArray {
         sun.update(midSeconds)
+        for (y in dailySunlight.indices) dailySunlight[y] = sun.dailyMeanInputFactor(y)
         surface.fillThermalProperties(albedo, heatCapacity)
         // Include the column's sensible capacity in the effective slab.
         for (i in heatCapacity.indices) heatCapacity[i] += physics.referenceDryColumnKgM2 * physics.airHeatCapacityJkgK
+        grid.restrict(heatCapacity, coarseCapacity)
         mixHeat(seconds / 2)
         for (i in evaporation.indices) {
             val old = atmosphere.surfaceThermalState[i]
@@ -147,7 +159,7 @@ internal class ReducedClimate(
             val humidity = (min(atmosphere.effectiveMoistureMmAt(i), sat) / max(1e-9, surfaceSaturation)).coerceIn(0.0, 1.0)
             val cloud = ColumnThermodynamics.cloudMm(atmosphere.effectiveMoistureMmAt(i), sat)
             val cover = 1 - exp(-cloud / 0.15)
-            val sw = physics.solarPeakWm2 * sun.dailyMeanInputFactor(i / fine.width) *
+            val sw = 0.75 * physics.solarPeakWm2 * dailySunlight[i / fine.width] *
                 (1 - albedo[i]) * (1 - 0.25 * cover)
             val lapse = ColumnThermodynamics.LAPSE_K_PER_METER * elevation[i]
             val potential = max(0.0, old - 258.15) / 30 * (1 - humidity) *
@@ -157,11 +169,11 @@ internal class ReducedClimate(
                 max(0.0, old - 273.15) * heatCapacity[i] * 0.05
             evaporation[i] = surface.evaporate(i, min(potential, availableEnergy / physics.latentHeatJkg))
             val latent = evaporation[i] * physics.latentHeatJkg / seconds
-            val forcing = sw - latent - 203.0 - 3.0 * lapse
-            val equilibriumC = forcing / 3.0
+            val forcing = sw - latent - 100.0 - 2.0 * lapse
+            val equilibriumC = forcing / 2.0
             var nextC = old - 273.15 + (equilibriumC - (old - 273.15)) *
-                relaxationFraction(3.0 * seconds / heatCapacity[i])
-            if (nextC > 0 && surface.snowMmInCell(i) > 0) {
+                relaxationFraction(2.0 * seconds / heatCapacity[i])
+            if (nextC > 0) {
                 val melt = surface.meltSnowEnergyMm(i, nextC * heatCapacity[i])
                 val energy = melt * 334000.0
                 nextC -= energy / heatCapacity[i]
@@ -176,7 +188,7 @@ internal class ReducedClimate(
             }
             atmosphere.surfaceThermalState[i] = (nextC + 273.15).coerceIn(180.0, 340.0)
             shortwaveJoules += sw * seconds * fine.cellArea
-            outgoingJoules += (203 + 3.0 * (0.5 * (old + atmosphere.surfaceThermalState[i]) - 273.15 + lapse)) * seconds * fine.cellArea
+            outgoingJoules += (100 + 2.0 * (0.5 * (old + atmosphere.surfaceThermalState[i]) - 273.15 + lapse)) * seconds * fine.cellArea
             latentJoules += latent * seconds * fine.cellArea
             potentialMm += potential; actualMm += evaporation[i]
         }
@@ -184,48 +196,51 @@ internal class ReducedClimate(
         return evaporation
     }
 
-    fun condense(rainMm: DoubleArray, seconds: Double) {
-        grid.restrict(rainMm, rain)
-        grid.prolongUniform(rain, fineHeat)
-        for (i in rainMm.indices) {
-            val heat = fineHeat[i] * physics.latentHeatJkg
-            atmosphere.surfaceThermalState[i] = (atmosphere.surfaceThermalState[i] + heat / heatCapacity[i]).coerceAtMost(340.0)
-        }
+    /** Condensation heats the free atmosphere, not the ocean/root-zone slab.
+     * Its released energy is reported as convective heat export. Adding it here
+     * creates a warm-low → rain → warmer-ocean feedback. No extra air layer is
+     * needed for this surface energy balance approximation.
+     */
+    fun finishExchange(seconds: Double) {
         mixHeat(seconds / 2)
         refreshAir()
     }
 
-    private fun mixHeat(seconds: Double) {
-        grid.restrict(heatCapacity, coarseCapacity)
-        for (i in fineHeat.indices) fineHeat[i] = (atmosphere.surfaceThermalState[i] +
-            ColumnThermodynamics.LAPSE_K_PER_METER * elevation[i]) * heatCapacity[i]
-        grid.restrict(fineHeat, seaLevelK)
-        for (i in seaLevelK.indices) seaLevelK[i] /= coarseCapacity[i]
-        // Exact two-reservoir exchanges are conservative and stable at seasonal steps.
-        // Alternate traversal to suppress splitting bias; no global heat pool.
-        repeat(4) { sweep ->
-            for (index in seaLevelK.indices) {
-                val i = if (sweep % 2 == 0) index else seaLevelK.lastIndex - index
-                val x = i % config.width; val y = i / config.width
-                fun face(j: Int, distance: Double) {
-                    val inverseCapacity = 1 / coarseCapacity[i] + 1 / coarseCapacity[j]
-                    val response = relaxationFraction(1.5e13 / (distance * distance) * inverseCapacity * seconds / 4)
-                    val heat = (seaLevelK[j] - seaLevelK[i]) * response / inverseCapacity
-                    seaLevelK[i] += heat / coarseCapacity[i]; seaLevelK[j] -= heat / coarseCapacity[j]
+    /** Horizontal atmospheric eddy heat transport, K=500,000 m²/s. At the native
+     * 1,000 km scale heat transport takes ~23 days. Use the same
+     * flux on every fine face: no coarse-cell homogenization or subgrid reset.
+     * Exact pair exchange preserves sensible heat at land/ocean contacts.
+     */
+    internal fun mixHeat(seconds: Double) {
+        for (i in fineHeat.indices) fineHeat[i] = atmosphere.surfaceThermalState[i] +
+            ColumnThermodynamics.LAPSE_K_PER_METER * elevation[i]
+        // Capacity depends only on fixed land/ocean fractions. Cache face
+        // responses for repeated ten-day phases; vegetation changes only albedo.
+        if (seconds != heatExchangeSeconds) {
+            val conductivity = physics.referenceDryColumnKgM2 * physics.airHeatCapacityJkgK * 500_000.0
+            for (i in fineHeat.indices) {
+                fun coefficient(j: Int, distance: Double): Double {
+                    val inverseCapacity = inverseHeatCapacity[i] + inverseHeatCapacity[j]
+                    return relaxationFraction(conductivity / (distance * distance) * inverseCapacity * seconds / 2) / inverseCapacity
                 }
-                face(y * config.width + (x + 1) % config.width, config.dx)
-                if (y + 1 < config.height) face(i + config.width, config.dy)
+                heatEastExchange[i] = coefficient(heatEastCell[i], fine.dx)
+                if (heatNorthCell[i] >= 0) heatNorthExchange[i] = coefficient(heatNorthCell[i],fine.dy)
+            }
+            heatExchangeSeconds = seconds
+        }
+        repeat(2) { sweep ->
+            for (index in fineHeat.indices) {
+                val i = if (sweep == 0) index else fineHeat.lastIndex - index
+                fun face(j: Int, coefficient: Double) {
+                    val heat = (fineHeat[j] - fineHeat[i]) * coefficient
+                    fineHeat[i] += heat * inverseHeatCapacity[i]; fineHeat[j] -= heat * inverseHeatCapacity[j]
+                }
+                face(heatEastCell[i],heatEastExchange[i])
+                if (heatNorthCell[i] >= 0) face(heatNorthCell[i],heatNorthExchange[i])
             }
         }
-        grid.prolongUniform(seaLevelK, fineHeat)
-        // Mix unresolved subcolumns as well as neighbouring climate cells. Without
-        // this, warm valleys and cold peaks in one cell never exchange any heat.
-        val subgridResponse = relaxationFraction(seconds / (2 * 86400.0))
-        for (i in fineHeat.indices) {
-            val old = atmosphere.surfaceThermalState[i]
-            atmosphere.surfaceThermalState[i] = old + subgridResponse *
-                (fineHeat[i] - ColumnThermodynamics.LAPSE_K_PER_METER * elevation[i] - old)
-        }
+        for (i in fineHeat.indices) atmosphere.surfaceThermalState[i] = fineHeat[i] -
+            ColumnThermodynamics.LAPSE_K_PER_METER * elevation[i]
     }
 
     /** Upwind face fluxes use the very same wind published to the world. CFL accounts
@@ -251,7 +266,7 @@ internal class ReducedClimate(
             northPositive[i] = max(0.0, v); northNegative[i] = min(0.0, v)
             latentResponse[i] = physics.latentHeatJkg / coarseCapacity[i]
             val ascent = geography.upliftMetersPerSecond(i, east[i], north[i])
-            val residence = min(86400.0, min(config.dx, config.dy) / max(1.0, hypot(east[i], north[i])))
+            val residence = min(21600.0, min(config.dx, config.dy) / max(1.0, hypot(east[i], north[i])))
             val convergence = -((east[e] - east[w]) / (2 * config.dx) + (north[n] - north[s]) / (2 * config.dy))
             val convectiveLift = max(0.0, airTemperatureK[i] - 273.15) * 10.0
             val lift = min(2500.0, ascent * residence + max(0.0, convergence) * residence * 1500.0 + convectiveLift)
