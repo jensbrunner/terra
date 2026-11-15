@@ -2,7 +2,7 @@ package terra.hydrology
 
 import kotlin.math.*
 
-/** Allocation-free root-zone balance driven by atlas rainfall and PET.
+/** Allocation-free root-zone balance driven by atmospheric rain and evaporation.
  * Results are overwritten on each advance; callers own the persistent inventories.
  * PET is netted against infiltrated water and existing soil within the interval.
  * Remaining input drains analytically toward field capacity, spilling at saturation.

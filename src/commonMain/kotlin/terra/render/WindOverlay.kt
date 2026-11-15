@@ -72,27 +72,12 @@ internal class WindOverlay {
         override fun getLocalBoundsInternal() = getVisibleLocalArea()
     }
     private val arrows = Graphics(renderer = GraphicsRenderer.GPU).addTo(view)
-    private var samples = DoubleArray(0)
     fun viewportChanged() { view.invalidateRender() }
     fun update(weather: EnvironmentSnapshot) {
-        val columns = (8 until weather.width step 16).count()
-        val rows = (6 until weather.height step 12).count()
-        val size = columns * rows * 3
-        var changed = samples.size != size
-        if (changed) samples = DoubleArray(size)
-        var index = 0
-        for (y in 6 until weather.height step 12) for (x in 8 until weather.width step 16) {
-            val u = weather.windUTilesPerDay(x, y); val v = weather.windVTilesPerDay(x, y)
-            val speed = weather.windSpeedMetersPerSecond(x, y)
-            if (samples[index] != u || samples[index + 1] != v || samples[index + 2] != speed) changed = true
-            samples[index++] = u; samples[index++] = v; samples[index++] = speed
-        }
-        if (!changed) return
         arrows.updateShape {
-            var i = 0
             for (y in 6 until weather.height step 12) for (x in 8 until weather.width step 16) {
-                WindGlyph.draw(this, x + 0.5, y + 0.5, samples[i], samples[i + 1], samples[i + 2])
-                i += 3
+                WindGlyph.draw(this, x + 0.5, y + 0.5, weather.windEastMetersPerSecond(x, y),
+                    weather.windSouthMetersPerSecond(x, y), weather.windSpeedMetersPerSecond(x, y))
             }
         }
     }

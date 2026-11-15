@@ -5,152 +5,85 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 actual class SimulationWorker actual constructor(request: WorldRequest) {
-    private data class Controls(val revision: Long, val speed: SimulationSpeed, val paused: Boolean, val resetPending: Boolean = false)
-    private data class WorkerFailure(val generation: Long, val message: String)
+    private data class Controls(val speed: SimulationSpeed, val paused: Boolean)
     private val running = AtomicBoolean(true)
     private val desiredWorld = AtomicReference(request)
-    private val terrainEdits = AtomicReference<Pair<Long, List<TerrainElevationEdit>>?>(null)
-    private val desiredControls = AtomicReference(Controls(0, SimulationSpeed.ONE_HOUR, false))
+    private val controls = AtomicReference(Controls(SimulationSpeed.ONE_HOUR, false))
     private val mailbox = AtomicReference<WorldPresentationSnapshot?>()
-    private val error = AtomicReference<WorkerFailure?>()
+    private val error = AtomicReference<String?>()
     private val wake = Object()
-    private val worker = thread(name = "terra-simulation", isDaemon = true) { runSimulation() }
 
-    actual val failure: String? get() = error.get()?.takeIf { it.generation == desiredWorld.get().generation }?.message
-    actual val isRunning: Boolean get() = worker.isAlive
+    init { thread(name = "terra-simulation", isDaemon = true) { runSimulation() } }
+
+    actual val failure: String? get() = error.get()
     actual fun latestSnapshot(): WorldPresentationSnapshot? = mailbox.get()
-    actual fun updateControls(speed: SimulationSpeed, paused: Boolean, resetPending: Boolean): Long {
-        val revision = desiredControls.updateAndGet {
-            it.copy(revision = it.revision + 1, speed = speed, paused = paused, resetPending = resetPending)
-        }.revision
-        signal()
-        return revision
-    }
-    /** Coalesce coordinates before the next owner transaction; stale generations are discarded. */
-    actual fun editTerrain(edits: List<TerrainElevationEdit>) {
-        val request = desiredWorld.get()
-        require(edits.all { it.x in 0 until request.width && it.y in 0 until request.height && it.elevation.isFinite() && it.elevation in 0.0..1.0 })
-        terrainEdits.updateAndGet { previous ->
-            val combined = (if (previous?.first == request.generation) previous.second else emptyList()) + edits
-            request.generation to combined.associateBy { it.y * request.width + it.x }.values.toList()
-        }
-        signal()
+    actual fun updateControls(speed: SimulationSpeed, paused: Boolean) {
+        controls.set(Controls(speed, paused)); signal()
     }
     actual fun regenerate(request: WorldRequest) {
-        while (true) {
-            val current = desiredWorld.get()
-            require(request.generation > current.generation)
-            if (desiredWorld.compareAndSet(current, request)) break
-        }
-        error.set(null)
-        signal()
+        desiredWorld.set(request); error.set(null); signal()
     }
-    private fun signal() { synchronized(wake) { wake.notifyAll() } }
     actual fun close() { running.set(false); signal() }
-    private fun idle(milliseconds: Long = 5) { synchronized(wake) { if (running.get()) wake.wait(milliseconds) } }
+    private fun signal() { synchronized(wake) { wake.notifyAll() } }
 
     private fun runSimulation() {
         var owner: WorldSimulation? = null
-        var demand = SimulationDemand(1.0)
-        var quantumSeconds = 1.0
-        var active = desiredControls.get()
-        var failedGeneration = -1L
-        var revision = 0L
+        var active = controls.get()
+        var pending = 0.0
         var previousWall = System.nanoTime()
         var publishedAt = 0L
         var rateStarted = previousWall
         var rateStartSim = 0.0
         var achieved = 0.0
-        var advanceNanos = 0L
-        var publicationNanos = 0L
-        var transactions = 0L
+        var failedGeneration = -1L
         while (running.get()) {
             val requested = desiredWorld.get()
-            if (requested.generation == failedGeneration) { idle(); continue }
             try {
-                var forcePublish = false
-                if (owner?.request?.generation != requested.generation) {
-                    val created = WorldSimulation(requested)
-                    if (!running.get()) break
-                    if (desiredWorld.get().generation != requested.generation) continue
-                    owner = created
-                    demand = SimulationDemand(quantumSeconds)
-                    active = desiredControls.get()
-                    demand.controls(active.speed, active.paused, stepSeconds = quantumSeconds)
-                    previousWall = System.nanoTime()
-                    rateStarted = previousWall; rateStartSim = 0.0; achieved = 0.0
-                    publishedAt = 0L; revision = 0L
-                    advanceNanos = 0L; publicationNanos = 0L; transactions = 0L
-                    forcePublish = true
+                if (requested.generation != failedGeneration) {
+                    var changed = false
+                    if (owner?.request != requested) {
+                        owner = WorldSimulation(requested)
+                        pending = 0.0; achieved = 0.0; rateStartSim = 0.0
+                        previousWall = System.nanoTime(); rateStarted = previousWall
+                        changed = true
+                    }
+                    val simulation = owner!!
+                    val now = System.nanoTime()
+                    val command = controls.get()
+                    // Bound backlog and individual transactions so pause/rebuild stay responsive.
+                    val quantum = (command.speed.simulatedSecondsPerRealSecond * 0.05).coerceIn(1.0, 10.0)
+                    val limit = quantum * 2
+                    if (!active.paused) pending = minOf(limit, pending + (now - previousWall) / 1e9 * active.speed.simulatedSecondsPerRealSecond)
+                    previousWall = now
+                    if (command != active) {
+                        active = command; pending = 0.0; achieved = 0.0
+                        rateStarted = now; rateStartSim = simulation.completedSeconds
+                        changed = true
+                    }
+                    if (!active.paused && pending >= quantum) {
+                        simulation.advance(quantum)
+                        pending -= quantum
+                    }
+                    val finished = System.nanoTime()
+                    if (finished - rateStarted >= 1_000_000_000L) {
+                        achieved = (simulation.completedSeconds - rateStartSim) / ((finished - rateStarted) / 1e9)
+                        rateStarted = finished; rateStartSim = simulation.completedSeconds
+                    }
+                    if ((changed || finished - publishedAt >= 200_000_000L) && desiredWorld.get() == requested && running.get()) {
+                        val progress = SimulationProgress(requested.generation, simulation.completedSeconds,
+                            if (active.paused) 0.0 else achieved, pending, active.paused, quantum,
+                            !active.paused && achieved > 0 && achieved < active.speed.simulatedSecondsPerRealSecond * 0.9)
+                        val previous = mailbox.get()
+                        mailbox.set(if (!changed && previous?.progress?.completedSeconds == simulation.completedSeconds)
+                            previous.copy(progress = progress) else simulation.snapshot(progress))
+                        publishedAt = finished
+                    }
                 }
-                val simulation = owner!!
-                val edits = terrainEdits.getAndSet(null)
-                val geometryEdited = edits?.first == requested.generation && !edits.second.isEmpty()
-                if (geometryEdited) {
-                    simulation.editTerrain(edits!!.second)
-                    forcePublish = true
-                }
-                val now = System.nanoTime()
-                val command = desiredControls.get()
-                // Account elapsed work under the controls that were actually active.
-                demand.request((now - previousWall) / 1e9)
-                previousWall = now
-                var resetPending = false
-                if (command.revision != active.revision) {
-                    active = command
-                    resetPending = active.resetPending
-                    rateStarted = now; rateStartSim = simulation.completedSeconds; achieved = 0.0
-                    forcePublish = true
-                }
-                quantumSeconds = (active.speed.simulatedSecondsPerRealSecond * 0.05)
-                    .coerceIn(1.0, requested.solar.yearSeconds)
-                demand.controls(active.speed, active.paused, resetPending, quantumSeconds)
-                val deadline = now + 5_000_000L
-                var work = 0
-                while (running.get() && !active.paused && work < 4 && System.nanoTime() < deadline &&
-                    desiredWorld.get().generation == requested.generation && desiredControls.get().revision == active.revision &&
-                    demand.pendingSeconds >= quantumSeconds) {
-                    val started = System.nanoTime()
-                    val consumed = minOf(demand.pendingSeconds, requested.solar.yearSeconds)
-                    simulation.advance(consumed)
-                    demand.consume(consumed)
-                    val finishedWork = System.nanoTime()
-                    val cost = finishedWork - started
-                    advanceNanos += cost
-                    transactions++
-                    work++
-                }
-                val finished = System.nanoTime()
-                val rateWindow = maxOf(0.5, minOf(20.0, quantumSeconds / active.speed.simulatedSecondsPerRealSecond))
-                if ((finished - rateStarted) / 1e9 >= rateWindow) {
-                    achieved = if (active.paused) 0.0 else
-                        (simulation.completedSeconds - rateStartSim) / ((finished - rateStarted) / 1e9)
-                    rateStarted = finished; rateStartSim = simulation.completedSeconds
-                }
-                val publicationPeriod = 200_000_000L
-                if (running.get() && (forcePublish || finished - publishedAt >= publicationPeriod) && desiredWorld.get().generation == requested.generation) {
-                    val progress = SimulationProgress(requested.generation, ++revision, active.revision,
-                        simulation.completedSeconds, active.speed, if (active.paused) 0.0 else achieved,
-                        demand.pendingSeconds, demand.unservedSeconds, demand.limitSeconds, active.paused,
-                        advanceNanos / 1e9, publicationNanos / 1e9, transactions, quantumSeconds)
-                    val started = System.nanoTime()
-                    val previous = mailbox.get()
-                    val snapshot = if (previous?.progress?.generation == requested.generation &&
-                        previous.progress.completedSeconds == simulation.completedSeconds && previous.progress.paused == active.paused &&
-                        !geometryEdited)
-                        previous.copy(progress = progress)
-                    else simulation.snapshot(progress)
-                    publicationNanos += System.nanoTime() - started
-                    if (running.get() && desiredWorld.get().generation == requested.generation) mailbox.set(snapshot.copy(progress = progress.copy(publicationWallSeconds = publicationNanos / 1e9)))
-                    // Count synthesis time in the cadence and visual elapsed time.
-                    publishedAt = finished
-                }
-                idle(if (work == 0 || active.paused) 5 else 1)
-            } catch (failure: Throwable) {
-                // Never retry a partly failed physical transaction or publish its mutable state.
-                error.set(WorkerFailure(requested.generation, failure.message ?: failure.toString()))
+            } catch (failure: Exception) {
+                if (desiredWorld.get() == requested) error.set(failure.message ?: failure.toString())
                 failedGeneration = requested.generation
             }
+            synchronized(wake) { if (running.get()) wake.wait(5) }
         }
     }
 }

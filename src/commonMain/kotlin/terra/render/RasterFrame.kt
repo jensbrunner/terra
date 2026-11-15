@@ -4,7 +4,6 @@ import korlibs.image.color.RGBA
 
 /** Completed CPU raster. Ownership of pixels transfers here; callers can only read or copy. */
 class RasterFrame internal constructor(val width: Int, val height: Int, private val pixels: IntArray) {
-    operator fun get(x: Int, y: Int): RGBA = RGBA(pixels[y * width + x])
     fun copyInto(destination: IntArray) { require(destination.size == pixels.size); pixels.copyInto(destination) }
 }
 

@@ -4,8 +4,7 @@ import terra.world.World
 import kotlin.math.*
 
 /** Fixed drainage graph, three slow stores: groundwater, channels and lakes.
- * Amounts are mm × terrain tiles. Routing is analytical at six-hour or longer
- * intervals; coarse climate phases do not need channel travel-time substeps.
+ * Amounts are mm × terrain tiles. Routing is analytical at six-hour intervals.
  * Only water reaching an ocean tile is returned as boundary export.
  */
 internal class SurfaceWater(world: World, initialGroundwaterMm: Double = 0.0, initialLakeFraction: Double = 0.0) {
@@ -47,42 +46,7 @@ internal class SurfaceWater(world: World, initialGroundwaterMm: Double = 0.0, in
         refreshLakes()
     }
 
-    /** Rebuild drainage topology after edits, retaining tile inventories and redistributing
-     * old lakes onto their former tiles. Water on new ocean is an explicit export. */
-    fun migrateFrom(old: SurfaceWater): Double {
-        val inventories = DoubleArray(count) { old.groundwater[it] + old.channels[it] + old.recharge[it] + old.runoff[it] }
-        for (lake in old.basins) {
-            val tiles = lake.candidate.tileIndices
-            for (tile in tiles) inventories[tile] += lake.water / tiles.size
-        }
-        groundwater.fill(0.0); channels.fill(0.0); recharge.fill(0.0); runoff.fill(0.0)
-        for (lake in basins) lake.water = 0.0
-        var exported = 0.0
-        for (i in 0 until count) {
-            if (!geography.land[i]) exported += inventories[i]
-            else if (lakeIds[i] >= 0) basins[lakeIds[i]].water += inventories[i]
-            else groundwater[i] = inventories[i]
-        }
-        refreshLakes(); revision++
-        return exported
-    }
-
     val totalWaterMmTiles get() = groundwater.sum() + channels.sum() + recharge.sum() + runoff.sum() + basins.sumOf { it.water }
-    internal class State(val groundwater: DoubleArray, val channels: DoubleArray, val recharge: DoubleArray,
-        val runoff: DoubleArray, val lakes: DoubleArray, val discharge: DoubleArray, val pendingSeconds: Double)
-
-    internal fun captureState() = State(groundwater.copyOf(), channels.copyOf(), recharge.copyOf(),
-        runoff.copyOf(), DoubleArray(basins.size) { basins[it].water }, discharge.copyOf(), pendingSeconds)
-
-    internal fun restoreState(state: State) {
-        state.groundwater.copyInto(groundwater); state.channels.copyInto(channels)
-        state.recharge.copyInto(recharge); state.runoff.copyInto(runoff)
-        state.discharge.copyInto(discharge)
-        for (i in basins.indices) basins[i].water = state.lakes[i]
-        pendingSeconds = state.pendingSeconds
-        refreshLakes(); revision++
-    }
-
     fun groundwaterMmAt(tile: Int) = groundwater[tile] + recharge[tile]
     fun lakeWaterMmTiles(id: Int) = basins[id].water
     fun receive(tile: Int, drainage: Double, overflow: Double) {
@@ -163,8 +127,7 @@ internal class SurfaceWater(world: World, initialGroundwaterMm: Double = 0.0, in
     fun snapshot(): SurfaceWaterSnapshot {
         if (published == null || revision != publishedRevision) {
             published = SurfaceWaterSnapshot(geography, wet.copyOf(), discharge.copyOf(),
-                DoubleArray(count) { groundwaterMmAt(it) }, channels.copyOf(),
-                DoubleArray(basins.size) { basins[it].water }, revision)
+                revision)
             publishedRevision = revision
         }
         return published!!
@@ -206,15 +169,11 @@ internal class SurfaceWaterGeography(
 
 class SurfaceWaterSnapshot internal constructor(
     private val geography: SurfaceWaterGeography, private val wet: BooleanArray,
-    private val discharge: DoubleArray, private val groundwater: DoubleArray,
-    private val channels: DoubleArray, private val lakes: DoubleArray, val revision: Long
+    private val discharge: DoubleArray, val revision: Long
 ) {
     val width get() = geography.width
     val height get() = geography.height
     private fun index(x: Int, y: Int) = y * width + x
-    fun groundwaterMm(x: Int, y: Int) = groundwater[index(x, y)]
-    fun channelWaterMm(x: Int, y: Int) = channels[index(x, y)]
-    fun lakeWaterMmTiles(id: Int) = lakes[id]
     fun isLandTile(x: Int, y: Int) = geography.land[index(x, y)]
     fun downstreamTileIndex(x: Int, y: Int) = geography.downstream[index(x, y)]
     fun upstreamLandTileCount(x: Int, y: Int) = geography.upstream[index(x, y)]

@@ -21,10 +21,9 @@ class TerrainSettingsPanel(
     private val onSettingsChanged: (TerrainGenerationSettings) -> Unit,
     private val onOpen: () -> Unit = {}
 ) {
-    private val draft = TerrainSettingsDraft(initialSettings)
-    private var settings: TerrainGenerationSettings
-        get() = draft.current
-        set(value) { draft.current = value }
+    private var settings = initialSettings
+    private var applied = initialSettings
+    private val dirty get() = settings != applied
     private var tab = 0
     private val tabs = mutableListOf<AtlasButton>()
     private val overlay = parent.container { visible = false }
@@ -54,10 +53,11 @@ class TerrainSettingsPanel(
             settings = TerrainGenerationSettings(); renderTab(); refreshPendingChanges()
         }
         discard = AtlasButton(panel, font, "Discard edits", 140.0, 660.0, 140.0) {
-            draft.discard(); renderTab(); refreshPendingChanges()
+            settings = applied; renderTab(); refreshPendingChanges()
         }
         apply = AtlasButton(panel, font, "Apply & rebuild world", 572.0, 656.0, 240.0, 40.0) {
-            draft.commit()?.let(onSettingsChanged)
+            applied = settings
+            onSettingsChanged(settings)
             refreshPendingChanges()
             closeMenus()
         }
@@ -80,13 +80,6 @@ class TerrainSettingsPanel(
         }
     }
     fun updateBiomeSummary(value: String) { summary.text = value }
-
-    internal fun prepareReview(index: Int, edited: Boolean = false) {
-        tab = index
-        if (edited) settings = settings.copy(erosionStrength = 0.65)
-        renderTab(); refreshPendingChanges()
-        if (!overlay.visible) toggle()
-    }
 
     private fun elevationSliders() = listOf(
         slider("Base elevation", { it.baseElevation }, 0.0, 0.8, 0.01, 2) { s, v -> s.copy(baseElevation = v) },
@@ -137,11 +130,11 @@ class TerrainSettingsPanel(
     }
 
     private fun refreshPendingChanges() {
-        pending.text = if (draft.dirty) "Unapplied changes · rebuilding restarts the world and its clock."
+        pending.text = if (dirty) "Unapplied changes · rebuilding restarts the world and its clock."
             else "No changes · close this panel to keep exploring."
-        pending.color = if (draft.dirty) AtlasUi.warm else AtlasUi.muted
-        apply.enabled = draft.dirty; apply.selected = draft.dirty
-        discard.enabled = draft.dirty
+        pending.color = if (dirty) AtlasUi.warm else AtlasUi.muted
+        apply.enabled = dirty; apply.selected = dirty
+        discard.enabled = dirty
     }
 }
 

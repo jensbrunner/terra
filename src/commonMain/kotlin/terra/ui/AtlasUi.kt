@@ -37,9 +37,6 @@ internal class AtlasButton(parent: Container, font: SystemFont, label: String,
         set(value) { if (field != value) { field = value; refresh() } }
     var enabled = true
         set(value) { if (field != value) { field = value; refresh() } }
-    var text: String
-        get() = caption.text
-        set(value) { caption.text = value }
 
     init {
         view.mouse {

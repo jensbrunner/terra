@@ -82,7 +82,6 @@ class HydrologyTopology internal constructor(
         )
         processingOrder = buildProcessingOrder()
         buildUpstreamLandArea()
-        verifyProcessingOrder()
     }
 
     fun isLandTile(tileIndex: Int): Boolean = !oceanByTile[tileIndex]
@@ -108,7 +107,6 @@ class HydrologyTopology internal constructor(
         val queue = IntArray(count)
         val distances = IntArray(count)
         val basinOwner = IntArray(count) { -1 }
-        val nextTileInBasin = IntArray(count) { -1 }
         val candidates = ArrayList<LakeCandidate>()
         var group = 0
 
@@ -189,7 +187,6 @@ class HydrologyTopology internal constructor(
                         externalDownstreamTile = exitDownstream,
                         externalSpillElevation = exitSaddle,
                         basinOwner = basinOwner,
-                        nextTileInBasin = nextTileInBasin,
                         distances = distances,
                         queue = queue,
                         candidates = candidates
@@ -201,331 +198,96 @@ class HydrologyTopology internal constructor(
         return candidates
     }
 
-    /** Split one compound depression into downhill catchments joined at explicit saddle edges. */
+    private data class Saddle(val from: Int, val to: Int, val tile: Int, val neighbor: Int, val height: Double)
+
+    /** Keep local basins separate, connecting them by a minimum spanning tree of saddles. */
     private fun buildSubBasins(
-        tiles: IntArray,
-        grouped: IntArray,
-        group: Int,
-        elevation: DoubleArray,
-        externalExitTile: Int,
-        externalDownstreamTile: Int,
-        externalSpillElevation: Double,
-        basinOwner: IntArray,
-        nextTileInBasin: IntArray,
-        distances: IntArray,
-        queue: IntArray,
+        tiles: IntArray, grouped: IntArray, group: Int, elevation: DoubleArray,
+        externalExitTile: Int, externalDownstreamTile: Int, externalSpillElevation: Double,
+        basinOwner: IntArray, distances: IntArray, queue: IntArray,
         candidates: MutableList<LakeCandidate>
     ) {
-        val elevationOrder = tiles.copyOf()
-        sortTilesByElevation(elevationOrder, elevation)
-        var basinCount = 0
-
-        // Strictly descend by elevation, breaking flats toward the lower row-major index.
-        for (tile in elevationOrder) {
-            val x = tile % width
-            val y = tile / width
-            var lowerNeighbor = -1
-            for (dy in -1..1) for (dx in -1..1) {
-                if (dx == 0 && dy == 0) continue
-                val nx = (x + dx + width) % width
-                val ny = y + dy
-                if (ny !in 0 until height) continue
-                val neighbor = ny * width + nx
-                if (grouped[neighbor] != group) continue
-                val lower = elevation[neighbor] < elevation[tile] ||
-                    (elevation[neighbor] == elevation[tile] && neighbor < tile)
-                if (!lower) continue
-                if (lowerNeighbor < 0 || elevation[neighbor] < elevation[lowerNeighbor] ||
-                    (elevation[neighbor] == elevation[lowerNeighbor] && neighbor < lowerNeighbor)
-                ) lowerNeighbor = neighbor
+        val basins = mutableListOf<MutableList<Int>>()
+        for (tile in tiles.sortedWith(compareBy<Int> { elevation[it] }.thenBy { it })) {
+            var lower = -1
+            neighbors(tile) { next ->
+                if (grouped[next] == group && (elevation[next] < elevation[tile] ||
+                        elevation[next] == elevation[tile] && next < tile) &&
+                    (lower < 0 || elevation[next] < elevation[lower] || elevation[next] == elevation[lower] && next < lower)) lower = next
             }
-            if (lowerNeighbor >= 0) {
-                basinOwner[tile] = basinOwner[lowerNeighbor]
-            } else {
-                basinOwner[tile] = basinCount
-                basinCount++
-            }
+            if (lower < 0) basins.add(mutableListOf())
+            val owner = if (lower < 0) basins.lastIndex else basinOwner[lower]
+            basinOwner[tile] = owner
+            basins[owner].add(tile)
         }
-        check(basinCount > 0) { "Every depression must contain a local minimum" }
-
-        val basinSizes = IntArray(basinCount)
-        val basinMinimumElevation = DoubleArray(basinCount) { Double.POSITIVE_INFINITY }
-        val basinHeads = IntArray(basinCount) { -1 }
-        for (tile in tiles) {
-            val basin = basinOwner[tile]
-            basinSizes[basin]++
-            basinMinimumElevation[basin] = minOf(basinMinimumElevation[basin], elevation[tile])
-            nextTileInBasin[tile] = basinHeads[basin]
-            basinHeads[basin] = tile
+        val edges = mutableListOf<Saddle>()
+        for (tile in tiles) neighbors(tile) { next ->
+            if (next > tile && grouped[next] == group && basinOwner[tile] != basinOwner[next])
+                edges.add(Saddle(basinOwner[tile], basinOwner[next], tile, next, max(elevation[tile], elevation[next])))
         }
-
-        val edgeCapacity = tiles.size * 4
-        val edgeFromBasin = IntArray(edgeCapacity)
-        val edgeToBasin = IntArray(edgeCapacity)
-        val edgeFromTile = IntArray(edgeCapacity)
-        val edgeToTile = IntArray(edgeCapacity)
-        val edgeSaddle = DoubleArray(edgeCapacity)
-        var edgeCount = 0
-        for (tile in tiles) {
-            val x = tile % width
-            val y = tile / width
-            for (dy in -1..1) for (dx in -1..1) {
-                if (dy < 0 || (dy == 0 && dx <= 0)) continue
-                if (dx == 0 && dy == 0) continue
-                val nx = (x + dx + width) % width
-                val ny = y + dy
-                if (ny !in 0 until height) continue
-                val neighbor = ny * width + nx
-                if (grouped[neighbor] != group) continue
-                val from = basinOwner[tile]
-                val to = basinOwner[neighbor]
-                if (from == to) continue
-                edgeFromBasin[edgeCount] = from
-                edgeToBasin[edgeCount] = to
-                edgeFromTile[edgeCount] = tile
-                edgeToTile[edgeCount] = neighbor
-                edgeSaddle[edgeCount] = max(elevation[tile], elevation[neighbor])
-                edgeCount++
-            }
+        edges.sortWith(compareBy<Saddle> { it.height }.thenBy { minOf(it.from, it.to) }
+            .thenBy { maxOf(it.from, it.to) }.thenBy { it.tile }.thenBy { it.neighbor })
+        val sets = IntArray(basins.size) { it }
+        fun root(start: Int): Int {
+            var i = start
+            while (sets[i] != i) { sets[i] = sets[sets[i]]; i = sets[i] }
+            return i
         }
-
+        val tree = Array(basins.size) { mutableListOf<Saddle>() }
+        for (edge in edges) {
+            val a = root(edge.from); val b = root(edge.to)
+            if (a == b) continue
+            sets[a] = b
+            tree[edge.from].add(edge); tree[edge.to].add(edge)
+        }
         val rootBasin = basinOwner[externalExitTile]
-        val parentSet = IntArray(basinCount) { it }
-        val setRank = IntArray(basinCount)
-        val edgeOrder = IntArray(edgeCount) { it }
-        sortSaddleEdges(edgeOrder, edgeSaddle, edgeFromBasin, edgeToBasin, edgeFromTile, edgeToTile)
-
-        val mstHead = IntArray(basinCount) { -1 }
-        val mstTo = IntArray(max(0, 2 * (basinCount - 1)))
-        val mstEdge = IntArray(mstTo.size)
-        val mstNext = IntArray(mstTo.size) { -1 }
-        var mstArcCount = 0
-        var acceptedEdges = 0
-        for (edge in edgeOrder) {
-            val leftRoot = findSet(edgeFromBasin[edge], parentSet)
-            val rightRoot = findSet(edgeToBasin[edge], parentSet)
-            if (leftRoot == rightRoot) continue
-            unionSets(leftRoot, rightRoot, parentSet, setRank)
-            mstTo[mstArcCount] = edgeToBasin[edge]
-            mstEdge[mstArcCount] = edge
-            mstNext[mstArcCount] = mstHead[edgeFromBasin[edge]]
-            mstHead[edgeFromBasin[edge]] = mstArcCount++
-            mstTo[mstArcCount] = edgeFromBasin[edge]
-            mstEdge[mstArcCount] = edge
-            mstNext[mstArcCount] = mstHead[edgeToBasin[edge]]
-            mstHead[edgeToBasin[edge]] = mstArcCount++
-            acceptedEdges++
-            if (acceptedEdges == basinCount - 1) break
-        }
-        check(acceptedEdges == basinCount - 1) { "Depression catchments must connect by saddle edges" }
-
-        val basinParent = IntArray(basinCount) { -2 }
-        val parentEdge = IntArray(basinCount) { -1 }
-        var queueHead = 0
-        var queueTail = 0
-        basinParent[rootBasin] = -1
-        queue[queueTail++] = rootBasin
-        while (queueHead < queueTail) {
-            val basin = queue[queueHead++]
-            var arc = mstHead[basin]
-            while (arc >= 0) {
-                val child = mstTo[arc]
-                if (basinParent[child] == -2) {
-                    basinParent[child] = basin
-                    parentEdge[child] = mstEdge[arc]
-                    queue[queueTail++] = child
-                }
-                arc = mstNext[arc]
+        val exits = IntArray(basins.size) { -1 }
+        val downstream = IntArray(basins.size)
+        val spill = DoubleArray(basins.size)
+        exits[rootBasin] = externalExitTile
+        downstream[rootBasin] = externalDownstreamTile
+        spill[rootBasin] = externalSpillElevation
+        val ready = ArrayDeque<Int>()
+        ready.add(rootBasin)
+        while (ready.isNotEmpty()) {
+            val basin = ready.removeFirst()
+            for (edge in tree[basin]) {
+                val child = if (edge.from == basin) edge.to else edge.from
+                if (exits[child] >= 0) continue
+                exits[child] = if (child == edge.from) edge.tile else edge.neighbor
+                downstream[child] = if (child == edge.from) edge.neighbor else edge.tile
+                spill[child] = edge.height
+                ready.add(child)
             }
         }
-
-        val basinExitTile = IntArray(basinCount)
-        val basinDownstreamTile = IntArray(basinCount)
-        val basinSpillElevation = DoubleArray(basinCount)
-        basinExitTile[rootBasin] = externalExitTile
-        basinDownstreamTile[rootBasin] = externalDownstreamTile
-        basinSpillElevation[rootBasin] = externalSpillElevation
-        for (basin in 0 until basinCount) {
-            if (basin == rootBasin) continue
-            val edge = parentEdge[basin]
-            val from = edgeFromBasin[edge]
-            if (from == basin) {
-                basinExitTile[basin] = edgeFromTile[edge]
-                basinDownstreamTile[basin] = edgeToTile[edge]
-            } else {
-                basinExitTile[basin] = edgeToTile[edge]
-                basinDownstreamTile[basin] = edgeFromTile[edge]
-            }
-            basinSpillElevation[basin] = edgeSaddle[edge]
-        }
-
-        val hasReservoir = BooleanArray(basinCount)
-        var reservoirCount = 0
-        for (basin in 0 until basinCount) {
-            hasReservoir[basin] = basinSizes[basin] >= MIN_LAKE_BASIN_TILES &&
-                basinSpillElevation[basin] - basinMinimumElevation[basin] >= MIN_LAKE_DEPRESSION_DEPTH
-            if (hasReservoir[basin]) reservoirCount++
-        }
-
-        // Route every catchment toward its parent saddle; only qualifying catchments store water.
-        for (basin in 0 until basinCount) {
-            val exitTile = basinExitTile[basin]
-            var tile = basinHeads[basin]
-            while (tile >= 0) {
-                distances[tile] = -1
-                tile = nextTileInBasin[tile]
-            }
-            queueHead = 0
-            queueTail = 0
-            queue[queueTail++] = exitTile
-            distances[exitTile] = 0
-            while (queueHead < queueTail) {
-                val current = queue[queueHead++]
-                val x = current % width
-                val y = current / width
-                for (dy in -1..1) for (dx in -1..1) {
-                    if (dx == 0 && dy == 0) continue
-                    val nx = (x + dx + width) % width
-                    val ny = y + dy
-                    if (ny !in 0 until height) continue
-                    val next = ny * width + nx
-                    if (grouped[next] != group || basinOwner[next] != basin || distances[next] >= 0) continue
-                    distances[next] = distances[current] + 1
-                    queue[queueTail++] = next
-                }
-            }
-            tile = basinHeads[basin]
-            while (tile >= 0) {
-                if (tile != exitTile) {
-                    val x = tile % width
-                    val y = tile / width
-                    var parent = -1
-                    for (dy in -1..1) for (dx in -1..1) {
-                        if (dx == 0 && dy == 0) continue
-                        val nx = (x + dx + width) % width
-                        val ny = y + dy
-                        if (ny !in 0 until height) continue
-                        val next = ny * width + nx
-                        if (grouped[next] == group && basinOwner[next] == basin &&
-                            distances[next] == distances[tile] - 1 && (parent < 0 || next < parent)
-                        ) parent = next
+        for ((basin, members) in basins.withIndex()) {
+            val exit = exits[basin]
+            check(exit >= 0) { "Depression catchments must connect by saddle edges" }
+            for (tile in members) distances[tile] = -1
+            var head = 0; var tail = 0
+            queue[tail++] = exit
+            distances[exit] = 0
+            while (head < tail) {
+                val current = queue[head++]
+                neighbors(current) { next ->
+                    if (grouped[next] == group && basinOwner[next] == basin && distances[next] < 0) {
+                        distances[next] = distances[current] + 1
+                        downstreamIndex[next] = current
+                        queue[tail++] = next
                     }
-                    check(parent >= 0) { "Catchment tiles must connect to their selected saddle" }
-                    downstreamIndex[tile] = parent
                 }
-                tile = nextTileInBasin[tile]
             }
-            downstreamIndex[exitTile] = basinDownstreamTile[basin]
-        }
-
-        if (reservoirCount == 0) return
-        for (basin in 0 until basinCount) {
-            if (!hasReservoir[basin]) continue
-            val basinTiles = IntArray(basinSizes[basin])
-            var tileOffset = 0
-            var tile = basinHeads[basin]
-            while (tile >= 0) {
-                basinTiles[tileOffset++] = tile
-                tile = nextTileInBasin[tile]
-            }
-            candidates += LakeCandidate(
-                id = candidates.size,
-                tileIndices = basinTiles,
-                spillElevation = basinSpillElevation[basin],
-                exitTileIndex = basinExitTile[basin]
-            )
+            downstreamIndex[exit] = downstream[basin]
+            if (members.size >= MIN_LAKE_BASIN_TILES && spill[basin] - members.minOf { elevation[it] } >= MIN_LAKE_DEPRESSION_DEPTH)
+                candidates.add(LakeCandidate(candidates.size, members.toIntArray(), spill[basin], exit))
         }
     }
 
-    private fun findSet(value: Int, parent: IntArray): Int {
-        var root = value
-        while (parent[root] != root) root = parent[root]
-        var current = value
-        while (parent[current] != current) {
-            val next = parent[current]
-            parent[current] = root
-            current = next
-        }
-        return root
-    }
-
-    private fun unionSets(left: Int, right: Int, parent: IntArray, rank: IntArray) {
-        var leftRoot = left
-        var rightRoot = right
-        if (rank[leftRoot] < rank[rightRoot]) {
-            val swap = leftRoot
-            leftRoot = rightRoot
-            rightRoot = swap
-        }
-        parent[rightRoot] = leftRoot
-        if (rank[leftRoot] == rank[rightRoot]) rank[leftRoot]++
-    }
-
-    private fun sortTilesByElevation(tiles: IntArray, elevation: DoubleArray) {
-        fun before(left: Int, right: Int): Boolean = elevation[left] < elevation[right] ||
-            (elevation[left] == elevation[right] && left < right)
-        fun siftDown(rootStart: Int, end: Int) {
-            var root = rootStart
-            while (root * 2 + 1 <= end) {
-                val left = root * 2 + 1
-                val right = left + 1
-                var child = left
-                if (right <= end && before(tiles[left], tiles[right])) child = right
-                if (!before(tiles[root], tiles[child])) return
-                val swap = tiles[root]
-                tiles[root] = tiles[child]
-                tiles[child] = swap
-                root = child
-            }
-        }
-        for (start in tiles.size / 2 - 1 downTo 0) siftDown(start, tiles.lastIndex)
-        for (end in tiles.lastIndex downTo 1) {
-            val swap = tiles[0]
-            tiles[0] = tiles[end]
-            tiles[end] = swap
-            siftDown(0, end - 1)
-        }
-    }
-
-    private fun sortSaddleEdges(
-        order: IntArray,
-        saddle: DoubleArray,
-        fromBasin: IntArray,
-        toBasin: IntArray,
-        fromTile: IntArray,
-        toTile: IntArray
-    ) {
-        fun before(a: Int, b: Int): Boolean {
-            if (saddle[a] != saddle[b]) return saddle[a] < saddle[b]
-            val aLow = minOf(fromBasin[a], toBasin[a])
-            val bLow = minOf(fromBasin[b], toBasin[b])
-            if (aLow != bLow) return aLow < bLow
-            val aHigh = max(fromBasin[a], toBasin[a])
-            val bHigh = max(fromBasin[b], toBasin[b])
-            if (aHigh != bHigh) return aHigh < bHigh
-            if (fromTile[a] != fromTile[b]) return fromTile[a] < fromTile[b]
-            return toTile[a] < toTile[b]
-        }
-        fun siftDown(rootStart: Int, end: Int) {
-            var root = rootStart
-            while (root * 2 + 1 <= end) {
-                val left = root * 2 + 1
-                val right = left + 1
-                var child = left
-                if (right <= end && before(order[left], order[right])) child = right
-                if (!before(order[root], order[child])) return
-                val swap = order[root]
-                order[root] = order[child]
-                order[child] = swap
-                root = child
-            }
-        }
-        for (start in order.size / 2 - 1 downTo 0) siftDown(start, order.lastIndex)
-        for (end in order.lastIndex downTo 1) {
-            val swap = order[0]
-            order[0] = order[end]
-            order[end] = swap
-            siftDown(0, end - 1)
+    private inline fun neighbors(tile: Int, visit: (Int) -> Unit) {
+        val x = tile % width; val y = tile / width
+        for (dy in -1..1) for (dx in -1..1) {
+            if (dx == 0 && dy == 0 || y + dy !in 0 until height) continue
+            visit((y + dy) * width + (x + dx + width) % width)
         }
     }
 
@@ -535,13 +297,13 @@ class HydrologyTopology internal constructor(
             val downstream = downstreamIndex[tile]
             if (downstream >= 0) downstreamIncomingCount[downstream]++
         }
-        val ready = IntHeap(count) { a, b -> a < b }
+        val ready = ArrayDeque<Int>()
         for (tile in 0 until count) if (downstreamIncomingCount[tile] == 0) ready.add(tile)
 
         val order = IntArray(count)
         var orderSize = 0
         while (ready.isNotEmpty()) {
-            val tile = ready.removeMin()
+            val tile = ready.removeFirst()
             order[orderSize++] = tile
             val downstream = downstreamIndex[tile]
             if (downstream >= 0) {
@@ -551,17 +313,6 @@ class HydrologyTopology internal constructor(
         }
         check(orderSize == count) { "Drainage graph must be acyclic" }
         return order
-    }
-
-    private fun verifyProcessingOrder() {
-        val position = IntArray(count)
-        for (orderIndex in processingOrder.indices) position[processingOrder[orderIndex]] = orderIndex
-        for (tile in 0 until count) {
-            val downstream = downstreamIndex[tile]
-            check(downstream < 0 || position[tile] < position[downstream]) {
-                "Every drainage link must point later in the routing order"
-            }
-        }
     }
 
     companion object {
