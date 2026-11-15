@@ -101,10 +101,10 @@ class SeasonalClimateAtlasTest {
         assertTrue(abs(d.relativeWaterResidual) < 1e-10)
     }
 
-    @Test fun uniformTemperatureHasNoWindAndWeakRotationRemainsBounded() {
+    @Test fun uniformReferenceTemperatureHasNoWindAndWeakRotationRemainsBounded() {
         val g = ClimateGeography(continent(), config.copy(rotationRateRadiansPerSecond = 0.0))
         val east = DoubleArray(g.count); val south = DoubleArray(g.count)
-        val t = DoubleArray(g.count) { 15.0 }
+        val t = DoubleArray(g.count) { 15.0 - ClimateAtlasBuilder.TEMPERATURE_LAPSE_C_PER_M * g.elevationMeters[it] }
         val builder = ClimateAtlasBuilder()
         builder.diagnoseWinds(g, t, east, south)
         assertTrue(east.all { it == 0.0 } && south.all { it == 0.0 })
@@ -117,7 +117,7 @@ class SeasonalClimateAtlasTest {
             assertEquals(0.0, south[i], 1e-12)
         }
     }
-    @Test fun coastlinesAndMountainsChangeCirculationAndRainWithoutWindOverrides() {
+    @Test fun coastlinesDriveCirculationAndMountainsRainOutMoistureWithoutArtificialPressure() {
         val flat = ClimateAtlasBuilder().build(ClimateGeography(continent(), config))
         val ridge = ClimateAtlasBuilder().build(ClimateGeography(continent(true), config))
         var windDifference = 0.0; var rainDifference = 0.0
@@ -127,7 +127,7 @@ class SeasonalClimateAtlasTest {
                 abs(ridge.windSouthMetersPerSecond(3, i) - flat.windSouthMetersPerSecond(3, i))
             rainDifference += abs(ridge.annualRainfallMm(i) - flat.annualRainfallMm(i))
         }
-        assertTrue(windDifference / (31 * 25) > 0.1)
+        assertTrue(windDifference / (31 * 25) < 1e-10, "Lapse cooling must not create a mountain pressure source")
         assertTrue(rainDifference / (31 * 25) > 25)
         var zonalVariation = 0.0
         for (y in 15..28) for (x in 17..79) zonalVariation += abs(flat.windEastMetersPerSecond(3, y * 96 + x) - flat.windEastMetersPerSecond(3, y * 96 + 5))

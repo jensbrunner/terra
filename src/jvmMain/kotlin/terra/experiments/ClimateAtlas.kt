@@ -12,6 +12,9 @@ import terra.world.*
 /** Review emergent circulation across seeds and fixed geographic counterfactuals. */
 fun main(args: Array<String>) {
     val output = File(args.firstOrNull { it.startsWith("--output=") }?.substringAfter('=') ?: "build/experiments/seasonal-atlas").also { it.mkdirs() }
+    File(output, "moisture-budgets.csv").writeText("")
+    File(output, "circulation.csv").writeText("case,month,latitude_degrees,east_ms,south_ms,land_rain_mm_year,ocean_rain_mm_year\n")
+    File(output, "land-evaporation-check.csv").writeText("case,month,landscape_evaporation_mm_tiles\n")
     val summaries = StringBuilder()
     fun export(name: String, world: World, wind: Double? = null, month: Int = 3): SeasonalClimateAtlas {
         val start = System.nanoTime()
@@ -19,7 +22,15 @@ fun main(args: Array<String>) {
         val surface = LandscapeWater(world, atlas.geography.config.domainWidthMeters * atlas.geography.config.domainHeightMeters / (world.width.toDouble() * world.height))
         surface.initializeClimate(atlas)
         world.evolveAtlasCover(atlas, 0.0, initialize = true, soilAvailability = surface.growingWaterAvailability)
+        val state = surface.captureClimateState()
+        val tileArea = atlas.geography.config.domainWidthMeters * atlas.geography.config.domainHeightMeters / (world.width.toDouble() * world.height)
+        for (m in 0..11) {
+            val actualEvaporation = surface.evolveMonth(atlas, m, 1.0) / tileArea
+            File(output, "land-evaporation-check.csv").appendText("$name,${m + 1},$actualEvaporation\n")
+        }
+        surface.restoreClimateState(state); surface.beginUpdate()
         val millis = (System.nanoTime() - start) / 1e6
+        writeMoistureBudget(output, name, atlas)
         val w = world.width; val h = world.height
         val scale = 3; val label = 26
         val image = BufferedImage(w * scale * 3, (h * scale + label) * 2, BufferedImage.TYPE_INT_RGB)
@@ -85,6 +96,9 @@ fun main(args: Array<String>) {
     export("ridge-west", continent(true), -5.0)
     export("ridge-emergent", continent(true))
     export("continent-winter", continent(false), month = 9)
+    // Calm counterfactuals isolate the mean circulation from surface supply and rainout.
+    export("continent-calm", continent(false), 0.0)
+    export("seed-31742-calm", World(31742), 0.0)
     val island = World.withElevation(1, w, h, TerrainGenerationSettings(), DoubleArray(w * h) {
         if (it % w in 25..118 && it / w in 25..82) 0.32 else 0.1
     })
@@ -194,4 +208,75 @@ private fun writeLandscape(output: File, name: String, world: World, surface: La
     val wetLakes = (0 until world.width * world.height).count { water.isLakeTileWet(it % world.width, it / world.width) }
     val streams = (0 until world.width * world.height).count { water.isStreamTile(it % world.width, it / world.width) }
     File(output, "$name-landscape.txt").writeText("wet_lake_tiles=$wetLakes stream_tiles=$streams soil_mean_mm=${surface.soil.average()}\n${world.landBiomeSummary()}\n")
+}
+
+/** Opt-in re-solve exposes actual vapor even where no precipitation forms.
+ * Fluxes are cell-area means in mm/day; rainfall columns are annualized mm/year. */
+private fun writeMoistureBudget(output: File, name: String, atlas: SeasonalClimateAtlas) {
+    val g = atlas.geography; val w = g.width; val h = g.height; val n = g.count
+    val report = File(output, "moisture-budgets.csv")
+    if (report.length() == 0L) report.writeText("case,month,build_sweeps,max_residual,evaporation,ocean_uptake,land_evaporation,precipitation,global_balance,land_rain_year,ocean_rain_year,equatorial_rain_year,subtropical_rain_year,inland_rain_year,deep_inland_rain_year,coast_inflow,coast_outflow,coast_diffusion,inland_advection,inland_diffusion,mean_land_wind,mean_humidity,rain_below_surface_saturation_fraction,max_column_saturation\n")
+    for (m in 0..11) {
+        val t = atlas.temperature[m]; val u = atlas.east[m]; val v = atlas.south[m]
+        val p = DoubleArray(n); val humidity = DoubleArray(n)
+        val solve = ClimateAtlasBuilder(atlas.solar).diagnoseRainfall(g, t, u, v, p, humidity, m)
+        val q = solve.moisture; val capacity = solve.capacity
+        var evaporation = 0.0; var oceanUptake = 0.0; var landEvaporation = 0.0
+        var precipitation = 0.0; var liftedRain = 0.0; var subtropical = 0.0; var subCount = 0
+        var landRain = 0.0; var oceanRain = 0.0; var equatorial = 0.0; var inlandRain = 0.0; var deepRain = 0.0; var landWind = 0.0
+        var landCount = 0; var oceanCount = 0; var eqCount = 0; var inlandCount = 0; var deepCount = 0
+        val land = BooleanArray(n) { g.landFraction[it] >= 0.5 }
+        val inland = BooleanArray(n) { land[it] && g.coastDistanceMeters[it] >= 500_000 }
+        for (i in 0 until n) {
+            val exchange = (1 - g.landFraction[i]) * 1.2 * (0.8 * capacity[i] - q[i])
+            evaporation += max(0.0, exchange); oceanUptake += max(0.0, -exchange)
+            val rain = p[i] * 12 / 365
+            landEvaporation += solve.landEvaporation[i]
+            precipitation += rain
+            if (q[i] <= capacity[i]) liftedRain += rain
+            val latitude = abs(PlanetLatitude.terrainRowRadians(i / w, h))
+            if (latitude >= PI / 9 && latitude <= 2 * PI / 9) { subCount++; subtropical += rain }
+            if (land[i]) { landCount++; landRain += rain; landWind += hypot(u[i], v[i]) } else { oceanCount++; oceanRain += rain }
+            if (abs(PlanetLatitude.terrainRowRadians(i / w, h)) < PI / 18) { eqCount++; equatorial += rain }
+            if (inland[i]) { inlandCount++; inlandRain += rain }
+            if (land[i] && g.coastDistanceMeters[i] >= 1_500_000) { deepCount++; deepRain += rain }
+        }
+        var coastIn = 0.0; var coastOut = 0.0; var coastDiffusion = 0.0
+        var inlandAdvection = 0.0; var inlandDiffusion = 0.0
+        fun face(i: Int, j: Int, velocity: Double, spacing: Double) {
+            val advection = velocity * (if (velocity >= 0) q[i] else q[j]) * 86400 / spacing
+            val diffusion = ClimateAtlasBuilder.MOISTURE_DIFFUSIVITY_M2_S * 86400 / (spacing * spacing) * (q[i] - q[j])
+            val enteringLand = (if (land[j]) 1 else 0) - (if (land[i]) 1 else 0)
+            coastIn += max(0.0, advection * enteringLand); coastOut += max(0.0, -advection * enteringLand)
+            coastDiffusion += diffusion * enteringLand
+            val enteringInterior = (if (inland[j]) 1 else 0) - (if (inland[i]) 1 else 0)
+            inlandAdvection += advection * enteringInterior; inlandDiffusion += diffusion * enteringInterior
+        }
+        for (i in 0 until n) {
+            val east = i / w * w + (i % w + 1) % w
+            face(i, east, (u[i] + u[east]) / 2, g.config.dx)
+            if (i / w + 1 < h) face(i, i + w, (v[i] + v[i + w]) / 2, g.config.dy)
+        }
+        val circulation = StringBuilder()
+        for (y in 0 until h) {
+            var landP = 0.0; var oceanP = 0.0; var lands = 0; var oceans = 0
+            var east = 0.0; var south = 0.0
+            for (x in 0 until w) {
+                val i = y * w + x
+                east += u[i]; south += v[i]
+                if (land[i]) { landP += p[i] * 12; lands++ } else { oceanP += p[i] * 12; oceans++ }
+            }
+            circulation.appendLine(listOf(name, m + 1, PlanetLatitude.terrainRowRadians(y, h) * 180 / PI,
+                east / w, south / w, landP / max(1, lands), oceanP / max(1, oceans)).joinToString(","))
+        }
+        File(output, "circulation.csv").appendText(circulation.toString())
+        val balance = evaporation - oceanUptake + landEvaporation - precipitation
+        val values = listOf(name, m + 1, atlas.moistureSweeps, atlas.maximumMoistureResidualMmPerDay,
+            evaporation / n, oceanUptake / n, landEvaporation / n, precipitation / n, balance / n,
+            landRain * 365 / max(1, landCount), oceanRain * 365 / max(1, oceanCount), equatorial * 365 / max(1, eqCount), subtropical * 365 / max(1, subCount),
+            inlandRain * 365 / max(1, inlandCount), deepRain * 365 / max(1, deepCount),
+            coastIn / max(1, landCount), coastOut / max(1, landCount), coastDiffusion / max(1, landCount),
+            inlandAdvection / max(1, inlandCount), inlandDiffusion / max(1, inlandCount), landWind / max(1, landCount), humidity.average(), liftedRain / max(1e-12, precipitation), q.indices.maxOf { q[it] / capacity[it] })
+        report.appendText(values.joinToString(",") + "\n")
+    }
 }
