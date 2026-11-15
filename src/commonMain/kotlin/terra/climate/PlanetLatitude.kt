@@ -1,10 +1,10 @@
 package terra.climate
 
-import kotlin.math.PI
+import kotlin.math.asin
 
-/** Cell-centered pseudo-latitude on an equal-area Cartesian map, with no pole crossing. */
+/** Equal-area latitude: a row’s area is proportional to sin(latitude), not latitude. */
 object PlanetLatitude {
-    fun radians(northwardFraction: Double): Double = (northwardFraction - 0.5) * 170.0 * PI / 180.0
+    fun radians(northwardFraction: Double): Double = asin(2 * northwardFraction - 1)
     fun northwardRowRadians(y: Int, height: Int): Double = radians((y + 0.5) / height)
     fun terrainRowRadians(y: Int, height: Int): Double = radians(1.0 - (y + 0.5) / height)
 }

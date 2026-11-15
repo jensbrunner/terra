@@ -57,7 +57,6 @@ class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), privat
         // to the forcing of each bin (otherwise a nonzero start season is counted twice).
         val sunlight = PlanetarySunlight(w, h, solar.copy(initialYearFraction = 0.0), northUp = false)
         calculateTemperatures(g, sunlight, t)
-        redistributeAnnualHeat(g, t)
         var residual = 0.0; var moistureResidual = 0.0; var totalSweeps = 0
         for (m in 0..11) {
             diagnoseWinds(g, t[m], e[m], s[m])
@@ -292,48 +291,6 @@ class ClimateAtlasBuilder(private val solar: SolarConfig = SolarConfig(), privat
                 boundaryTemperature = target + (boundaryTemperature - target) * decay
             }
         }
-    }
-
-    /** Conservative annual-mean eddy heat transport at a common reference height.
-     * Seasonal storage retains the existing analytic response; no live heat inventory. */
-    private fun redistributeAnnualHeat(g: ClimateGeography, temperature: Array<DoubleArray>) {
-        val source = DoubleArray(g.count) { i -> temperature.sumOf { it[i] } / 12 + TEMPERATURE_LAPSE_C_PER_M * g.elevationMeters[i] }
-        val mean = source.copyOf()
-        // Tropospheric column heat capacity, J/(m² K), times the shared eddy diffusivity.
-        val conductivity = 8e6 * MOISTURE_DIFFUSIVITY_M2_S
-        val cx = conductivity / (g.config.dx * g.config.dx)
-        val cy = conductivity / (g.config.dy * g.config.dy)
-        fun apply(field: DoubleArray, result: DoubleArray) {
-            for (i in field.indices) {
-                val x = i % g.width; val y = i / g.width
-                var flux = cx * (2 * field[i] - field[y * g.width + (x + 1) % g.width] - field[y * g.width + (x + g.width - 1) % g.width])
-                if (y > 0) flux += cy * (field[i] - field[i - g.width])
-                if (y + 1 < g.height) flux += cy * (field[i] - field[i + g.width])
-                result[i] = OUTGOING_SLOPE_W_M2_K * field[i] + flux
-            }
-        }
-        val product = DoubleArray(g.count)
-        apply(mean, product)
-        val residual = DoubleArray(g.count) { OUTGOING_SLOPE_W_M2_K * source[it] - product[it] }
-        val direction = residual.copyOf()
-        var norm = residual.sumOf { it * it }
-        for (iteration in 0 until 512) {
-            if (norm < g.count * 1e-8) break
-            apply(direction, product)
-            var curvature = 0.0
-            for (i in mean.indices) curvature += direction[i] * product[i]
-            val step = norm / curvature
-            var nextNorm = 0.0
-            for (i in mean.indices) {
-                mean[i] += step * direction[i]
-                residual[i] -= step * product[i]
-                nextNorm += residual[i] * residual[i]
-            }
-            val beta = nextNorm / norm
-            for (i in mean.indices) direction[i] = residual[i] + beta * direction[i]
-            norm = nextNorm
-        }
-        for (m in 0..11) for (i in mean.indices) temperature[m][i] += mean[i] - source[i]
     }
 
     /** Diagnostic warm-low pressure tendency, balanced by rotation and linear drag.

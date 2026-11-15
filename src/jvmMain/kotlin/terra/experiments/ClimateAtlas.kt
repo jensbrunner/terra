@@ -13,7 +13,7 @@ import terra.world.*
 fun main(args: Array<String>) {
     val output = File(args.firstOrNull { it.startsWith("--output=") }?.substringAfter('=') ?: "build/experiments/seasonal-atlas").also { it.mkdirs() }
     File(output, "moisture-budgets.csv").writeText("")
-    File(output, "circulation.csv").writeText("case,month,latitude_degrees,east_ms,south_ms,land_rain_mm_year,ocean_rain_mm_year\n")
+    File(output, "circulation.csv").writeText("case,month,latitude_degrees,east_ms,south_ms,land_rain_mm_year,ocean_rain_mm_year,land_temperature_c,ocean_temperature_c,land_fraction\n")
     File(output, "land-evaporation-check.csv").writeText("case,month,landscape_evaporation_mm_tiles\n")
     val summaries = StringBuilder()
     fun export(name: String, world: World, wind: Double? = null, month: Int = 3): SeasonalClimateAtlas {
@@ -260,14 +260,16 @@ private fun writeMoistureBudget(output: File, name: String, atlas: SeasonalClima
         val circulation = StringBuilder()
         for (y in 0 until h) {
             var landP = 0.0; var oceanP = 0.0; var lands = 0; var oceans = 0
-            var east = 0.0; var south = 0.0
+            var east = 0.0; var south = 0.0; var landT = 0.0; var oceanT = 0.0
             for (x in 0 until w) {
                 val i = y * w + x
                 east += u[i]; south += v[i]
-                if (land[i]) { landP += p[i] * 12; lands++ } else { oceanP += p[i] * 12; oceans++ }
+                if (land[i]) { landP += p[i] * 12; landT += t[i]; lands++ }
+                else { oceanP += p[i] * 12; oceanT += t[i]; oceans++ }
             }
             circulation.appendLine(listOf(name, m + 1, PlanetLatitude.terrainRowRadians(y, h) * 180 / PI,
-                east / w, south / w, landP / max(1, lands), oceanP / max(1, oceans)).joinToString(","))
+                east / w, south / w, landP / max(1, lands), oceanP / max(1, oceans),
+                landT / max(1, lands), oceanT / max(1, oceans), lands.toDouble() / w).joinToString(","))
         }
         File(output, "circulation.csv").appendText(circulation.toString())
         val balance = evaporation - oceanUptake + landEvaporation - precipitation
