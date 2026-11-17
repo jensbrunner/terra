@@ -46,6 +46,22 @@ internal class SurfaceWater(world: World, initialGroundwaterMm: Double = 0.0, in
         refreshLakes()
     }
 
+    /** Re-route existing inventories on the new graph; old lakes drain or refill new basins naturally. */
+    fun rebuild(world: World): SurfaceWater {
+        val next = SurfaceWater(world)
+        for (i in 0 until count) next.receive(i, groundwater[i] + recharge[i], channels[i] + runoff[i])
+        for (lake in basins) {
+            val level = lake.level()
+            val depth = lake.candidate.tileIndices.sumOf { max(0.0, level - topology.terrainElevation[it]) }
+            if (depth > 0) {
+                for (i in lake.candidate.tileIndices) {
+                    next.receive(i, 0.0, lake.water * max(0.0, level - topology.terrainElevation[i]) / depth)
+                }
+            } else next.receive(lake.candidate.exitTileIndex, 0.0, lake.water)
+        }
+        return next
+    }
+
     val totalWaterMmTiles get() = groundwater.sum() + channels.sum() + recharge.sum() + runoff.sum() + basins.sumOf { it.water }
     fun groundwaterMmAt(tile: Int) = groundwater[tile] + recharge[tile]
     fun lakeWaterMmTiles(id: Int) = basins[id].water

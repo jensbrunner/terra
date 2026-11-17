@@ -1,133 +1,126 @@
 package terra.climate
 
-import terra.world.World
 import kotlin.math.*
+import terra.world.TerrainGenerationSettings
+import terra.world.TerrainNoise
+import terra.world.World
 
-internal fun saturationWater(kelvin: Double) = (6.0 * exp((kelvin - 273.15) * 0.06)).coerceIn(1.0, 45.0)
-
-/** Rotating shallow-water column: centre scalars, east/south face velocities.
- * Forward-backward gravity waves and upwind mass flux conserve column mass.
- * Heat, vapour and cloud water follow semi-Lagrangian trajectories.
- */
+/** Statistical climate, not fluid dynamics. Geography is cached between geological ticks; weather is evaluated only when displayed. */
 internal class Atmosphere(private val world: World) {
-    val count = world.width * world.height
-    val h = DoubleArray(count) { COLUMN_DEPTH }
-    val u = DoubleArray(count)
-    val v = DoubleArray(count)
-    val temperature = DoubleArray(count)
-    val vapor = DoubleArray(count)
-    val cloud = DoubleArray(count)
-    val rain = DoubleArray(count)
-    private val height = DoubleArray(count)
-    private val land = BooleanArray(count)
-    private val sunlight = PlanetarySunlight(world.width, world.height)
-    private val fields = arrayOf(u, v, temperature, vapor, cloud)
-    private val next = Array(fields.size) { DoubleArray(count) }
-    private val eastFlux = DoubleArray(count)
-    private val southFlux = DoubleArray(count)
-    private val evaporation = DoubleArray(count)
-    private val coriolis = DoubleArray(world.height) { 2 * ROTATION_RATE * sin(PI * (0.5 - (it + 0.5) / world.height)) }
-    private val target = DoubleArray(world.height)
-    private val rotationSin = DoubleArray(world.height)
-    private val rotationCos = DoubleArray(world.height)
-
-    init {
-        for (i in 0 until count) {
-            val x = i % world.width; val y = i / world.width
-            height[i] = world.elevationMeters(x, y)
-            land[i] = world.isLand(x, y)
-            temperature[i] = 250.0 + 110.0 * sunlight.dailyMeanInputFactor(y) - height[i] * 0.006
-            vapor[i] = min(if (land[i]) 5.0 else 10.0, saturationWater(temperature[i]))
-            h[i] += 0.25 * sin(x * 12.9898 + y * 78.233 + world.seed)
-        }
+    private val width = world.width
+    private val height = world.height
+    private val count = width * height
+    val temperatureC = DoubleArray(count)
+    val annualRain = DoubleArray(count)
+    val evaporation = DoubleArray(count)
+    val moisture = DoubleArray(count)
+    private val latitude = DoubleArray(height) { asin(1 - 2.0 * (it + 0.5) / height) }
+    private val westExposure = DoubleArray(height) { (1 - cos(4 * latitude[it])) * 0.5 }
+    private val eastWind = DoubleArray(height) { 12 * westExposure[it] - 6 }
+    private val elevation = DoubleArray(count) { world.elevationMeters(it % width, it / width) }
+    private val continentality = DoubleArray(count)
+    private val noise = TerrainNoise(TerrainGenerationSettings())
+    private val regionalNoise = DoubleArray(count) { i ->
+        noise.periodic((i % width + 0.5) * 283 / width, (i / width + 0.5) * 212 / height,
+            world.seed + 421, 3, 55.0)
+    }
+    private val weatherWidth = 64
+    private val weatherHeight = 32
+    private val weather = DoubleArray(weatherWidth * weatherHeight) {
+        noise.periodic(it % weatherWidth * 283.0 / weatherWidth, it / weatherWidth * 212.0 / weatherHeight,
+            world.seed + 951, 3, 18.0)
     }
 
-    fun advance(seconds: Double, elapsed: Double, surface: LandscapeWater) {
-        rain.fill(0.0)
-        var left = seconds
-        while (left > 1e-9) {
-            var maxSpeed = 0.0
-            var maxDepth = COLUMN_DEPTH
-            for (i in h.indices) {
-                maxSpeed = max(maxSpeed, max(abs(u[i]), abs(v[i])))
-                maxDepth = max(maxDepth, h[i])
+    init { refreshGeography() }
+
+    fun refreshGeography() {
+        for (i in 0 until count) elevation[i] = world.elevationMeters(i % width, i / width)
+        for (y in 0 until height) {
+            val lat = abs(latitude[y]) * 180 / PI
+            val tropics = exp(-(lat / 17).pow(2))
+            val tropicalRain = 1750 * tropics
+            val temperateRain = 850 * exp(-((lat - 52) / 17).pow(2))
+            val exposure = Array(2) { DoubleArray(width) }
+            val uplift = Array(2) { DoubleArray(width) }
+            for (direction in 0..1) {
+                var oceanMoisture = 0.0
+                var previousElevation = 0.0
+                // Two circuits remove the artificial seam at the first longitude.
+                repeat(width * 2) { step ->
+                    val x = if (direction == 0) step % width else width - 1 - step % width
+                    val i = y * width + x
+                    val rise = max(0.0, elevation[i] - previousElevation)
+                    if (!world.isLand(x, y)) oceanMoisture = 1.0
+                    else oceanMoisture *= exp(-2.0 / width - rise / 2500)
+                    exposure[direction][x] = oceanMoisture
+                    uplift[direction][x] = oceanMoisture * rise
+                    previousElevation = elevation[i]
+                }
             }
-            // Two-dimensional gravity-wave CFL, including advective transport.
-            val dt = min(left, 0.45 * TILE_METERS / (sqrt(GRAVITY * maxDepth) + maxSpeed))
-            step(dt, elapsed + seconds - left)
-            left -= dt
-        }
-        for (i in 0 until count) evaporation[i] = if (land[i]) max(0.0, temperature[i] - 268.0) * 0.000002 * seconds else 0.0
-        val actual = surface.advance(rain, evaporation, temperature, seconds)
-        for (i in 0 until count) vapor[i] += actual[i]
-    }
-
-    private fun step(dt: Double, time: Double) {
-        val w = world.width; val rows = world.height
-        sunlight.update(time)
-        for (y in 0 until rows) {
-            target[y] = sunlight.dailyMeanInputFactor(y)
-            rotationSin[y] = sin(coriolis[y] * dt)
-            rotationCos[y] = cos(coriolis[y] * dt)
-        }
-        val landResponse = -expm1(-dt / (2 * 86400.0))
-        val oceanResponse = -expm1(-dt / (10 * 86400.0))
-        val condensationResponse = -expm1(-dt / 900)
-        val rainResponse = -expm1(-dt / 7200)
-        val oceanEvaporationResponse = -expm1(-dt / 172800)
-        val drag = exp(-dt / 86400.0)
-        for (i in 0 until count) {
-            val x = i % w; val y = i / w
-            val west = y * w + (x + w - 1) % w; val east = y * w + (x + 1) % w
-            val north = max(0, y - 1) * w + x; val south = min(rows - 1, y + 1) * w + x
-            val uc = (u[west] + u[i]) * 0.5
-            val vc = (v[i] + if (y == 0) 0.0 else v[north]) * 0.5
-            val bx = x - uc * dt / TILE_METERS
-            val by = (y - vc * dt / TILE_METERS).coerceIn(0.0, rows - 1.0)
-            // Hydrostatic thermal thickness adds geopotential to the column.
-            // The mass-pressure acceleration is -grad(p)/rho = -g grad(h).
-            val thermalEast = THERMAL_THICKNESS_PER_KELVIN * (temperature[east] + height[east] * 0.006 - temperature[i] - height[i] * 0.006)
-            val thermalSouth = THERMAL_THICKNESS_PER_KELVIN * (temperature[south] + height[south] * 0.006 - temperature[i] - height[i] * 0.006)
-            val crossV = (v[i] + v[east] + if (y == 0) 0.0 else v[north] + v[north - x + (x + 1) % w]) * 0.25
-            val crossU = (uc + (u[south] + u[south - x + (x + w - 1) % w]) * 0.5) * 0.5
-            next[0][i] = (sample(u, x - u[i] * dt / TILE_METERS, y - crossV * dt / TILE_METERS) * rotationCos[y] +
-                crossV * rotationSin[y] - dt * GRAVITY * (h[east] - h[i] + thermalEast) / TILE_METERS) * drag
-            next[1][i] = if (y == rows - 1) 0.0 else
-                (sample(v, x - crossU * dt / TILE_METERS, y - v[i] * dt / TILE_METERS) * (rotationCos[y] + rotationCos[y + 1]) * 0.5 -
-                    crossU * (rotationSin[y] + rotationSin[y + 1]) * 0.5 - dt * GRAVITY * (h[south] - h[i] + thermalSouth) / TILE_METERS) * drag
-            val advected = sample(temperature, bx, by)
-            val equilibrium = 250.0 + 110.0 * target[y] - height[i] * 0.006 + 8 * (sunlight.inputFactor(x, y) - target[y])
-            val t = advected + (equilibrium - advected) * (if (land[i]) landResponse else oceanResponse)
-            val q = sample(vapor, bx, by)
-            val uphill = max(0.0, uc * (height[east] - height[west]) / (2 * TILE_METERS) + vc * (height[south] - height[north]) / (2 * TILE_METERS))
-            val condense = min(q, max(0.0, q - saturationWater(t)) * condensationResponse + uphill * 0.0002 * dt)
-            val cloudIn = sample(cloud, bx, by) + condense
-            val precip = max(0.0, cloudIn - 1.5) * rainResponse
-            rain[i] += precip
-            next[2][i] = t + condense * CONDENSATION_KELVIN_PER_MM
-            next[3][i] = q - condense + if (land[i]) 0.0 else max(0.0, saturationWater(t) - q) * oceanEvaporationResponse
-            next[4][i] = cloudIn - precip
-        }
-        for (k in fields.indices) next[k].copyInto(fields[k])
-        for (i in 0 until count) {
-            val x = i % w; val y = i / w
-            val east = y * w + (x + 1) % w
-            eastFlux[i] = u[i] * if (u[i] >= 0) h[i] else h[east]
-            southFlux[i] = if (y == rows - 1) 0.0 else v[i] * if (v[i] >= 0) h[i] else h[i + w]
-        }
-        for (i in 0 until count) {
-            val x = i % w; val y = i / w
-            h[i] -= dt / TILE_METERS * (eastFlux[i] - eastFlux[y * w + (x + w - 1) % w] +
-                southFlux[i] - if (y == 0) 0.0 else southFlux[i - w])
+            for (x in 0 until width) {
+                val i = y * width + x
+                // Blend both ocean exposures, instead of reversing an entire row at a latitude boundary.
+                val west = westExposure[y]
+                val oceanMoisture = exposure[0][x] * west + exposure[1][x] * (1 - west)
+                val rise = uplift[0][x] * west + uplift[1][x] * (1 - west)
+                val regional = regionalNoise[i]
+                continentality[i] = 1 - oceanMoisture
+                temperatureC[i] = 29 - 53 * sin(latitude[y]).pow(2) - elevation[i] * 0.006 + regional * 2
+                // Tropical moisture recycling keeps humid interiors; subtropical interiors stay dry.
+                annualRain[i] = ((180 + tropicalRain + temperateRain) *
+                    (0.30 + 0.30 * tropics + (0.70 - 0.30 * tropics) * oceanMoisture) * (1 + regional * 0.35) +
+                    rise * 0.65).coerceIn(40.0, 4000.0)
+                // Annual potential evaporation; cold land stays moist without becoming a desert.
+                evaporation[i] = max(180.0, 350 + 32 * max(0.0, temperatureC[i] + 5))
+                moisture[i] = (annualRain[i] / evaporation[i]).coerceIn(0.0, 1.0)
+            }
         }
     }
 
-    private fun sample(a: DoubleArray, x: Double, y: Double): Double {
-        val w = world.width; val rows = world.height
-        val xx = x - floor(x / w) * w; val x0 = floor(xx).toInt(); val x1 = (x0 + 1) % w
-        val yy = y.coerceIn(0.0, rows - 1.0); val y0 = floor(yy).toInt(); val y1 = min(rows - 1, y0 + 1)
-        val fx = xx - x0; val fy = yy - y0
-        return (a[y0 * w + x0] * (1 - fx) + a[y0 * w + x1] * fx) * (1 - fy) +
-            (a[y1 * w + x0] * (1 - fx) + a[y1 * w + x1] * fx) * fy
+    fun snapshot(seconds: Double, updateSeconds: Double, surface: terra.hydrology.LandscapeWater): EnvironmentSnapshot {
+        val temperature = DoubleArray(count)
+        val humidity = DoubleArray(count)
+        val clouds = DoubleArray(count)
+        val rain = DoubleArray(count)
+        val east = DoubleArray(count)
+        val south = DoubleArray(count)
+        val pressure = DoubleArray(count)
+        val season = sin(2 * PI * (seconds / YEAR_SECONDS - 0.25))
+        val drift = seconds / (300 * DAY_SECONDS)
+        val driftSouth = 0.015 * sin(seconds / (12 * DAY_SECONDS))
+        for (y in 0 until height) for (x in 0 until width) {
+            val i = y * width + x
+            val field = sampleWeather(x.toDouble() / width - drift,
+                y.toDouble() / height + driftSouth)
+            val detail = sampleWeather(x.toDouble() / width * 3 - seconds / (18 * DAY_SECONDS),
+                y.toDouble() / height * 3 + seconds / (90 * DAY_SECONDS))
+            val wet = annualRain[i] / 1800
+            val cloud = ((field * 0.75 + detail * 0.25 + wet * 0.35 - 0.08) * 5).coerceIn(0.0, 1.0)
+            clouds[i] = cloud
+            humidity[i] = (0.25 + 0.45 * moisture[i] + 0.25 * cloud).coerceIn(0.0, 1.0)
+            // A representative current shower, independent of the annual landscape budget.
+            rain[i] = max(0.0, cloud - 0.55) * annualRain[i] / 500
+            temperature[i] = 273.15 + temperatureC[i] + season * sin(latitude[y]) *
+                (7 + 14 * continentality[i]) + field * 3
+            east[i] = eastWind[y] + field * 4
+            south[i] = detail * 5
+            pressure[i] = 1013.25 - field * 18
+        }
+        return EnvironmentSnapshot(width, height, seconds, updateSeconds, humidity, clouds, rain, temperature,
+            east, south, pressure, annualRain.copyOf(), surface.soil.copyOf(), surface.soilCapacityMm.copyOf(),
+            DoubleArray(count) { surface.snowWaterMm(it) }, surface.rain.copyOf(),
+            surface.drainage.copyOf(), surface.overflow.copyOf())
+    }
+
+    private fun sampleWeather(x: Double, y: Double): Double {
+        val xx = (x - floor(x)) * weatherWidth
+        val yy = (y - floor(y)) * weatherHeight
+        val ix = floor(xx).toInt(); val iy = floor(yy).toInt()
+        val tx = xx - ix; val ty = yy - iy
+        val a = weather[iy * weatherWidth + ix]
+        val b = weather[iy * weatherWidth + (ix + 1) % weatherWidth]
+        val c = weather[(iy + 1) % weatherHeight * weatherWidth + ix]
+        val d = weather[(iy + 1) % weatherHeight * weatherWidth + (ix + 1) % weatherWidth]
+        return (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty
     }
 }

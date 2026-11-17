@@ -14,8 +14,8 @@ import korlibs.korge.view.solidRect
 import korlibs.korge.view.tiles.tileMap
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import terra.climate.ClimateLayer
 import terra.climate.EnvironmentSnapshot
+import terra.world.PlateBoundary
 import terra.world.Terrain
 import terra.world.WorldSnapshot
 
@@ -44,6 +44,9 @@ class TerrainMapView(
         world.height * SURFACE_WATER_PIXELS_PER_TILE
     )
     private val waterFade = LayerFade(Bitmap32(surfaceWaterBitmap.width, surfaceWaterBitmap.height))
+    private val plateColors = listOf("#67b7c7", "#e5b66a", "#9ac77f", "#bd8acb", "#e18b87", "#81a2e2", "#b8c868")
+        .map { Colors[it] }
+    private val boundaryColors = listOf("#fff1d0", "#f39d76", "#cf8ad8", "#5ed4d0", "#e5ca6e", "#8eafe8").map { Colors[it] }
     private val nightTint = Colors["#071321"]
     private val transparentPixel = Colors["#000000"].withA(0)
     private val windOverlay = WindOverlay()
@@ -81,7 +84,7 @@ class TerrainMapView(
                 }
                 val fade = overlayFades.getValue(layer)
                 fade.image = RasterBlendImage(fade.previous, overlayBitmaps.getValue(layer)).addTo(this) {
-                    smoothing = layer == ClimateLayer.CLOUDS || layer == ClimateLayer.PRECIPITATION || layer == ClimateLayer.DAY_NIGHT
+                    smoothing = layer == ClimateLayer.PRECIPITATION || layer == ClimateLayer.DAY_NIGHT
                     alpha = 0.0
                 }
             }
@@ -103,6 +106,7 @@ class TerrainMapView(
             "Terrain map dimensions cannot change after the view is created"
         }
         val generationChanged = world.generation != newWorld.generation
+        val geographyChanged = world.geographyRevision != newWorld.geographyRevision
         world = newWorld
         if (generationChanged) {
             updateRelief()
@@ -112,6 +116,7 @@ class TerrainMapView(
             surfaceWaterBitmap.fill(transparentPixel); waterFade.reset()
             for (i in queuedTerrain.indices) enqueueTerrain(i)
         } else {
+            if (geographyChanged) updateRelief()
             for (i in 0 until world.changedTerrainCount) enqueueTerrain(world.changedTerrainIndex(i))
             if (canopyRevision != world.biomeRevision) updateCanopy()
         }
@@ -130,9 +135,8 @@ class TerrainMapView(
     }
 
     fun updateOverlays(weather: EnvironmentSnapshot, activeLayers: Set<ClimateLayer>) {
-        for (layer in ClimateLayer.entries) {
-            overlayContainers.getValue(layer).visible = layer in activeLayers
-        }
+        for (layer in ClimateLayer.entries) overlayContainers.getValue(layer).visible = layer in activeLayers
+
         // Round robin prevents later layers starving when publications arrive during a refresh.
         var renderedOverlay = false
         val firstOverlay = nextOverlay
@@ -151,26 +155,45 @@ class TerrainMapView(
             if (renderedOverlay || layerWeather[layer] === weather) return@repeat
             renderedOverlay = true
             nextOverlay = (index + 1) % ClimateLayer.entries.size
-            layerWeather[layer] = weather
-            overlayFades.getValue(layer).begin(bitmap)
-            bitmap.lock {
-                for (y in 0 until world.height) for (x in 0 until world.width) {
-                    bitmap[x, y] = when (layer) {
-                        ClimateLayer.DAY_NIGHT -> nightTint.withA((weather.nightOpacity(x, y) * 255).toInt())
-                        ClimateLayer.CLOUDS -> {
-                            val cloud = weather.cloudCover(x, y)
-                            val upwind = weather.cloudCover((x + world.width - 1) % world.width, maxOf(0, y - 1))
-                            val light = (0.88 + (cloud - upwind) * 1.8).coerceIn(0.55, 1.0)
-                            RGBA((231 * light).toInt(), (240 * light).toInt(), (252 * light).toInt(), (cloud * 232).toInt())
-                        }
-                        ClimateLayer.PRECIPITATION -> precipitationColor(weather.precipitationMmPerHour(x, y), weather.snowFraction(x, y))
-                            .withA((precipitationOpacity(weather.precipitationMmPerHour(x, y)) * 255).toInt())
-                        else -> tileColor(layer, weather, x, y).withA(173)
-                    }
-                }
-            }
-            overlayFades.getValue(layer).complete(bitmap)
+            renderOverlay(layer, weather, bitmap)
         }
+    }
+
+    private fun renderOverlay(layer: ClimateLayer, weather: EnvironmentSnapshot, bitmap: Bitmap32) {
+        val fade = overlayFades.getValue(layer)
+        layerWeather[layer] = weather
+        fade.begin(bitmap)
+        bitmap.lock {
+            for (y in 0 until world.height) for (x in 0 until world.width) {
+                bitmap[x, y] = overlayColor(layer, weather, x, y)
+            }
+        }
+        fade.complete(bitmap)
+    }
+
+    private fun overlayColor(layer: ClimateLayer, weather: EnvironmentSnapshot, x: Int, y: Int): RGBA = when (layer) {
+        ClimateLayer.DAY_NIGHT -> nightTint.withA((weather.nightOpacity(x, y) * 255).toInt())
+        ClimateLayer.PLATES -> {
+            val id = world.plateId(x, y)
+            val edge = id != world.plateId((x + world.width - 1) % world.width, y) ||
+                id != world.plateId(x, maxOf(0, y - 1))
+            val kind = world.plateBoundary(x, y)
+            if (edge || kind != PlateBoundary.NONE) boundaryColors[kind.ordinal].withA(235)
+            else plateColors[id % plateColors.size].withA(115)
+        }
+        ClimateLayer.CLOUDS -> {
+            val cloud = weather.cloudCover(x, y)
+            val west = (x + world.width - 1) % world.width
+            val upwind = weather.cloudCover(west, maxOf(0, y - 1))
+            val light = (0.88 + (cloud - upwind) * 1.8).coerceIn(0.55, 1.0)
+            RGBA((231 * light).toInt(), (240 * light).toInt(), (252 * light).toInt(), (cloud * 232).toInt())
+        }
+        ClimateLayer.PRECIPITATION -> {
+            val rain = weather.precipitationMmPerHour(x, y)
+            precipitationColor(rain, weather.snowFraction(x, y))
+                .withA((precipitationOpacity(rain) * 255).toInt())
+        }
+        else -> tileColor(layer, weather, x, y).withA(173)
     }
 
     fun selectTile(x: Int, y: Int) {

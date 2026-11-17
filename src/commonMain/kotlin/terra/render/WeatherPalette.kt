@@ -4,7 +4,6 @@ import korlibs.image.color.Colors
 import kotlin.math.sqrt
 import kotlin.math.roundToInt
 import korlibs.image.color.RGBA
-import terra.climate.ClimateLayer
 import terra.climate.EnvironmentSnapshot
 
 private val humidityPalette = listOf("#a34d36", "#d7a84e", "#e9e0a1", "#91c889", "#269d91", "#4dc6df")
@@ -37,6 +36,7 @@ internal fun tileColor(layer: ClimateLayer, weather: EnvironmentSnapshot, x: Int
         ClimateLayer.TEMPERATURE -> interpolatePalette((weather.temperatureC(x, y) + 20.0) / 55.0, temperaturePalette)
         ClimateLayer.DAY_NIGHT -> Colors["#071321"]
         ClimateLayer.WIND -> Colors["#f3f1d4"]
+        ClimateLayer.PLATES -> Colors["#f3f1d4"]
     }
 
 private fun interpolatePalette(value: Double, colors: List<String>): RGBA {

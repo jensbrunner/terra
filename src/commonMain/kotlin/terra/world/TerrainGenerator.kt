@@ -9,12 +9,11 @@ internal class TerrainGenerator(
     seed: Int, private val width: Int, private val height: Int,
     private val settings: TerrainGenerationSettings
 ) {
-    private data class Crust(val x: Double, val y: Double, val continental: Double, val u: Double, val v: Double)
     private data class OldRange(val x: Double, val y: Double, val u: Double, val v: Double,
         val halfLength: Double, val breadth: Double, val bend: Double)
     private val noiseSalt = Random(seed).nextInt()
     private val noise = TerrainNoise(settings)
-    private val plates: List<Crust>
+    private val plates: List<CrustPlate>
     private val distances: DoubleArray
     private val weights: DoubleArray
     private val closingRates: DoubleArray
@@ -30,14 +29,7 @@ internal class TerrainGenerator(
         require(settings.noisePersistence in 0.0..1.0 && settings.noiseLacunarity.isFinite() && settings.noiseLacunarity >= 1.0)
         require(settings.mountainRelief in 0.0..0.6 && settings.erosionStrength in 0.0..1.0)
         val random = Random(seed xor 0x36ac71)
-        val columns = (REFERENCE_WIDTH / settings.continentScale * 1.8).roundToInt().coerceIn(2, 16)
-        val rows = (REFERENCE_HEIGHT / settings.continentScale * 1.2).roundToInt().coerceIn(2, 10)
-        plates = List(columns * rows) { index ->
-            val angle = random.nextDouble() * 2 * PI
-            Crust((index % columns + 0.15 + random.nextDouble() * 0.7) * REFERENCE_WIDTH / columns,
-                (index / columns + 0.15 + random.nextDouble() * 0.7) * REFERENCE_HEIGHT / rows,
-                if (random.nextDouble() < 0.45) 1.0 else 0.0, cos(angle), sin(angle))
-        }
+        plates = crustPlates(random, settings)
         distances = DoubleArray(plates.size)
         weights = DoubleArray(plates.size)
         closingRates = DoubleArray(plates.size * plates.size) { index ->

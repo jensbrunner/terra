@@ -1,45 +1,53 @@
 package terra.climate
 
 import kotlin.test.*
+import terra.world.Terrain
 import terra.world.World
 
 class AtmosphereTest {
-    @Test fun physicalScaleAndClosedColumnMassRemainStable() {
-        assertEquals(1000.0, TILE_METERS)
-        assertEquals(9.80665, GRAVITY)
-        assertEquals(1.225, AIR_DENSITY)
-        assertEquals(101325.0, COLUMN_DEPTH * AIR_DENSITY * GRAVITY, 1e-9)
-        assertEquals(40 * 7.2921159e-5, ROTATION_RATE)
-        val world = World(31742, 24, 18)
-        val a = Atmosphere(world)
-        val surface = LandscapeWater(world)
-        val initial = a.h.sum()
-        repeat(48) { hour ->
-            surface.beginUpdate()
-            a.advance(3600.0, hour * 3600.0, surface)
-            assertEquals(initial, a.h.sum(), initial * 1e-11)
-            for (i in a.h.indices) {
-                assertTrue(a.h[i].isFinite() && a.h[i] > 0)
-                assertTrue(a.temperature[i] in 150.0..350.0)
-                assertTrue(a.u[i].isFinite() && a.v[i].isFinite())
-                assertTrue(a.vapor[i] >= 0 && a.cloud[i] >= 0 && a.rain[i] >= 0)
-            }
+    @Test fun centuryFastForwardMatchesAnnualSteps() {
+        val whole = World(31742, 45, 33)
+        val split = World(31742, 45, 33)
+        for (y in 0 until whole.height) for (x in 0 until whole.width)
+            assertTrue(whole[x, y].terrain in listOf(Terrain.PLAINS, Terrain.OCEAN))
+        val a = ClimateSimulation(whole)
+        val b = ClimateSimulation(split)
+        a.advance(100 * YEAR_SECONDS)
+        repeat(400) { b.advance(YEAR_SECONDS / 4) }
+        val wa = whole.snapshot(0)
+        val wb = split.snapshot(0)
+        assertEquals(a.elapsedSeconds, b.elapsedSeconds)
+        for (y in 0 until whole.height) for (x in 0 until whole.width) {
+            assertEquals(wa[x, y], wb[x, y])
+            assertEquals(wa.treeCover(x, y), wb.treeCover(x, y))
+            assertEquals(wa.grassCover(x, y), wb.grassCover(x, y))
         }
+        val biomes = (0 until whole.height).flatMap { y -> (0 until whole.width).map { x -> whole[x, y].terrain } }.toSet()
+        assertTrue(biomes.containsAll(Terrain.entries))
     }
 
-    @Test fun defaultGridPublishesLiveWeatherAndLandscapeRain() {
+    @Test fun annualClimateDrivesSuccessionAndWeatherStaysBounded() {
         val world = World(42)
-        assertEquals(283, world.width)
-        assertEquals(212, world.height)
         val climate = ClimateSimulation(world)
-        climate.advance(600.0)
+        climate.advance(YEAR_SECONDS)
+        val young = world.snapshot(0)
+        climate.advance(99 * YEAR_SECONDS)
+        val mature = world.snapshot(0)
         val weather = climate.snapshot()
-        assertEquals(world.width, weather.width)
-        assertEquals(world.height, weather.height)
+        var forestGrew = false
         for (y in 0 until world.height) for (x in 0 until world.width) {
             assertTrue(weather.pressureHpa(x, y) in 800.0..1200.0)
-            assertEquals(weather.rainMmThisUpdate(x, y) * 6, weather.precipitationMmPerHour(x, y), 1e-10)
             assertTrue(weather.relativeHumidity(x, y) in 0.0..1.0)
+            assertTrue(weather.cloudCover(x, y) in 0.0..1.0)
+            assertTrue(weather.precipitationMmPerHour(x, y) >= 0)
+            assertEquals(weather.recentRainMmPerYear(x, y), weather.rainMmThisUpdate(x, y))
+            assertTrue(weather.soilMoisture(x, y) in 0.0..1.0)
+            assertTrue(mature.treeCover(x, y) + mature.grassCover(x, y) <= 1.0 + 1e-12)
+            if (mature[x, y].terrain == Terrain.WOODS) {
+                assertTrue(mature.treeCover(x, y) > young.treeCover(x, y))
+                forestGrew = true
+            }
         }
+        assertTrue(forestGrew)
     }
 }

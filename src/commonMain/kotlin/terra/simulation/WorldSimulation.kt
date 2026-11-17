@@ -33,16 +33,16 @@ internal class WorldSimulation(val request: WorldRequest) {
     private val climate = ClimateSimulation(world)
     private var worldView = world.snapshot(request.generation)
     private val waterRasterizer = SurfaceWaterRasterizer(request.width, request.height)
-    private var waterRevision = -1L
+    private var waterView: SurfaceWaterSnapshot? = null
     private lateinit var waterFrame: RasterFrame
     val completedSeconds get() = climate.elapsedSeconds
     fun advance(seconds: Double) = climate.advance(seconds)
     fun snapshot(progress: SimulationProgress): WorldPresentationSnapshot {
         if (worldView.biomeRevision != world.biomeRevision) worldView = world.snapshot(request.generation, worldView)
         val drainage = climate.surfaceState.surfaceWater.snapshot()
-        if (drainage.revision != waterRevision) {
+        if (drainage !== waterView) {
             waterFrame = waterRasterizer.render(drainage)
-            waterRevision = drainage.revision
+            waterView = drainage
         }
         return WorldPresentationSnapshot(progress, worldView, climate.snapshot(), drainage,
             waterFrame)

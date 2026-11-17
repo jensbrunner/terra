@@ -3,12 +3,13 @@ package terra.simulation
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import terra.climate.YEAR_SECONDS
 
 actual class SimulationWorker actual constructor(request: WorldRequest) {
     private data class Controls(val speed: SimulationSpeed, val paused: Boolean)
     private val running = AtomicBoolean(true)
     private val desiredWorld = AtomicReference(request)
-    private val controls = AtomicReference(Controls(SimulationSpeed.ONE_HOUR, false))
+    private val controls = AtomicReference(Controls(SimulationSpeed.ONE_YEAR, false))
     private val mailbox = AtomicReference<WorldPresentationSnapshot?>()
     private val error = AtomicReference<String?>()
     private val wake = Object()
@@ -50,19 +51,21 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     val simulation = owner!!
                     val now = System.nanoTime()
                     val command = controls.get()
-                    // Bound backlog and individual transactions so pause/rebuild stay responsive.
-                    val quantum = (command.speed.simulatedSecondsPerRealSecond * 0.05).coerceIn(1.0, 10.0)
-                    val limit = quantum * 2
-                    if (!active.paused) pending = minOf(limit, pending + (now - previousWall) / 1e9 * active.speed.simulatedSecondsPerRealSecond)
+                    // Max runs annual steps continuously; fixed speeds follow the wall clock.
+                    val unlimited = command.speed == SimulationSpeed.MAX
+                    val quantum = if (unlimited) YEAR_SECONDS else
+                        (command.speed.simulatedSecondsPerRealSecond * 0.05).coerceIn(1.0, YEAR_SECONDS)
+                    val limit = quantum * 20
+                    if (!active.paused && active.speed != SimulationSpeed.MAX) pending = minOf(limit, pending + (now - previousWall) / 1e9 * active.speed.simulatedSecondsPerRealSecond)
                     previousWall = now
                     if (command != active) {
                         active = command; pending = 0.0; achieved = 0.0
                         rateStarted = now; rateStartSim = simulation.completedSeconds
                         changed = true
                     }
-                    if (!active.paused && pending >= quantum) {
+                    if (!active.paused && (unlimited || pending >= quantum)) {
                         simulation.advance(quantum)
-                        pending -= quantum
+                        if (!unlimited) pending -= quantum
                     }
                     val finished = System.nanoTime()
                     if (finished - rateStarted >= 1_000_000_000L) {
@@ -72,7 +75,7 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     if ((changed || finished - publishedAt >= 200_000_000L) && desiredWorld.get() == requested && running.get()) {
                         val progress = SimulationProgress(requested.generation, simulation.completedSeconds,
                             if (active.paused) 0.0 else achieved, pending, active.paused, quantum,
-                            !active.paused && achieved > 0 && achieved < active.speed.simulatedSecondsPerRealSecond * 0.9)
+                            !active.paused && !unlimited && achieved > 0 && achieved < active.speed.simulatedSecondsPerRealSecond * 0.9)
                         val previous = mailbox.get()
                         mailbox.set(if (!changed && previous?.progress?.completedSeconds == simulation.completedSeconds)
                             previous.copy(progress = progress) else simulation.snapshot(progress))
@@ -83,7 +86,10 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                 if (desiredWorld.get() == requested) error.set(failure.message ?: failure.toString())
                 failedGeneration = requested.generation
             }
-            synchronized(wake) { if (running.get()) wake.wait(5) }
+            val command = controls.get()
+            if (command.speed != SimulationSpeed.MAX || command.paused || desiredWorld.get().generation == failedGeneration) {
+                synchronized(wake) { if (running.get()) wake.wait(5) }
+            }
         }
     }
 }

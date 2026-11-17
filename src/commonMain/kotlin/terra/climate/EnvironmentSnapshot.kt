@@ -2,7 +2,7 @@ package terra.climate
 
 import kotlin.math.hypot
 
-/** Immutable view of the one live atmospheric state and its landscape fluxes. */
+/** Procedural current weather and the most recent annual landscape water budget. */
 class EnvironmentSnapshot internal constructor(
     val width: Int, val height: Int,
     val elapsedSeconds: Double, val updateSeconds: Double,
