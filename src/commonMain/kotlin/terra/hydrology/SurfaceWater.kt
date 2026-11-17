@@ -1,6 +1,7 @@
 package terra.hydrology
 
 import terra.world.World
+import terra.world.worldIndex
 import kotlin.math.*
 
 /** Fixed drainage graph, three slow stores: groundwater, channels and lakes.
@@ -189,7 +190,7 @@ class SurfaceWaterSnapshot internal constructor(
 ) {
     val width get() = geography.width
     val height get() = geography.height
-    private fun index(x: Int, y: Int) = y * width + x
+    private fun index(x: Int, y: Int) = worldIndex(x, y, width, height)
     fun isLandTile(x: Int, y: Int) = geography.land[index(x, y)]
     fun downstreamTileIndex(x: Int, y: Int) = geography.downstream[index(x, y)]
     fun upstreamLandTileCount(x: Int, y: Int) = geography.upstream[index(x, y)]

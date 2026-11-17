@@ -3,16 +3,13 @@ package terra.ui
 import korlibs.image.font.SystemFont
 import korlibs.korge.view.Container
 import korlibs.korge.view.Text
-import korlibs.korge.view.View
 import korlibs.korge.view.container
-import korlibs.korge.view.xy
 import terra.climate.YEAR_SECONDS
 import terra.simulation.WorldPresentationSnapshot
 
 /** Presents live terrain, climate, and water information for the selected tile. */
 internal class TileInspector(parent: Container, font: SystemFont) {
     private val panel: Container
-    private lateinit var background: View
     private val header: Text
     private val context: Text
     private val selectionText: Text
@@ -31,27 +28,25 @@ internal class TileInspector(parent: Container, font: SystemFont) {
         lateinit var climateLabel: Text
 
         panel = parent.container {
-            background = atlasCard(328.0, 450.0)
-            atlasText(font, "TILE INSPECTOR", 16.0, 18.0, 12.0, muted = true)
-            headerText = atlasText(font, "Explore the map", 16.0, 48.0, 23.0)
-            contextText = atlasText(font, "Select a tile to see its conditions.", 16.0, 82.0, 12.0, muted = true)
+            headerText = atlasText(font, "Explore the map", 20.0, 12.0, 28.0)
+            contextText = atlasText(font, "Select a tile to see its conditions.", 20.0, 56.0, 17.0, muted = true)
             listOf("Overview", "Details").forEachIndexed { index, name ->
-                tabs += AtlasButton(this, font, name, 16 + index * 152.0, 100.0, 144.0, 32.0) {
+                tabs += AtlasButton(this, font, name, 20 + index * 184.0, 96.0, 176.0, 44.0) {
                     detailed = index == 1
                     refresh()
                 }
             }
             selectionLabel = atlasText(font,
                 "Click a tile to inspect it.\n\nDrag to pan\nScroll to zoom\nHome to fit the map",
-                16.0, 152.0, 14.0, muted = true)
+                20.0, 160.0, 18.0, muted = true)
             repeat(8) { index ->
-                val y = 152 + index * 26.0
-                rows += atlasText(font, "", 16.0, y, 13.0, muted = true) to
-                    atlasText(font, "", 166.0, y, 14.0)
+                val y = 160 + index * 30.0
+                rows += atlasText(font, "", 20.0, y, 17.0, muted = true) to
+                    atlasText(font, "", 200.0, y, 18.0)
             }
-            climateLabel = atlasText(font, "", 16.0, 372.0, 12.0, muted = true)
+            climateLabel = atlasText(font, "", 20.0, 412.0, 16.0, muted = true)
             tabs.first().selected = true
-        }.xy(1096.0, 458.0)
+        }
 
         header = headerText
         context = contextText
@@ -66,12 +61,6 @@ internal class TileInspector(parent: Container, font: SystemFont) {
         refresh()
     }
 
-    fun resize(width: Double, height: Double) {
-        // The panel stays anchored below the layer controls and grows with the window.
-        panel.x = width - 344
-        background.height = height - 510
-    }
-
     private fun refresh() {
         tabs.forEachIndexed { index, button -> button.selected = (index == 1) == detailed }
         val snapshot = presentation
@@ -79,7 +68,7 @@ internal class TileInspector(parent: Container, font: SystemFont) {
         val tile = selectedTile
         val selected = if (ready) tile else null
 
-        selectionText.textSize = if (selected != null && detailed) 12.0 else 14.0
+        selectionText.textSize = if (selected != null && detailed) 16.0 else 18.0
         rows.forEach { (label, value) ->
             label.visible = selected != null && !detailed
             value.visible = label.visible
@@ -88,7 +77,7 @@ internal class TileInspector(parent: Container, font: SystemFont) {
         selectionText.visible = selected == null || detailed
 
         if (selected == null || snapshot == null) {
-            header.text = if (ready) "Explore the map" else "Building your world…"
+            header.text = if (ready) "Explore the map" else "Building world…"
             context.text = "Select a tile to see its conditions."
             selectionText.text = "Click a tile to inspect it.\n\nDrag to pan\nScroll to zoom\nHome to fit the map\n\nChoose a colour layer above\nto explore climate patterns."
             return
@@ -124,9 +113,9 @@ internal class TileInspector(parent: Container, font: SystemFont) {
         val ecology = "Canopy ${formatNumber(world.treeCover(x, y) * 100, 0)}% · " +
             "grass ${formatNumber(world.grassCover(x, y) * 100, 0)}% · " +
             "bare ${formatNumber(world.bareCover(x, y) * 100, 0)}%\n" +
-            "Limit: ${world.growthLimitation(x, y).name.lowercase()}"
+            "Growth limit: ${world.growthLimitation(x, y).name.lowercase()}"
         climateText.text = "Climate rain · ${formatNumber(weather.recentRainMmPerYear(x, y), 0)} mm/year\n" +
-            "$ecology\nAnnual climate drives terrain"
+            "$ecology"
 
         if (detailed) selectionText.text = detailedText(snapshot, x, y)
     }

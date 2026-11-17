@@ -26,6 +26,7 @@ class World(
     internal var plateIds = IntArray(tileCount)
     internal var plateBoundaries = ByteArray(tileCount)
     internal var plateCount = 0
+    internal var movingPlateCount = 0
     var geographyRevision: Long = 0
         private set
     val seaLevel: Double get() = settings.seaLevel
@@ -99,7 +100,7 @@ class World(
         for (i in terrainChanges.indices) if (terrainChanges[i]) changedTiles[next++] = i
 
         return WorldSnapshot(
-            generation, width, height, biomeRevision, geographyRevision, seaLevel, plateIds, plateCount, plateBoundaries, cells.copyOf(), landBiomeSummary(), changedTiles,
+            generation, width, height, biomeRevision, geographyRevision, seaLevel, plateIds, plateCount, movingPlateCount, plateBoundaries, cells.copyOf(), landBiomeSummary(), changedTiles,
             trees.copyOf(), grasses.copyOf(), limitations.copyOf()
         )
     }
@@ -139,7 +140,7 @@ class World(
             "Mountains ${percent(Terrain.MOUNTAINS)}%"
     }
 
-    private fun index(x: Int, y: Int) = y * width + ((x % width) + width) % width
+    private fun index(x: Int, y: Int) = worldIndex(x, y, width, height)
 
     private fun smoothstep(value: Double, edge0: Double, edge1: Double): Double {
         val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0.0, 1.0)

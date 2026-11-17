@@ -11,9 +11,9 @@ import korlibs.math.geom.Size
 internal object AtlasUi {
     val background = Colors["#0c151b"]
     val panel = Colors["#15242c"]
-    val line = Colors["#2b4049"]
+    val line = Colors["#36505b"]
     val text = Colors["#e8f0ee"]
-    val muted = Colors["#9db2b7"]
+    val muted = Colors["#b4c7cc"]
     val accent = Colors["#82d1bb"]
     val warm = Colors["#e9c38d"]
 }
@@ -23,15 +23,15 @@ internal fun Container.atlasCard(width: Double, height: Double) =
         stroke = AtlasUi.line, strokeThickness = 1.0)
 
 internal fun Container.atlasText(font: SystemFont, value: String, x: Double, y: Double,
-    size: Double = 14.0, muted: Boolean = false) =
+    size: Double = 18.0, muted: Boolean = false) =
     text(value, font = font, textSize = size, color = if (muted) AtlasUi.muted else AtlasUi.text).xy(x, y)
 
 internal class AtlasButton(parent: Container, font: SystemFont, label: String,
-    x: Double, y: Double, width: Double, height: Double = 36.0, private val action: () -> Unit
+    x: Double, y: Double, width: Double, height: Double = 44.0, private val action: () -> Unit
 ) {
     val view = parent.container { }.xy(x, y)
     private val background = view.roundRect(Size(width, height), RectCorners(7), fill = Colors.WHITE)
-    val caption = view.atlasText(font, label, 12.0, (height - 17) / 2, 14.0)
+    val caption = view.atlasText(font, label, 12.0, (height - 22) / 2, 18.0)
     private var hover = false
     var selected = false
         set(value) { if (field != value) { field = value; refresh() } }

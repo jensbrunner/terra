@@ -176,15 +176,15 @@ class TerrainMapView(
         ClimateLayer.PLATES -> {
             val id = world.plateId(x, y)
             val edge = id != world.plateId((x + world.width - 1) % world.width, y) ||
-                id != world.plateId(x, maxOf(0, y - 1))
+                id != world.plateId(x, y - 1)
             val kind = world.plateBoundary(x, y)
-            if (edge || kind != PlateBoundary.NONE) boundaryColors[kind.ordinal].withA(235)
+            if (edge) boundaryColors[kind.ordinal].withA(235)
             else plateColors[id % plateColors.size].withA(115)
         }
         ClimateLayer.CLOUDS -> {
             val cloud = weather.cloudCover(x, y)
             val west = (x + world.width - 1) % world.width
-            val upwind = weather.cloudCover(west, maxOf(0, y - 1))
+            val upwind = weather.cloudCover(west, (y + world.height - 1) % world.height)
             val light = (0.88 + (cloud - upwind) * 1.8).coerceIn(0.55, 1.0)
             RGBA((231 * light).toInt(), (240 * light).toInt(), (252 * light).toInt(), (cloud * 232).toInt())
         }
@@ -229,8 +229,8 @@ class TerrainMapView(
             for (y in 0 until world.height) for (x in 0 until world.width) {
                 val west = world[x - 1, y].elevation
                 val east = world[x + 1, y].elevation
-                val north = world[x, (y - 1).coerceAtLeast(0)].elevation
-                val south = world[x, (y + 1).coerceAtMost(world.height - 1)].elevation
+                val north = world[x, y - 1].elevation
+                val south = world[x, y + 1].elevation
                 val shade = (0.88 + 6 * (west - east) + 4 * (south - north)).coerceIn(0.55, 1.12)
                 val oceanFactor = if (world[x, y].terrain == Terrain.OCEAN) 0.35 else 1.0
                 val alpha = (abs(1 - shade) * oceanFactor * 255).toInt()

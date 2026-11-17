@@ -29,12 +29,12 @@ internal class TerrainGenerator(
         require(settings.noisePersistence in 0.0..1.0 && settings.noiseLacunarity.isFinite() && settings.noiseLacunarity >= 1.0)
         require(settings.mountainRelief in 0.0..0.6 && settings.erosionStrength in 0.0..1.0)
         val random = Random(seed xor 0x36ac71)
-        plates = crustPlates(random, settings)
+        plates = crustPlates(random)
         distances = DoubleArray(plates.size)
         weights = DoubleArray(plates.size)
         closingRates = DoubleArray(plates.size * plates.size) { index ->
             val a = plates[index / plates.size]; val b = plates[index % plates.size]
-            val dx = longitudeDelta(b.x - a.x); val dy = b.y - a.y
+            val dx = periodicDelta(b.x - a.x, REFERENCE_WIDTH); val dy = periodicDelta(b.y - a.y, REFERENCE_HEIGHT)
             val separation = sqrt(dx * dx + dy * dy)
             if (separation == 0.0) 0.0 else max(0.0, ((a.u - b.u) * dx + (a.v - b.v) * dy) / separation)
         }
@@ -57,12 +57,12 @@ internal class TerrainGenerator(
     private fun sample(x: Double, y: Double): Double {
         val warpScale = settings.continentScale * 0.65
         val warp = settings.continentScale * 0.22
-        val px = wrap(x + warp * noise.periodic(x, y, noiseSalt + 503, 2, warpScale))
+        val px = wrapPosition(x + warp * noise.periodic(x, y, noiseSalt + 503, 2, warpScale), REFERENCE_WIDTH)
         val py = y + warp * noise.periodic(x, y, noiseSalt + 719, 2, warpScale)
         var minimum = Double.POSITIVE_INFINITY
         for (p in plates.indices) {
-            val dx = longitudeDelta(px - plates[p].x)
-            val dy = py - plates[p].y
+            val dx = periodicDelta(px - plates[p].x, REFERENCE_WIDTH)
+            val dy = periodicDelta(py - plates[p].y, REFERENCE_HEIGHT)
             val distance = sqrt(dx * dx + dy * dy)
             distances[p] = distance
             minimum = min(minimum, distance)
@@ -94,7 +94,7 @@ internal class TerrainGenerator(
         // Older folded ranges survive away from today's convergent boundaries.
         var oldRange = 0.0
         for (range in oldRanges) {
-            val rx = longitudeDelta(px - range.x); val ry = py - range.y
+            val rx = periodicDelta(px - range.x, REFERENCE_WIDTH); val ry = periodicDelta(py - range.y, REFERENCE_HEIGHT)
             val along = (rx * range.u + ry * range.v) / range.halfLength
             if (abs(along) >= 1) continue
             val across = -rx * range.v + ry * range.u - range.bend * (1 - along * along)
@@ -125,8 +125,8 @@ internal class TerrainGenerator(
                 var destination = -1
                 var excess = 0.0
                 for (oy in -1..1) for (ox in -1..1) {
-                    if (ox == 0 && oy == 0 || y + oy !in 0 until height) continue
-                    val next = (y + oy) * width + (x + ox + width) % width
+                    if (ox == 0 && oy == 0) continue
+                    val next = worldIndex(x + ox, y + oy, width, height)
                     val distance = sqrt(ox * ox * dx * dx + oy * oy * dy * dy)
                     val drop = elevation[i] - elevation[next] - 0.035 * distance
                     if (drop > excess) { excess = drop; destination = next }
@@ -157,9 +157,6 @@ internal class TerrainGenerator(
             elevation[i] = max(settings.seaLevel, max(original[i] - 0.10 * strength, target))
         }
     }
-
-    private fun wrap(x: Double) = ((x % REFERENCE_WIDTH) + REFERENCE_WIDTH) % REFERENCE_WIDTH
-    private fun longitudeDelta(x: Double) = wrap(x + REFERENCE_WIDTH / 2) - REFERENCE_WIDTH / 2
 
     companion object {
         // Existing slider scales retain their native-map units at any requested raster size.

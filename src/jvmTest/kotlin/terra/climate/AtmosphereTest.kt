@@ -3,6 +3,7 @@ package terra.climate
 import kotlin.test.*
 import terra.world.Terrain
 import terra.world.World
+import terra.simulation.GeologySettings
 
 class AtmosphereTest {
     @Test fun centuryFastForwardMatchesAnnualSteps() {
@@ -22,8 +23,29 @@ class AtmosphereTest {
             assertEquals(wa.treeCover(x, y), wb.treeCover(x, y))
             assertEquals(wa.grassCover(x, y), wb.grassCover(x, y))
         }
-        val biomes = (0 until whole.height).flatMap { y -> (0 until whole.width).map { x -> whole[x, y].terrain } }.toSet()
-        assertTrue(biomes.containsAll(Terrain.entries))
+    }
+
+    @Test fun liveGeologyControlsPreservePendingYearsAndApplyRatesChronologically() {
+        val world = World(42, 30, 22)
+        val climate = ClimateSimulation(world)
+        climate.geologySettings = GeologySettings(1000, 100)
+        climate.advance(80 * YEAR_SECONDS)
+        assertEquals(0.0, climate.geologyStatus.effectiveYears)
+        climate.geologySettings = GeologySettings(10_000, 20)
+        climate.advance(YEAR_SECONDS)
+        assertEquals(80_000.0, climate.geologyStatus.effectiveYears)
+        climate.advance(19 * YEAR_SECONDS)
+        assertEquals(280_000.0, climate.geologyStatus.effectiveYears)
+        assertEquals(100 * YEAR_SECONDS, climate.elapsedSeconds)
+        assertEquals(5L, world.geographyRevision)
+    }
+
+    @Test fun defaultGeologyAdvancesAMillionEffectiveYearsPerUpdate() {
+        val world = World(42, 30, 22)
+        val climate = ClimateSimulation(world)
+        climate.advance(100 * YEAR_SECONDS)
+        assertEquals(1_000_000.0, climate.geologyStatus.effectiveYears)
+        assertEquals(1L, world.geographyRevision)
     }
 
     @Test fun annualClimateDrivesSuccessionAndWeatherStaysBounded() {

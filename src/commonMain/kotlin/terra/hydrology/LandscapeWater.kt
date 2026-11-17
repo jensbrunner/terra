@@ -18,12 +18,12 @@ internal class LandscapeWater(world: World) {
     private val infiltrationScale = DoubleArray(count) { tile ->
         val x = tile % width; val y = tile / width
         val slope = abs(world[(x + 1) % width, y].elevation - world[(x + width - 1) % width, y].elevation) +
-            abs(world[x, min(height - 1, y + 1)].elevation - world[x, max(0, y - 1)].elevation)
+            abs(world[x, y + 1].elevation - world[x, y - 1].elevation)
         (1 - 0.65 * (slope / 0.05).coerceIn(0.0, 1.0)).coerceIn(0.25, 1.0)
     }
     /** Fixed substrate/rooting depth: coherent geology texture and slope, independent of cover. */
     val soilCapacityMm = DoubleArray(count) { i ->
-        val texture = 0.5 + 0.5 * sin((i % width) * 0.11 + world.seed) * cos((i / width) * 0.09 - world.seed)
+        val texture = 0.5 + 0.5 * sin((i % width) * 10 * PI / width + world.seed) * cos((i / width) * 6 * PI / height - world.seed)
         if (land[i]) (160 + 90 * texture) * (0.6 + 0.4 * infiltrationScale[i]) else 1.0
     }
     val rain = DoubleArray(count)
@@ -42,9 +42,9 @@ internal class LandscapeWater(world: World) {
             if (!newLand || !land[i]) { soil[i] = 0.0; snow[i] = 0.0 }
             land[i] = newLand
             val slope = abs(world[x + 1, y].elevation - world[x - 1, y].elevation) +
-                abs(world[x, min(height - 1, y + 1)].elevation - world[x, max(0, y - 1)].elevation)
+                abs(world[x, y + 1].elevation - world[x, y - 1].elevation)
             infiltrationScale[i] = (1 - 0.65 * (slope / 0.05).coerceIn(0.0, 1.0)).coerceIn(0.25, 1.0)
-            val texture = 0.5 + 0.5 * sin(x * 0.11 + world.seed) * cos(y * 0.09 - world.seed)
+            val texture = 0.5 + 0.5 * sin(x * 10 * PI / width + world.seed) * cos(y * 6 * PI / height - world.seed)
             soilCapacityMm[i] = if (newLand) (160 + 90 * texture) * (0.6 + 0.4 * infiltrationScale[i]) else 1.0
             val excess = max(0.0, soil[i] - soilCapacityMm[i])
             soil[i] -= excess

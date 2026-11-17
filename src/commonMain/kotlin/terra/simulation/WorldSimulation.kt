@@ -24,7 +24,7 @@ data class SimulationProgress(
 
 data class WorldPresentationSnapshot(
     val progress: SimulationProgress, val world: WorldSnapshot, val weather: EnvironmentSnapshot,
-    val drainage: SurfaceWaterSnapshot, val surfaceWater: RasterFrame
+    val drainage: SurfaceWaterSnapshot, val surfaceWater: RasterFrame, val geology: GeologyStatus
 )
 
 /** Mutable physics belongs to one worker; only immutable snapshots leave it. */
@@ -36,6 +36,8 @@ internal class WorldSimulation(val request: WorldRequest) {
     private var waterView: SurfaceWaterSnapshot? = null
     private lateinit var waterFrame: RasterFrame
     val completedSeconds get() = climate.elapsedSeconds
+    val geologyStatus get() = climate.geologyStatus
+    fun updateGeology(settings: GeologySettings) { climate.geologySettings = settings }
     fun advance(seconds: Double) = climate.advance(seconds)
     fun snapshot(progress: SimulationProgress): WorldPresentationSnapshot {
         if (worldView.biomeRevision != world.biomeRevision) worldView = world.snapshot(request.generation, worldView)
@@ -45,12 +47,13 @@ internal class WorldSimulation(val request: WorldRequest) {
             waterView = drainage
         }
         return WorldPresentationSnapshot(progress, worldView, climate.snapshot(), drainage,
-            waterFrame)
+            waterFrame, geologyStatus)
     }
 }
 
 expect class SimulationWorker(request: WorldRequest) {
     fun updateControls(speed: SimulationSpeed, paused: Boolean)
+    fun updateGeology(settings: GeologySettings)
     fun regenerate(request: WorldRequest)
     fun latestSnapshot(): WorldPresentationSnapshot?
     val failure: String?

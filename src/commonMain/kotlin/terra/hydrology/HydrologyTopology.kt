@@ -2,9 +2,11 @@ package terra.hydrology
 
 import terra.world.Terrain
 import terra.world.World
+import terra.world.wrapIndex
+import terra.world.worldIndex
 import kotlin.math.max
 
-/** Immutable D8 drainage geography: periodic longitude, impermeable polar land edges. */
+/** Immutable D8 drainage geography: periodic longitude and latitude. */
 class HydrologyTopology internal constructor(
     val width: Int,
     val height: Int,
@@ -63,8 +65,7 @@ class HydrologyTopology internal constructor(
             for (dy in -1..1) for (dx in -1..1) {
                 if (dx == 0 && dy == 0) continue
                 val nx = (x + dx + width) % width
-                val ny = y + dy
-                if (ny !in 0 until height) continue
+                val ny = wrapIndex(y + dy, height)
                 val next = ny * width + nx
                 if (visited[next]) continue
                 visited[next] = true
@@ -126,8 +127,7 @@ class HydrologyTopology internal constructor(
                 for (dy in -1..1) for (dx in -1..1) {
                     if (dx == 0 && dy == 0) continue
                     val nx = (x + dx + width) % width
-                    val ny = y + dy
-                    if (ny !in 0 until height) continue
+                    val ny = wrapIndex(y + dy, height)
                     val next = ny * width + nx
                     if (grouped[next] >= 0 || filledElevation[next] != spillLevel ||
                         filledElevation[next] <= elevation[next]
@@ -149,8 +149,7 @@ class HydrologyTopology internal constructor(
                     for (dy in -1..1) for (dx in -1..1) {
                         if (dx == 0 && dy == 0) continue
                         val nx = (x + dx + width) % width
-                        val ny = y + dy
-                        if (ny !in 0 until height) continue
+                        val ny = wrapIndex(y + dy, height)
                         val next = ny * width + nx
                         if (grouped[next] == group) continue
                         var cursor = next
@@ -286,8 +285,9 @@ class HydrologyTopology internal constructor(
     private inline fun neighbors(tile: Int, visit: (Int) -> Unit) {
         val x = tile % width; val y = tile / width
         for (dy in -1..1) for (dx in -1..1) {
-            if (dx == 0 && dy == 0 || y + dy !in 0 until height) continue
-            visit((y + dy) * width + (x + dx + width) % width)
+            if (dx == 0 && dy == 0) continue
+            val next = worldIndex(x + dx, y + dy, width, height)
+            if (next != tile) visit(next)
         }
     }
 

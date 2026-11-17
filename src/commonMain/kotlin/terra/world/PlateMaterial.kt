@@ -18,10 +18,13 @@ internal fun materialKey(x: Int, y: Int): Long {
     return bits xor (bits ushr 33)
 }
 
-internal fun longitudeKm(x: Double) = ((x + 20_000) % 40_000 + 40_000) % 40_000 - 20_000
+internal fun longitudeKm(x: Double) = periodicDelta(x, PLANET_WIDTH_KM)
+internal fun latitudeKm(y: Double) = periodicDelta(y, PLANET_HEIGHT_KM)
 
 internal class CrustCell(val x: Int, val y: Int, var area: Double, var continent: Double,
-    var basalt: Double, var sediment: Double, var age: Double, var relief: Double = 0.0) {
+    var basalt: Double, var sediment: Double, var age: Double, var relief: Double = 0.0, var weakness: Double = 0.5) {
+    var sedimentContinent = 0.0
+    var dsc = 0.0
     var support = 0.0
     var removeArea = 0.0
     var compressArea = 0.0
@@ -34,13 +37,24 @@ internal class CrustCell(val x: Int, val y: Int, var area: Double, var continent
         support = (continent * (1 - CONTINENT_DENSITY / MANTLE_DENSITY) +
             basalt * (1 - BASALT_DENSITY / MANTLE_DENSITY) + sediment * (1 - SEDIMENT_DENSITY / MANTLE_DENSITY)) +
             area * (relief + ocean * 1.7 * exp(-age / 60_000_000))
-        removeArea = 0.0; compressArea = 0.0; dc = 0.0; db = 0.0; ds = 0.0
+        removeArea = 0.0; compressArea = 0.0; dc = 0.0; db = 0.0; ds = 0.0; dsc = 0.0
     }
 }
 
 internal class MaterialPlate(val id: Int, var x: Double, var y: Double, var vx: Double, var vy: Double,
     var spin: Double = 0.0, val referenceX: Double = x, val referenceY: Double = y) {
     val cells = LinkedHashMap<Long, CrustCell>()
+    var desiredX = vx
+    var desiredY = vy
+    var desiredSpin = spin
+    var driveId = id.toLong()
+    var driveEpoch = Long.MIN_VALUE
+    var bornAt = 0.0
+    var separationUntil = 0.0
+    var separationX = 0.0
+    var separationY = 0.0
+    var inheritedX = vx
+    var inheritedY = vy
     var angle = 0.0
     var previousX = x
     var previousY = y
@@ -53,7 +67,6 @@ internal class MaterialPlate(val id: Int, var x: Double, var y: Double, var vx: 
     var stressXX = 0.0
     var stressXY = 0.0
     var stressYY = 0.0
-    var lastSplit = 0.0
     var active = true
     var cosAngle = 1.0
     var sinAngle = 0.0
@@ -122,6 +135,8 @@ internal class PlateRaster(count: Int) {
     val continent = RasterField(grid)
     val basalt = RasterField(grid)
     val sediment = RasterField(grid)
+    val sedimentContinent = RasterField(grid)
+    val weakness = RasterField(grid)
     val support = RasterField(grid)
     val age = RasterField(grid)
     val remove = RasterField(grid)
@@ -129,12 +144,18 @@ internal class PlateRaster(count: Int) {
     val dc = RasterField(grid)
     val db = RasterField(grid)
     val ds = RasterField(grid)
+    val dsc = RasterField(grid)
     fun clear() = grid.clear()
+    fun forEachIndex(action: (Int) -> Unit) {
+        for (j in 0 until grid.size) action(grid.globals[j])
+    }
     fun buoyant(i: Int) = continent[i] > area[i] * 12 || continent[i] + basalt[i] > area[i] * 22
     fun add(i: Int, cell: CrustCell?, weight: Double) {
         if (cell == null || weight <= 0) return
         area[i] += weight * cell.area; continent[i] += weight * cell.continent
         basalt[i] += weight * cell.basalt; sediment[i] += weight * cell.sediment
+        sedimentContinent[i] += weight * cell.sedimentContinent
+        weakness[i] += weight * cell.area * cell.weakness
         support[i] += weight * cell.support; age[i] += weight * cell.area * cell.age
     }
     fun distribute(i: Int, cell: CrustCell?, weight: Double) {
@@ -145,6 +166,7 @@ internal class PlateRaster(count: Int) {
         cell.dc += if (dc[i] >= 0) dc[i] * fraction else dc[i] * weight * cell.continent / max(1e-12, continent[i])
         cell.db += if (db[i] >= 0) db[i] * fraction else db[i] * weight * cell.basalt / max(1e-12, basalt[i])
         cell.ds += if (ds[i] >= 0) ds[i] * fraction else ds[i] * weight * cell.sediment / max(1e-12, sediment[i])
+        cell.dsc += if (dsc[i] >= 0) dsc[i] * fraction else dsc[i] * weight * cell.sedimentContinent / max(1e-12, sedimentContinent[i])
     }
 }
 

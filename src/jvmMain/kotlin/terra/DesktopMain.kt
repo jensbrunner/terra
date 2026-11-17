@@ -27,6 +27,7 @@ suspend fun main() {
         override fun paintComponents(g: Graphics) = Unit
         override fun paint(g: Graphics) { window.framePaint(g) }
     }.apply {
+        minimumSize = Dimension(1100, 800)
         ignoreRepaint = true
         defaultCloseOperation = JFrame.DISPOSE_ON_CLOSE
     }

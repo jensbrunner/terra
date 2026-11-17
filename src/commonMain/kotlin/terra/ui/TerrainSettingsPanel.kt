@@ -9,6 +9,7 @@ import kotlin.math.pow
 import terra.WINDOW_HEIGHT
 import terra.WINDOW_WIDTH
 import terra.world.TerrainGenerationSettings
+import terra.simulation.GeologySettings
 
 private data class SettingSlider(
     val label: String, val value: Double, val minimum: Double, val maximum: Double,
@@ -19,9 +20,12 @@ private data class SettingSlider(
 class TerrainSettingsPanel(
     parent: Container, private val font: SystemFont, initialSettings: TerrainGenerationSettings,
     private val onSettingsChanged: (TerrainGenerationSettings) -> Unit,
+    initialGeology: GeologySettings,
+    private val onGeologyChanged: (GeologySettings) -> Unit,
     private val onOpen: () -> Unit = {}
 ) {
     private var settings = initialSettings
+    private var geology = initialGeology
     private var applied = initialSettings
     private val dirty get() = settings != applied
     private var tab = 0
@@ -34,28 +38,31 @@ class TerrainSettingsPanel(
     private val summary: Text
     private val apply: AtlasButton
     private val discard: AtlasButton
+    private val defaults: AtlasButton
 
     init {
         shade = overlay.solidRect(WINDOW_WIDTH, WINDOW_HEIGHT, AtlasUi.background.withA(225))
         panel = overlay.container { }.xy(300.0, 120.0)
-        panel.atlasCard(840.0, 720.0)
-        panel.atlasText(font, "World settings", 28.0, 24.0, 25.0)
-        panel.atlasText(font, "Edit a draft, then rebuild when you’re ready.", 28.0, 60.0, muted = true)
-        AtlasButton(panel, font, "Close", 732.0, 24.0, 80.0) { closeMenus() }
-        listOf("Landforms", "Advanced").forEachIndexed { index, name ->
-            tabs += AtlasButton(panel, font, name, 28 + index * 156.0, 104.0, 146.0) { tab = index; renderTab() }
+        panel.atlasCard(960.0, 744.0)
+        panel.atlasText(font, "World & simulation settings", 28.0, 24.0, 30.0)
+        panel.atlasText(font, "Simulation changes apply live. Landform edits rebuild the world.", 28.0, 68.0, 17.0, muted = true)
+        AtlasButton(panel, font, "Close", 836.0, 24.0, 96.0) { closeMenus() }
+        listOf("Landforms", "Advanced", "Simulation").forEachIndexed { index, name ->
+            tabs += AtlasButton(panel, font, name, 28 + index * 188.0, 112.0, 176.0) { tab = index; renderTab() }
         }
-        content = panel.container { }.xy(28.0, 166.0)
-        panel.solidRect(784.0, 1.0, AtlasUi.line).xy(28.0, 546.0)
-        summary = panel.atlasText(font, "Generating world…", 28.0, 562.0, 12.0, muted = true)
-        pending = panel.atlasText(font, "", 28.0, 620.0, 13.0)
-        AtlasButton(panel, font, "Defaults", 28.0, 660.0, 100.0) {
-            settings = TerrainGenerationSettings(); renderTab(); refreshPendingChanges()
+        content = panel.container { }.xy(28.0, 180.0)
+        panel.solidRect(904.0, 1.0, AtlasUi.line).xy(28.0, 540.0)
+        summary = panel.atlasText(font, "Generating world…", 28.0, 560.0, 16.0, muted = true)
+        pending = panel.atlasText(font, "", 28.0, 628.0, 17.0)
+        defaults = AtlasButton(panel, font, "Defaults", 28.0, 680.0, 180.0, 44.0) {
+            if (tab == 2) { geology = GeologySettings(); onGeologyChanged(geology) }
+            else settings = TerrainGenerationSettings()
+            renderTab()
         }
-        discard = AtlasButton(panel, font, "Discard edits", 140.0, 660.0, 140.0) {
+        discard = AtlasButton(panel, font, "Discard edits", 220.0, 680.0, 164.0) {
             settings = applied; renderTab(); refreshPendingChanges()
         }
-        apply = AtlasButton(panel, font, "Apply & rebuild world", 572.0, 656.0, 240.0, 40.0) {
+        apply = AtlasButton(panel, font, "Apply & rebuild world", 676.0, 676.0, 256.0, 48.0) {
             applied = settings
             onSettingsChanged(settings)
             refreshPendingChanges()
@@ -67,7 +74,7 @@ class TerrainSettingsPanel(
 
     fun resize(width: Double, height: Double) {
         shade.width = width; shade.height = height
-        panel.xy((width - 840) / 2, (height - 720) / 2)
+        panel.xy((width - 960) / 2, (height - 744) / 2)
     }
 
     fun hasOpenMenu(): Boolean = overlay.visible
@@ -110,18 +117,20 @@ class TerrainSettingsPanel(
     private fun renderTab() {
         tabs.forEachIndexed { index, button -> button.selected = index == tab }
         content.removeChildren()
+        refreshPendingChanges()
+        if (tab == 2) { renderSimulation(); return }
         val all = elevationSliders()
         val basic = setOf("Base elevation", "Sea level", "Mountain cutoff", "Continent scale",
             "Continent strength", "Regional strength", "Mountain relief", "Erosion strength")
         val selected = if (tab == 0) all.filter { it.label in basic } else all.filter { it.label !in basic }
         selected.forEachIndexed { index, setting ->
-            val x = (index % 2) * 408.0
-            val y = (index / 2) * 86.0
-            content.atlasText(font, setting.label, x, y, 14.0)
-            val value = content.atlasText(font, formatNumber(setting.value, setting.decimals), x + 300, y, 14.0)
+            val x = (index % 2) * 452.0
+            val y = (index / 2) * 84.0
+            content.atlasText(font, setting.label, x, y, 18.0)
+            val value = content.atlasText(font, formatNumber(setting.value, setting.decimals), x + 332, y, 18.0)
             val control = content.uiSlider(value = setting.value, min = setting.minimum,
                 max = setting.maximum, step = setting.step, decimalPlaces = setting.decimals,
-                size = Size(376.0, 24.0)) { showTooltip = null }.xy(x, y + 28)
+                size = Size(424.0, 32.0)) { showTooltip = null }.xy(x, y + 32)
             control.onChange.add { next ->
                 value.text = formatNumber(next, setting.decimals); setting.update(next)
             }
@@ -129,8 +138,36 @@ class TerrainSettingsPanel(
 
     }
 
+    private fun renderSimulation() {
+        content.atlasText(font, "Geology speed", 0.0, 0.0, 22.0)
+        val rateLabel = content.atlasText(font, "×${geology.speedMultiplier}", 732.0, 0.0, 22.0)
+        content.atlasText(font, "Accelerates plate motion, erosion, cooling and the plate lifecycle together.", 0.0, 36.0, 17.0, muted = true)
+        val rate = content.uiSlider(value = geology.speedMultiplier.toDouble(), min = 1000.0, max = 10000.0,
+            step = 1000.0, decimalPlaces = 0, size = Size(880.0, 36.0)) { showTooltip = null }.xy(0.0, 76.0)
+        content.atlasText(font, "Geology update interval", 0.0, 148.0, 22.0)
+        val intervalLabel = content.atlasText(font, "${geology.updateYears} years", 732.0, 148.0, 22.0)
+        content.atlasText(font, "Smaller intervals give finer detail and use more CPU. Larger intervals are coarser.", 0.0, 184.0, 17.0, muted = true)
+        val interval = content.uiSlider(value = geology.updateYears.toDouble(), min = 10.0, max = 500.0,
+            step = 10.0, decimalPlaces = 0, size = Size(880.0, 36.0)) { showTooltip = null }.xy(0.0, 224.0)
+        val step = content.atlasText(font, "", 0.0, 296.0, 18.0)
+        fun changed() {
+            rateLabel.text = "×${geology.speedMultiplier}"
+            intervalLabel.text = "${geology.updateYears} years"
+            step.text = "Each update advances ${formatNumber(geology.speedMultiplier.toDouble() * geology.updateYears / 1000, 0)} thousand geological years."
+            onGeologyChanged(geology)
+        }
+        rate.onChange.add { geology = geology.copy(speedMultiplier = it.toInt()); changed() }
+        interval.onChange.add { geology = geology.copy(updateYears = it.toInt()); changed() }
+        step.text = "Each update advances ${formatNumber(geology.speedMultiplier.toDouble() * geology.updateYears / 1000, 0)} thousand geological years."
+    }
+
     private fun refreshPendingChanges() {
-        pending.text = if (dirty) "Unapplied changes · rebuilding restarts the world and its clock."
+        val live = tab == 2
+        summary.visible = !live
+        apply.view.visible = !live; discard.view.visible = !live
+        defaults.caption.text = if (live) "Reset controls" else "Defaults"
+        pending.text = if (live) "Live controls · your world and its clock are kept. Calendar speed is unchanged."
+            else if (dirty) "Unapplied changes · rebuilding restarts the world and its clock."
             else "No changes · close this panel to keep exploring."
         pending.color = if (dirty) AtlasUi.warm else AtlasUi.muted
         apply.enabled = dirty; apply.selected = dirty

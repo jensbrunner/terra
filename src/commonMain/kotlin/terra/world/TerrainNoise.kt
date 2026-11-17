@@ -2,14 +2,19 @@ package terra.world
 
 import kotlin.math.floor
 
-/** Seeded simplex fractals with a C2 longitude-periodic join. */
+/** Seeded simplex fractals with C2 periodic joins on both axes. */
 internal class TerrainNoise(private val settings: TerrainGenerationSettings) {
     fun periodic(x: Double, y: Double, seed: Int, octaves: Int, scale: Double): Double {
-        val longitude = ((x % TerrainGenerator.REFERENCE_WIDTH) + TerrainGenerator.REFERENCE_WIDTH) % TerrainGenerator.REFERENCE_WIDTH
-        val t = longitude / TerrainGenerator.REFERENCE_WIDTH
-        val blend = t * t * t * (t * (t * 6 - 15) + 10)
-        return fbm(longitude, y, seed, octaves, scale) * (1 - blend) +
-            fbm(longitude - TerrainGenerator.REFERENCE_WIDTH, y, seed, octaves, scale) * blend
+        val xx = wrapPosition(x, TerrainGenerator.REFERENCE_WIDTH)
+        val yy = wrapPosition(y, TerrainGenerator.REFERENCE_HEIGHT)
+        fun blend(t: Double) = t * t * t * (t * (t * 6 - 15) + 10)
+        val tx = blend(xx / TerrainGenerator.REFERENCE_WIDTH)
+        val ty = blend(yy / TerrainGenerator.REFERENCE_HEIGHT)
+        val a = fbm(xx, yy, seed, octaves, scale) * (1 - tx) +
+            fbm(xx - TerrainGenerator.REFERENCE_WIDTH, yy, seed, octaves, scale) * tx
+        val b = fbm(xx, yy - TerrainGenerator.REFERENCE_HEIGHT, seed, octaves, scale) * (1 - tx) +
+            fbm(xx - TerrainGenerator.REFERENCE_WIDTH, yy - TerrainGenerator.REFERENCE_HEIGHT, seed, octaves, scale) * tx
+        return a * (1 - ty) + b * ty
     }
     private fun fbm(x: Double, y: Double, seed: Int, octaves: Int, baseScale: Double): Double {
         var total = 0.0

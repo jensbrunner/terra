@@ -3,6 +3,8 @@ package terra.render
 import korlibs.image.color.RGBA
 import korlibs.math.geom.Point
 import terra.hydrology.SurfaceWaterSnapshot
+import terra.world.periodicDelta
+import terra.world.wrapIndex
 import kotlin.math.*
 
 /** Curved drainage channels rendered into a transparent, anti-aliased water texture.
@@ -81,7 +83,8 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
         val next = hydrology.downstreamTileIndex(x, y)
         if (next < 0) return -1
         val dx = abs(next % width - x)
-        return if (min(dx, width - dx) <= 1 && abs(next / width - y) <= 1) next else -1
+        val dy = abs(next / width - y)
+        return if (min(dx, width - dx) <= 1 && min(dy, height - dy) <= 1) next else -1
     }
 
     private fun discharge(hydrology: SurfaceWaterSnapshot, tile: Int) = hydrology.dischargeMmTilesPerDay(tile % width, tile / width)
@@ -97,7 +100,8 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
     }
 
     private fun near(point: Point, origin: Point): Point =
-        Point(origin.x + (point.x - origin.x + width * 1.5) % width - width / 2.0, point.y)
+        Point(origin.x + periodicDelta(point.x - origin.x, width.toDouble()),
+            origin.y + periodicDelta(point.y - origin.y, height.toDouble()))
 
     /** Union signed channel distances, so tributary banks never cut through the main river. */
     private fun stroke(start: Point, end: Point, startRadius: Double, endRadius: Double) {
@@ -109,20 +113,20 @@ internal class SurfaceWaterRasterizer(private val width: Int, private val height
         val padding = max(startRadius, endRadius) * scale + BANK_WIDTH * scale + 1
         val left = floor(min(ax, bx) - padding).toInt()
         val right = ceil(max(ax, bx) + padding).toInt()
-        val top = max(0, floor(min(ay, by) - padding).toInt())
-        val bottom = min(rasterHeight - 1, ceil(max(ay, by) + padding).toInt())
+        val top = floor(min(ay, by) - padding).toInt()
+        val bottom = ceil(max(ay, by) + padding).toInt()
         for (y in top..bottom) for (x in left..right) {
             val t = if (lengthSquared > 0) (((x + 0.5 - ax) * dx + (y + 0.5 - ay) * dy) / lengthSquared).coerceIn(0.0, 1.0) else 0.0
             val distance = hypot(x + 0.5 - ax - t * dx, y + 0.5 - ay - t * dy)
             val depth = ((startRadius + (endRadius - startRadius) * t) * scale - distance).toFloat()
-            val i = y * rasterWidth + x.mod(rasterWidth)
+            val i = wrapIndex(y, rasterHeight) * rasterWidth + x.mod(rasterWidth)
             if (depth > channelDepth[i]) channelDepth[i] = depth
         }
     }
 
     private fun shade(canvas: RasterCanvas, hydrology: SurfaceWaterSnapshot) {
         val scale = PIXELS_PER_TILE.toDouble()
-        fun wet(x: Int, y: Int) = if (y in 0 until height && hydrology.isLakeTileWet(x.mod(width), y)) 1.0 else 0.0
+        fun wet(x: Int, y: Int) = if (hydrology.isLakeTileWet(x.mod(width), wrapIndex(y, height))) 1.0 else 0.0
         for (y in 0 until rasterHeight) for (x in 0 until rasterWidth) {
             val depth = channelDepth[y * rasterWidth + x].toDouble()
             var bank = smooth(-0.65, 0.65, depth + BANK_WIDTH * scale)

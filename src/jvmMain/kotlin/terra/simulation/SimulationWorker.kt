@@ -6,7 +6,7 @@ import kotlin.concurrent.thread
 import terra.climate.YEAR_SECONDS
 
 actual class SimulationWorker actual constructor(request: WorldRequest) {
-    private data class Controls(val speed: SimulationSpeed, val paused: Boolean)
+    private data class Controls(val speed: SimulationSpeed, val paused: Boolean, val geology: GeologySettings = GeologySettings())
     private val running = AtomicBoolean(true)
     private val desiredWorld = AtomicReference(request)
     private val controls = AtomicReference(Controls(SimulationSpeed.ONE_YEAR, false))
@@ -19,7 +19,10 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
     actual val failure: String? get() = error.get()
     actual fun latestSnapshot(): WorldPresentationSnapshot? = mailbox.get()
     actual fun updateControls(speed: SimulationSpeed, paused: Boolean) {
-        controls.set(Controls(speed, paused)); signal()
+        controls.updateAndGet { it.copy(speed = speed, paused = paused) }; signal()
+    }
+    actual fun updateGeology(settings: GeologySettings) {
+        controls.updateAndGet { it.copy(geology = settings) }; signal()
     }
     actual fun regenerate(request: WorldRequest) {
         desiredWorld.set(request); error.set(null); signal()
@@ -59,10 +62,14 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                     if (!active.paused && active.speed != SimulationSpeed.MAX) pending = minOf(limit, pending + (now - previousWall) / 1e9 * active.speed.simulatedSecondsPerRealSecond)
                     previousWall = now
                     if (command != active) {
-                        active = command; pending = 0.0; achieved = 0.0
-                        rateStarted = now; rateStartSim = simulation.completedSeconds
+                        if (command.speed != active.speed || command.paused != active.paused) {
+                            pending = 0.0; achieved = 0.0
+                            rateStarted = now; rateStartSim = simulation.completedSeconds
+                        }
+                        active = command
                         changed = true
                     }
+                    simulation.updateGeology(command.geology)
                     if (!active.paused && (unlimited || pending >= quantum)) {
                         simulation.advance(quantum)
                         if (!unlimited) pending -= quantum
@@ -77,8 +84,8 @@ actual class SimulationWorker actual constructor(request: WorldRequest) {
                             if (active.paused) 0.0 else achieved, pending, active.paused, quantum,
                             !active.paused && !unlimited && achieved > 0 && achieved < active.speed.simulatedSecondsPerRealSecond * 0.9)
                         val previous = mailbox.get()
-                        mailbox.set(if (!changed && previous?.progress?.completedSeconds == simulation.completedSeconds)
-                            previous.copy(progress = progress) else simulation.snapshot(progress))
+                        mailbox.set(if (previous?.progress?.generation == requested.generation && previous.progress.completedSeconds == simulation.completedSeconds)
+                            previous.copy(progress = progress, geology = simulation.geologyStatus) else simulation.snapshot(progress))
                         publishedAt = finished
                     }
                 }
