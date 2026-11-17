@@ -8,20 +8,40 @@ There is no mantle-flow solver or target land percentage.
 
 ## Motion and lifecycle
 
-- Geological updates run every 100 simulation years at 1,000× effective time.
-  Max still advances annual steps without a frame budget; snapshots remain 5 Hz
+- The game defaults to 10,000× geological time with an update every 100 calendar
+  simulation years (one million effective years per update). Settings → Simulation
+  provides live sliders for 1,000–10,000× speed and 10–100-year update intervals.
+  Smaller intervals trade CPU time for finer steps. These controls do not rebuild
+  the world, change the calendar playback speed, or advance a paused simulation.
+  Pending per-year time credits preserve rate changes chronologically. Regeneration
+  keeps the live controls. Direct solver calls retain a 1,000× reference default;
+  the running game's scheduler passes its selected effective rate explicitly.
+- Max still advances annual steps without a frame budget; snapshots remain 5 Hz
   and the desktop render target remains 100 fps.
-- Seed, persistent plate identity, and 8-million-year epochs determine translation
-  targets of 3–9 cm/year and spin targets within ±0.2°/million years. Actual motion
-  eases toward the drive over 2 million years. Its area-weighted translation is
-  removed each update. Collision impulses temporarily resist the actual motion.
+- Motion follows a cheap, overdamped boundary-force balance, with a two-million-year
+  response. Initial seeded velocities initialize ridges and trench polarity; their
+  headings are never randomly rerolled. Fixed basal traction contributes one half
+  of the initial 3–9 cm/year translation and one quarter of its spin. Ridge push and cooling-dependent slab pull supply
+  the remaining translation and torque. These are velocity-equivalent force proxies,
+  not a calibrated mantle-flow calculation. Translation targets are capped at
+  12 cm/year and spin at ±0.2°/million years. Area-weighted translation is removed.
+- Each touching pair remembers spreading versus subduction and slab polarity.
+  Trench slabs start at a proxy depth of 200 km, grow with actually consumed area
+  up to 700 km, and lose support over five million years once the entire contact
+  becomes continental. Pull acts only on incoming oceanic crust. Five million years
+  of sustained convergence can reverse a spreading contact into subduction.
+  Continental contacts add viscous resistance, allowing sustained shortening without
+  elastic bouncing. Relaxation slows for stiff contacts to avoid alternating velocity
+  corrections at million-year steps. Forces and area-dependent drag act about material centroids. Separation or a
+  topology-changing merger/fracture resets the affected pair histories.
 - Contact creates shortening and roots before any identity merger. Ordinary
   welding requires uninterrupted current contact for 8 million years and
   shortening of 5% of the smaller plate. Separation clears the history. Ordinary
   welds must fit within 80% of each world period and retain at least six plates.
-- Opening boundaries accumulate a plate-local tensile tensor. Fracture candidates
-  have 12% extension, are 40 million years old, or are oversized; ages above
-  60 million years take priority. Two rooted growth fronts start at area-weighted
+- Opening boundaries accumulate a plate-local tensile tensor. Ordinary fracture
+  requires 12% extension and at least 40 million years since creation or merger;
+  age alone never causes breakup. Oversized bodies and population/activity recovery
+  can fracture sooner. Two rooted growth fronts start at area-weighted
   quarter points along principal tension, falling back to the longest material
   axis. Growth is faster across the plate than along tension. Thick continental
   crust is stronger; seeded material weakness bends the separating interface.
@@ -29,8 +49,9 @@ There is no mantle-flow solver or target land percentage.
   Eight growth biases are tried; the most balanced legal connected partition wins.
   Each child retains at least 20% of its parent and 1% of the planet. Cutting
   changes neither columns nor poses. The cached weakness travels with material.
-- Daughters inherit motion and receive opposite 3 cm/year spreading components
-  for 8 million years. Ordinary fractures are at least 8 million years apart.
+- Daughters inherit basal traction and motion and receive opposite 3 cm/year
+  spreading components for 20 million years, long enough to establish an opening
+  boundary. Ordinary fractures are at least 8 million years apart.
   After 12 million years without meaningful deformation or fracture, a legal
   fracture receives priority. Population recovery can fracture sooner below six.
 - Every regenerated world starts with eight seeded sites on a jittered 4×2
@@ -50,7 +71,9 @@ all cores simultaneously through detached patches and uncovered tiles, preferrin
 shortest distance, then greater local projected coverage, then stable plate ID.
 Every acquired tile attaches to an existing region, so territories stay connected.
 
-Detached columns and material stranded beyond a one-tile boundary fringe are
+Collision and subduction are resolved before cleanup capture, so overlapping
+incoming crust first has an opportunity to shorten or enter the recycling ledger.
+Detached columns and material stranded beyond a one-tile boundary fringe are then
 captured locally. Collect transfers before applying them, changing each column's
 frame once per batch. Continental rock, basalt, sediment, provenance, area, and
 area-weighted age, relief, and weakness are preserved. Reprojection after capture
@@ -82,6 +105,11 @@ back into that rock over 20 million years, with density conversion preserving ma
 Rainfall/slope/catchment erosion is three times the previous rate; it transfers
 rock into sediment and deposits it downstream rather than fading elevations.
 
+Rotated material footprints are normalized so each column's interpolation weights
+sum to one. The same weights gather inventories and distribute transfers, avoiding
+sediment overdraw and artificial mass when a projected column is depleted. Footprint
+weights are cached per pose and recalculated only for moved or newly created columns.
+
 The inventory equation is:
 
 `rockMass = initialRockMass + mantleAddedMass - mantleRecycledMass`
@@ -91,35 +119,53 @@ spreading, cumulative locally captured mass, fracture/merger/watchdog counts, an
 the latest 256 lifecycle events.
 The status bar shows moving/total plates; key 6 retains typed boundaries.
 
+## Live controls and interface
+
+The larger interface uses 18-point control labels, 44-pixel main buttons, higher
+contrast secondary text, and a responsive header. The sidebar separates Map layers
+from Tile details; selecting a tile opens its inspector. Settings separates live
+Simulation controls from Landforms/Advanced drafts that require rebuilding.
+A smaller virtual-size baseline keeps text legible at a 1,100×800 window. Rendered
+checks cover normal and compact layouts, settings, inspection, and help; slider
+interaction was verified against the paused worker without changing generation,
+calendar time, or geography revision. Slider tooltips are disabled to prevent
+orphan labels over the map. Captures are in `build/reports/ui/`.
+
 ## Verification
 
-Regression coverage includes periodic seams and corners, conservative roots,
-erosion, recycling, time batching, immutable snapshots, weld timing, daughter
-separation, and inactivity recovery. Added checks cover detached-patch capture
-and preserved material moments, stable gap ownership, pending spreading budgets,
-deterministic weakness-sensitive jagged cuts, connected territories, and colours
-restricted to actual interfaces.
+The JVM suite checks seams, connected territories, capture, rifting, roots,
+recycling, chronology, immutable snapshots, and conservative projection. Additional
+regressions cover unchanged drive across the former eight-million-year epoch,
+absence of age-only fracture, stronger pull from colder slabs, unsupported territory
+at a collision, and sustained ocean closure followed by joined continental land and
+root growth. A controlled 60×36 fixture retains a land connection for at least 15 of
+its final 20 million-year steps and continues shortening after ocean closure.
 
 | Check | Result |
 | --- | --- |
-| Compile and JVM suite | Passed; 31 tests |
-| Seeds 31742, 42, 123 at 60×44 | 500 million effective years each |
-| Default seed 31742 at 283×212 | 300 million years; 37 fractures, 35 mergers/consolidations |
-| Every checked geology tick | One connected territory per active plate; 6–10 plates; zero off-interface boundary colours |
-| Activity | No inactive 20-million-year interval; continued relative motion |
-| Worst relative mass error | 1.43e-13 (required <1e-8) |
-| Minimum default-world relative RMS drift | 2.32 cm/year |
-| Short Max worker benchmark, median of three runs | 661 vs 673 years/sec before (1.8% lower; limit 20%) |
-| Coupled time batching, immutable snapshots, pause and regeneration | Passed |
-| Terrain and overlay images | Inspected separately at generation, 25, 100, and 300 million years |
+| Compile and JVM suite | Passed; 39 tests |
+| 10,000×, 100-year interval, seeds 31742/42/123 at 60×44 | 500 million effective years each |
+| 10,000× default seed at 283×212 | 300 million effective years |
+| Every checked geology tick | Connected territories, 6–10 plates, interface-only boundary colours, continued activity |
+| Worst relative mass error | 4.59e-14 (required <1e-8) |
+| Default-world RMS relative drift | At least 1.89 cm/effective year; 4.89 cm/year at 300 million years |
+| Directional persistence over 40 million years | Net/path ratio 0.90–0.94, versus 0.53–0.57 before |
+| Paired three-run median Max calendar throughput | 532 yr/sec before; 644 yr/sec after (21% higher) |
+| Geological progress in equal seven-second fresh-worker windows | Median 32 vs 36 million effective years |
+| Live worker settings | Pause preserved; changes acknowledged; settings retained after regeneration |
+| Terrain and plate images | Inspected at generation, 25, 100 and 300 million years |
 
-Long-run checks inspect connectivity, population, interface colours, and the mass
-ledger every tick, plus activity in every 20-million-year window. Preview rasters
-are in `build/reports/tectonics/`. Benchmarks include normal worker snapshots;
-throughput varies with seed and geological age. Max remains unthrottled, snapshot
-publication remains separate, and the desktop render target remains 100 fps.
+Directional persistence uses three 60×44 seeds with ordinary fractures disabled to
+isolate the motion policy; normal lifecycle tests keep fractures enabled. Throughput
+uses alternating fresh JVM workers on the same machine, with the same default seed,
+10,000× multiplier, 100-year interval, unthrottled Max, and seven-second sampling
+windows. These include climate/water work and snapshot publication. This is a short
+fresh-world benchmark, not a guarantee of the same speed in older configurations.
+Detailed logs and terrain/plate images are under `build/reports/tectonics/`.
 
-This is a driven material toy with raster collisions and approximate strength.
-Broad terrain structures and coherent plate regions persist in the inspected runs.
-Some grid-scale coastal and seabed ribbing remains; jagged two-way rifts are the
-fracture model for this iteration.
+Large steps remain a deliberate accuracy tradeoff. A separate 500-calendar-year
+interval test at 10,000× failed mass accounting, so the live control is bounded
+at 100 years, at most one million effective years per update. The accelerated
+rate is not a ten-substep reproduction of the reference simulation: collision
+and erosion caps affect how deformation is resolved. Grid-scale coastal and
+seabed ribbing can remain. Max is unthrottled and rendering stays separate.

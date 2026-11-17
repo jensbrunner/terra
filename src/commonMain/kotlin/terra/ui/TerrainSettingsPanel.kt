@@ -130,7 +130,7 @@ class TerrainSettingsPanel(
             val value = content.atlasText(font, formatNumber(setting.value, setting.decimals), x + 332, y, 18.0)
             val control = content.uiSlider(value = setting.value, min = setting.minimum,
                 max = setting.maximum, step = setting.step, decimalPlaces = setting.decimals,
-                size = Size(424.0, 32.0)) { showTooltip = null }.xy(x, y + 32)
+                size = Size(424.0, 32.0)) { showTooltip = false }.xy(x, y + 32)
             control.onChange.add { next ->
                 value.text = formatNumber(next, setting.decimals); setting.update(next)
             }
@@ -143,22 +143,27 @@ class TerrainSettingsPanel(
         val rateLabel = content.atlasText(font, "×${geology.speedMultiplier}", 732.0, 0.0, 22.0)
         content.atlasText(font, "Accelerates plate motion, erosion, cooling and the plate lifecycle together.", 0.0, 36.0, 17.0, muted = true)
         val rate = content.uiSlider(value = geology.speedMultiplier.toDouble(), min = 1000.0, max = 10000.0,
-            step = 1000.0, decimalPlaces = 0, size = Size(880.0, 36.0)) { showTooltip = null }.xy(0.0, 76.0)
+            step = 1000.0, decimalPlaces = 0, size = Size(880.0, 36.0)) { showTooltip = false }.xy(0.0, 76.0)
         content.atlasText(font, "Geology update interval", 0.0, 148.0, 22.0)
         val intervalLabel = content.atlasText(font, "${geology.updateYears} years", 732.0, 148.0, 22.0)
         content.atlasText(font, "Smaller intervals give finer detail and use more CPU. Larger intervals are coarser.", 0.0, 184.0, 17.0, muted = true)
-        val interval = content.uiSlider(value = geology.updateYears.toDouble(), min = 10.0, max = 500.0,
-            step = 10.0, decimalPlaces = 0, size = Size(880.0, 36.0)) { showTooltip = null }.xy(0.0, 224.0)
-        val step = content.atlasText(font, "", 0.0, 296.0, 18.0)
+        val interval = content.uiSlider(value = geology.updateYears.toDouble(), min = 10.0, max = 100.0,
+            step = 10.0, decimalPlaces = 0, size = Size(880.0, 36.0)) { showTooltip = false }.xy(0.0, 224.0)
+        fun stepText(): String {
+            val years = geology.speedMultiplier.toDouble() * geology.updateYears
+            val amount = if (years >= 1_000_000) "${formatNumber(years / 1_000_000, 2)} million"
+                else "${formatNumber(years / 1000, 0)} thousand"
+            return "Each update advances $amount geological years."
+        }
+        val step = content.atlasText(font, stepText(), 0.0, 296.0, 18.0)
         fun changed() {
             rateLabel.text = "×${geology.speedMultiplier}"
             intervalLabel.text = "${geology.updateYears} years"
-            step.text = "Each update advances ${formatNumber(geology.speedMultiplier.toDouble() * geology.updateYears / 1000, 0)} thousand geological years."
+            step.text = stepText()
             onGeologyChanged(geology)
         }
         rate.onChange.add { geology = geology.copy(speedMultiplier = it.toInt()); changed() }
         interval.onChange.add { geology = geology.copy(updateYears = it.toInt()); changed() }
-        step.text = "Each update advances ${formatNumber(geology.speedMultiplier.toDouble() * geology.updateYears / 1000, 0)} thousand geological years."
     }
 
     private fun refreshPendingChanges() {
@@ -169,7 +174,7 @@ class TerrainSettingsPanel(
         pending.text = if (live) "Live controls · your world and its clock are kept. Calendar speed is unchanged."
             else if (dirty) "Unapplied changes · rebuilding restarts the world and its clock."
             else "No changes · close this panel to keep exploring."
-        pending.color = if (dirty) AtlasUi.warm else AtlasUi.muted
+        pending.color = if (!live && dirty) AtlasUi.warm else AtlasUi.muted
         apply.enabled = dirty; apply.selected = dirty
         discard.enabled = dirty
     }

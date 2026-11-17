@@ -56,7 +56,7 @@ class PlateTectonicsTest {
         for (i in before.indices) assertEquals(before[i], after[i], 1e-11)
         val north = plates(model).first()
         for (p in plates(model)) {
-            p.driveEpoch = 0; p.desiredX = 0.0; p.vx = 0.0
+            p.desiredX = 0.0; p.vx = 0.0
             p.desiredY = if (p === north) 0.00009 else -0.00001; p.vy = p.desiredY
             p.desiredSpin = 0.0; p.spin = 0.0
         }
@@ -66,6 +66,32 @@ class PlateTectonicsTest {
         assertTrue(north.y in 0.0..20.0)
         assertTrue(north.vy > 0)
         budget(model, mass)
+    }
+
+    @Test fun rotatedProjectionPreservesTheStoredInventories() {
+        val model = PlateTectonics(World(31742, 36, 26))
+        val ps = plates(model)
+        for (p in ps) for (cell in p.cells.values) { cell.sediment = 0.3; cell.sedimentContinent = 0.1 }
+        @Suppress("UNCHECKED_CAST")
+        val rasters = field(model, "rasters").get(model) as List<PlateRaster>
+        for (angle in listOf(0.0, 0.17, 0.6)) {
+            for (p in ps) { p.angle = angle; p.x += 77.3; p.y += 31.2 }
+            invoke(model, "rasterize")
+            val stored = listOf(ps.sumOf { p -> p.cells.values.sumOf { it.area } }, model.continentalVolume,
+                ps.sumOf { p -> p.cells.values.sumOf { it.basalt } }, ps.sumOf { p -> p.cells.values.sumOf { it.sediment } })
+            val projected = listOf<(PlateRaster) -> RasterField>({ it.area }, { it.continent }, { it.basalt }, { it.sediment })
+                .map { select -> rasters.sumOf { r -> (0 until 36 * 26).sumOf { select(r)[it] } } }
+            for (i in stored.indices) assertEquals(stored[i], projected[i], max(1.0, stored[i]) * 1e-11)
+        }
+    }
+
+    @Test fun largeGeologicalStepsAndSedimentDepletionKeepTheMassLedgerClosed() {
+        val model = collisionFixture(0.45)
+        for (p in plates(model)) for (cell in p.cells.values) {
+            cell.sediment = 0.2; cell.sedimentContinent = 0.1
+        }
+        val mass = model.rockMass
+        repeat(300) { model.advance(100.0, DoubleArray(36 * 24) { 2000.0 }, speedMultiplier = 10_000.0); budget(model, mass) }
     }
 
     @Test fun detachedHistoricalContactsCannotWeld() {
@@ -149,7 +175,7 @@ class PlateTectonicsTest {
             p.cells.clear(); p.active = p.id < 6
             p.vx = if (p.id % 3 == 1) -0.00006 else 0.00006
             p.vy = 0.0; p.spin = 0.0; p.desiredSpin = 0.0
-            p.desiredX = p.vx; p.desiredY = 0.0; p.driveEpoch = 0
+            p.desiredX = p.vx; p.desiredY = 0.0
         }
         val dx = PLANET_WIDTH_KM / 36; val dy = PLANET_HEIGHT_KM / 24
         for (y in 0 until 24) for (x in 0 until 36) {
@@ -279,6 +305,101 @@ class PlateTectonicsTest {
         assertEquals(0.0, model.oceanCreatedArea)
         assertEquals(0.0, model.mantleAddedMass)
         budget(model, mass)
+    }
+
+    @Test fun unsupportedRepairedTerritoryDoesNotSubductZeroArea() {
+        val model = collisionFixture()
+        @Suppress("UNCHECKED_CAST")
+        val rasters = field(model, "rasters").get(model) as List<PlateRaster>
+        val owner = field(model, "owner").get(model) as IntArray
+        val area = field(model, "totalArea").get(model) as DoubleArray
+        val i = 5 * 36 + 13
+        owner[i] = 0 // The coherent territory front reaches a tile with only foreign coverage.
+        rasters[1].area[i] = 2.0; area[i] = 2.0
+        val mass = model.rockMass
+        invoke(model, "collide", 1_000_000.0)
+        invoke(model, "applyEvents")
+        budget(model, mass)
+        assertTrue(model.rockMass.isFinite())
+    }
+
+    @Test fun colderOceanicSlabsStrengthenConvergenceWithoutChangingBasalDrive() {
+        fun approach(age: Double): Double {
+            val model = collisionFixture()
+            val ps = plates(model)
+            for (p in ps.filter { it.active && it.id % 3 == 0 }) for (cell in p.cells.values) {
+                cell.continent = 0.0; cell.basalt = cell.area * 7; cell.age = age
+            }
+            invoke(model, "rasterize")
+            invoke(model, "movePlates", 1_000_000.0)
+            return ps[0].vx - ps[1].vx
+        }
+        assertTrue(approach(80_000_000.0) > approach(1_000_000.0))
+    }
+
+    @Test fun motionHasNoEightMillionYearRandomHeadingChangesOrAgeOnlyFractures() {
+        val a = PlateTectonics(World(42, 36, 26))
+        val b = PlateTectonics(World(42, 36, 26))
+        field(a, "geologicalTime").setDouble(a, 7_900_000.0)
+        field(b, "geologicalTime").setDouble(b, 80_100_000.0)
+        invoke(a, "movePlates", 100_000.0)
+        invoke(b, "movePlates", 100_000.0)
+        for ((p, q) in plates(a).zip(plates(b))) {
+            assertEquals(p.vx, q.vx, 1e-14)
+            assertEquals(p.vy, q.vy, 1e-14)
+            assertEquals(p.spin, q.spin, 1e-14)
+        }
+        field(b, "lastDeformation").setDouble(b, b.effectiveYears)
+        invoke(b, "observeContacts", 0.0)
+        invoke(b, "evolvePlates", 0.0)
+        assertEquals(0, b.splits)
+    }
+
+    @Test fun oceanClosureCarriesContinentsIntoLastingCollisionAndBuildsRoots() {
+        val width = 60; val height = 36
+        val world = World(42, width, height, TerrainGenerationSettings(erosionStrength = 0.0))
+        val model = PlateTectonics(world)
+        val ps = plates(model)
+        for (p in ps) {
+            p.cells.clear(); p.active = p.id < 6
+            p.vx = when (p.id % 3) { 0 -> 0.00006; 1 -> 0.0; else -> -0.00004 }
+            p.desiredX = p.vx; p.vy = 0.0; p.desiredY = 0.0; p.spin = 0.0; p.desiredSpin = 0.0
+        }
+        for (y in 0 until height) for (x in 0 until width) {
+            val p = ps[y / 18 * 3 + x / 20]
+            val ocean = x % 20 >= 16 && p.id % 3 == 0 || p.id % 3 == 2
+            invoke(model, "addWorld", p, (x + 0.5) * PLANET_WIDTH_KM / width,
+                (y + 0.5) * PLANET_HEIGHT_KM / height, 1.0, if (ocean) 0.0 else 30.0,
+                if (ocean) 7.0 else 0.0, 0.0, 60_000_000.0, 0.0, 0.0, 0.5)
+        }
+        invoke(model, "rasterize")
+        // Isolate ocean closure from population recovery and fracture timing in this fixture.
+        field(model, "lastBreakup").setDouble(model, 1e12)
+        val mass = model.rockMass
+        val rain = DoubleArray(width * height)
+        var travel = 0.0
+        var firstCollision = -1
+        var lateShortening = 0.0
+        var joinedTicks = 0
+        repeat(120) { tick ->
+            model.advance(100.0, rain, speedMultiplier = 10_000.0)
+            travel += (ps[0].vx - ps[1].vx) * 1_000_000
+            if (model.shortenedArea > 1.0 && firstCollision < 0) firstCollision = tick
+            if (tick == 99) lateShortening = model.shortenedArea
+            if (tick >= 100 && world.plateIds.indices.any { i ->
+                val j = worldIndex(i % width + 1, i / width, width, height)
+                world.plateIds[i] == 0 && world.plateIds[j] == 1 &&
+                    world.isLand(i % width, i / width) && world.isLand(j % width, j / width)
+            }) joinedTicks++
+            budget(model, mass)
+        }
+        assertTrue(travel > 2000, "Continents approached by only $travel km")
+        assertTrue(model.subductedArea > 10)
+        assertTrue(firstCollision in 1..99, "No continental collision: $firstCollision")
+        assertTrue(model.shortenedArea > lateShortening, "Convergence did not persist after ocean closure")
+        assertTrue(joinedTicks >= 15, "Joined continental land did not persist: $joinedTicks ticks")
+        assertTrue(ps.any { p -> p.cells.values.any { it.continent / it.area > 35 } })
+        assertTrue(model.continentalVolume > mass / CONTINENT_DENSITY * 0.5)
     }
 
     @Test fun repeatedLifecycleKeepsRelativeMotionAndConservesMass() {

@@ -54,6 +54,7 @@ suspend fun main() {
         gameWindow = window,
         targetFps = 100.0,
         displayMode = KorgeDisplayMode.TOP_LEFT_NO_CLIP,
+        virtualSize = Size(1100, 800),
         windowSize = Size(WINDOW_WIDTH.toInt(), WINDOW_HEIGHT.toInt()),
         backgroundColor = Colors["#0d1719"]
     ) {

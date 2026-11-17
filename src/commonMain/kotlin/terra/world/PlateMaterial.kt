@@ -23,6 +23,8 @@ internal fun latitudeKm(y: Double) = periodicDelta(y, PLANET_HEIGHT_KM)
 
 internal class CrustCell(val x: Int, val y: Int, var area: Double, var continent: Double,
     var basalt: Double, var sediment: Double, var age: Double, var relief: Double = 0.0, var weakness: Double = 0.5) {
+    var projectionRevision = -1L
+    var projectionWeight = 1.0
     var sedimentContinent = 0.0
     var dsc = 0.0
     var support = 0.0
@@ -44,25 +46,25 @@ internal class CrustCell(val x: Int, val y: Int, var area: Double, var continent
 internal class MaterialPlate(val id: Int, var x: Double, var y: Double, var vx: Double, var vy: Double,
     var spin: Double = 0.0, val referenceX: Double = x, val referenceY: Double = y) {
     val cells = LinkedHashMap<Long, CrustCell>()
+    var projectionRevision = 0L
+    var projectionX = Double.NaN
+    var projectionY = Double.NaN
+    var projectionAngle = Double.NaN
     var desiredX = vx
     var desiredY = vy
     var desiredSpin = spin
-    var driveId = id.toLong()
-    var driveEpoch = Long.MIN_VALUE
     var bornAt = 0.0
     var separationUntil = 0.0
     var separationX = 0.0
     var separationY = 0.0
-    var inheritedX = vx
-    var inheritedY = vy
     var angle = 0.0
     var previousX = x
     var previousY = y
     var previousAngle = 0.0
     var area = 0.0
-    var impulseX = 0.0
-    var impulseY = 0.0
-    var impulseSpin = 0.0
+    var centerX = 0.0
+    var centerY = 0.0
+    var radius2 = 0.0
     var extension = 0.0
     var stressXX = 0.0
     var stressXY = 0.0
@@ -75,17 +77,25 @@ internal class MaterialPlate(val id: Int, var x: Double, var y: Double, var vx: 
     var minY = 0
     var maxY = 0
 
-    fun prepare() {
+    fun prepare(width: Int, height: Int) {
         area = 0.0
+        var mx = 0.0; var my = 0.0; var moment = 0.0
         minX = Int.MAX_VALUE; minY = Int.MAX_VALUE
         maxX = Int.MIN_VALUE; maxY = Int.MIN_VALUE
         for (cell in cells.values) {
             area += cell.area
+            val x = (cell.x + 0.5) * PLANET_WIDTH_KM / width - referenceX
+            val y = (cell.y + 0.5) * PLANET_HEIGHT_KM / height - referenceY
+            mx += cell.area * x; my += cell.area * y; moment += cell.area * (x * x + y * y)
             minX = min(minX, cell.x); maxX = max(maxX, cell.x)
             minY = min(minY, cell.y); maxY = max(maxY, cell.y)
             cell.prepare()
         }
         cosAngle = cos(angle); sinAngle = sin(angle)
+        mx /= max(1e-12, area); my /= max(1e-12, area)
+        centerX = cosAngle * mx - sinAngle * my
+        centerY = sinAngle * mx + cosAngle * my
+        radius2 = max(1.0, moment / max(1e-12, area) - mx * mx - my * my)
     }
 }
 
@@ -152,21 +162,23 @@ internal class PlateRaster(count: Int) {
     fun buoyant(i: Int) = continent[i] > area[i] * 12 || continent[i] + basalt[i] > area[i] * 22
     fun add(i: Int, cell: CrustCell?, weight: Double) {
         if (cell == null || weight <= 0) return
-        area[i] += weight * cell.area; continent[i] += weight * cell.continent
-        basalt[i] += weight * cell.basalt; sediment[i] += weight * cell.sediment
-        sedimentContinent[i] += weight * cell.sedimentContinent
-        weakness[i] += weight * cell.area * cell.weakness
-        support[i] += weight * cell.support; age[i] += weight * cell.area * cell.age
+        val w = weight / cell.projectionWeight
+        area[i] += w * cell.area; continent[i] += w * cell.continent
+        basalt[i] += w * cell.basalt; sediment[i] += w * cell.sediment
+        sedimentContinent[i] += w * cell.sedimentContinent
+        weakness[i] += w * cell.area * cell.weakness
+        support[i] += w * cell.support; age[i] += w * cell.area * cell.age
     }
     fun distribute(i: Int, cell: CrustCell?, weight: Double) {
         if (cell == null || weight <= 0 || area[i] <= 1e-12) return
-        val fraction = weight * cell.area / area[i]
+        val w = weight / cell.projectionWeight
+        val fraction = w * cell.area / area[i]
         cell.removeArea += remove[i] * fraction
         cell.compressArea += compress[i] * fraction
-        cell.dc += if (dc[i] >= 0) dc[i] * fraction else dc[i] * weight * cell.continent / max(1e-12, continent[i])
-        cell.db += if (db[i] >= 0) db[i] * fraction else db[i] * weight * cell.basalt / max(1e-12, basalt[i])
-        cell.ds += if (ds[i] >= 0) ds[i] * fraction else ds[i] * weight * cell.sediment / max(1e-12, sediment[i])
-        cell.dsc += if (dsc[i] >= 0) dsc[i] * fraction else dsc[i] * weight * cell.sedimentContinent / max(1e-12, sedimentContinent[i])
+        cell.dc += if (dc[i] >= 0) dc[i] * fraction else dc[i] * w * cell.continent / max(1e-12, continent[i])
+        cell.db += if (db[i] >= 0) db[i] * fraction else db[i] * w * cell.basalt / max(1e-12, basalt[i])
+        cell.ds += if (ds[i] >= 0) ds[i] * fraction else ds[i] * w * cell.sediment / max(1e-12, sediment[i])
+        cell.dsc += if (dsc[i] >= 0) dsc[i] * fraction else dsc[i] * w * cell.sedimentContinent / max(1e-12, sedimentContinent[i])
     }
 }
 

@@ -44,7 +44,7 @@ internal class TileInspector(parent: Container, font: SystemFont) {
                 rows += atlasText(font, "", 20.0, y, 17.0, muted = true) to
                     atlasText(font, "", 200.0, y, 18.0)
             }
-            climateLabel = atlasText(font, "", 20.0, 412.0, 16.0, muted = true)
+            climateLabel = atlasText(font, "", 20.0, 402.0, 16.0, muted = true)
             tabs.first().selected = true
         }
 

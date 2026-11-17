@@ -57,10 +57,10 @@ class AtlasScene : Scene() {
     private lateinit var uiFont: SystemFont
     private val layerButtons = mutableMapOf<ClimateLayer, AtlasButton>()
     private lateinit var layerContent: Container
+    private lateinit var layerHints: Text
     private lateinit var inspectorHost: Container
     private lateinit var sidebarBackground: View
     private val sidebarTabs = mutableListOf<AtlasButton>()
-    private var inspecting = false
     private var geologySettings = GeologySettings()
     private lateinit var speedLabel: Text
     private lateinit var calendarLabel: Text
@@ -198,7 +198,8 @@ class AtlasScene : Scene() {
         headerActions.xy(width - WINDOW_WIDTH, if (narrow) 60.0 else 0.0)
         layerPanel.xy(width - 420, top)
         sidebarBackground.height = bodyHeight
-        legendPanel.xy(width - 400, top + 452)
+        layerHints.visible = bodyHeight >= 600
+        legendPanel.xy(width - 400, top + if (bodyHeight < 600) 412 else 452)
         footerBackground.width = width; footerBackground.y = height - 44
         footerLabel.xy(24.0, height - 32)
         frameTimeLabel.xy(width - 264, height - 32)
@@ -471,7 +472,7 @@ class AtlasScene : Scene() {
                     .forEachIndexed { index, (layer, label) ->
                         layerButtons[layer] = AtlasButton(this, uiFont, label, 20 + index * 124.0, 276.0, 112.0) { toggleLayer(layer) }
                     }
-                atlasText(uiFont, "Keys 1–9 toggle layers", 20.0, 344.0, 16.0, muted = true)
+                layerHints = atlasText(uiFont, "Keys 1–9 toggle layers", 20.0, 344.0, 16.0, muted = true)
             }.xy(0.0, 80.0)
             inspectorHost = container { visible = false }.xy(0.0, 80.0)
         }
@@ -480,7 +481,6 @@ class AtlasScene : Scene() {
     }
 
     private fun showSidebar(inspect: Boolean) {
-        inspecting = inspect
         layerContent.visible = !inspect; inspectorHost.visible = inspect
         if (::legendPanel.isInitialized) legendPanel.visible = !inspect
         sidebarTabs.forEachIndexed { index, button -> button.selected = (index == 1) == inspect }
