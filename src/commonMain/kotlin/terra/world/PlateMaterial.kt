@@ -9,32 +9,27 @@ internal const val SEDIMENT_DENSITY = 2400.0
 internal const val MANTLE_DENSITY = 3300.0
 internal const val WATER_LOADING = (MANTLE_DENSITY - 1025.0) / MANTLE_DENSITY
 internal const val COMPENSATION_KM = 3.7
+internal const val ROOT_THICKNESS_KM = 70.0
 internal const val PLANET_WIDTH_KM = 40_000.0
 internal const val PLANET_HEIGHT_KM = 20_000.0
-
-internal fun materialKey(x: Int, y: Int): Long {
-    var bits = (x.toLong() shl 32) xor (y.toLong() and 0xffffffffL)
-    bits = (bits xor (bits ushr 33)) * -49064778989728563L
-    return bits xor (bits ushr 33)
-}
 
 internal fun longitudeKm(x: Double) = periodicDelta(x, PLANET_WIDTH_KM)
 internal fun latitudeKm(y: Double) = periodicDelta(y, PLANET_HEIGHT_KM)
 
-internal class CrustCell(val x: Int, val y: Int, var area: Double, var continent: Double,
+internal class CrustCell(var x: Double, var y: Double, var area: Double, var continent: Double,
     var basalt: Double, var sediment: Double, var age: Double, var relief: Double = 0.0, var weakness: Double = 0.5) {
-    var projectionRevision = -1L
-    var projectionWeight = 1.0
     var sedimentContinent = 0.0
     var dsc = 0.0
     var support = 0.0
     var removeArea = 0.0
     var compressArea = 0.0
+    var compressible = 0.0
     var dc = 0.0
     var db = 0.0
     var ds = 0.0
     fun mass() = continent * CONTINENT_DENSITY + basalt * BASALT_DENSITY + sediment * SEDIMENT_DENSITY
     fun prepare() {
+        compressible = max(0.0, area - (continent + basalt + sediment) / ROOT_THICKNESS_KM)
         val ocean = basalt / max(1e-12, continent + basalt)
         support = (continent * (1 - CONTINENT_DENSITY / MANTLE_DENSITY) +
             basalt * (1 - BASALT_DENSITY / MANTLE_DENSITY) + sediment * (1 - SEDIMENT_DENSITY / MANTLE_DENSITY)) +
@@ -44,16 +39,15 @@ internal class CrustCell(val x: Int, val y: Int, var area: Double, var continent
 }
 
 internal class MaterialPlate(val id: Int, var x: Double, var y: Double, var vx: Double, var vy: Double,
-    var spin: Double = 0.0, val referenceX: Double = x, val referenceY: Double = y) {
-    val cells = LinkedHashMap<Long, CrustCell>()
-    var projectionRevision = 0L
-    var projectionX = Double.NaN
-    var projectionY = Double.NaN
-    var projectionAngle = Double.NaN
+    var spin: Double = 0.0) {
+    val cells = ArrayList<CrustCell>()
     var desiredX = vx
     var desiredY = vy
     var desiredSpin = spin
+    var identity = id
     var bornAt = 0.0
+    var riftYears = 0.0
+    var extensionAdded = 0.0
     var separationUntil = 0.0
     var separationX = 0.0
     var separationY = 0.0
@@ -72,24 +66,23 @@ internal class MaterialPlate(val id: Int, var x: Double, var y: Double, var vx: 
     var active = true
     var cosAngle = 1.0
     var sinAngle = 0.0
-    var minX = 0
-    var maxX = 0
-    var minY = 0
-    var maxY = 0
+    var minX = 0.0
+    var maxX = 0.0
+    var minY = 0.0
+    var maxY = 0.0
 
-    fun prepare(width: Int, height: Int) {
+    fun prepare() {
         area = 0.0
         var mx = 0.0; var my = 0.0; var moment = 0.0
-        minX = Int.MAX_VALUE; minY = Int.MAX_VALUE
-        maxX = Int.MIN_VALUE; maxY = Int.MIN_VALUE
-        for (cell in cells.values) {
+        minX = Double.POSITIVE_INFINITY; minY = Double.POSITIVE_INFINITY
+        maxX = Double.NEGATIVE_INFINITY; maxY = Double.NEGATIVE_INFINITY
+        for (cell in cells) {
             area += cell.area
-            val x = (cell.x + 0.5) * PLANET_WIDTH_KM / width - referenceX
-            val y = (cell.y + 0.5) * PLANET_HEIGHT_KM / height - referenceY
+            val x = cell.x
+            val y = cell.y
             mx += cell.area * x; my += cell.area * y; moment += cell.area * (x * x + y * y)
             minX = min(minX, cell.x); maxX = max(maxX, cell.x)
             minY = min(minY, cell.y); maxY = max(maxY, cell.y)
-            cell.prepare()
         }
         cosAngle = cos(angle); sinAngle = sin(angle)
         mx /= max(1e-12, area); my /= max(1e-12, area)
@@ -151,10 +144,14 @@ internal class PlateRaster(count: Int) {
     val age = RasterField(grid)
     val remove = RasterField(grid)
     val compress = RasterField(grid)
+    val compressible = RasterField(grid)
     val dc = RasterField(grid)
     val db = RasterField(grid)
     val ds = RasterField(grid)
     val dsc = RasterField(grid)
+    // Erosion deposits must not cancel withdrawals before component-weighted gathering.
+    val deposit = RasterField(grid)
+    val depositContinent = RasterField(grid)
     fun clear() = grid.clear()
     fun forEachIndex(action: (Int) -> Unit) {
         for (j in 0 until grid.size) action(grid.globals[j])
@@ -162,23 +159,52 @@ internal class PlateRaster(count: Int) {
     fun buoyant(i: Int) = continent[i] > area[i] * 12 || continent[i] + basalt[i] > area[i] * 22
     fun add(i: Int, cell: CrustCell?, weight: Double) {
         if (cell == null || weight <= 0) return
-        val w = weight / cell.projectionWeight
-        area[i] += w * cell.area; continent[i] += w * cell.continent
-        basalt[i] += w * cell.basalt; sediment[i] += w * cell.sediment
-        sedimentContinent[i] += w * cell.sedimentContinent
-        weakness[i] += w * cell.area * cell.weakness
-        support[i] += w * cell.support; age[i] += w * cell.area * cell.age
+        val index = grid.indexes[i]
+        val j = if (index >= 0) index else grid.add(i)
+        val w = weight
+        compressible.values[j] += w * cell.compressible
+        area.values[j] += w * cell.area; continent.values[j] += w * cell.continent
+        basalt.values[j] += w * cell.basalt; sediment.values[j] += w * cell.sediment
+        sedimentContinent.values[j] += w * cell.sedimentContinent
+        weakness.values[j] += w * cell.area * cell.weakness
+        support.values[j] += w * cell.support; age.values[j] += w * cell.area * cell.age
     }
+    /** Update only changed parcel contributions between rigid-motion projections. */
+    fun adjust(i: Int, weight: Double, delta: DoubleArray, years: Double, weak: Double) {
+        val index = grid.indexes[i]
+        val j = if (index >= 0) index else grid.add(i)
+        area.values[j] = max(0.0, area.values[j] + weight * delta[0])
+        continent.values[j] = max(0.0, continent.values[j] + weight * delta[1])
+        basalt.values[j] = max(0.0, basalt.values[j] + weight * delta[2])
+        sediment.values[j] = max(0.0, sediment.values[j] + weight * delta[3])
+        sedimentContinent.values[j] = (sedimentContinent.values[j] + weight * delta[4]).coerceIn(0.0, sediment.values[j])
+        support.values[j] += weight * delta[5]
+        compressible.values[j] = max(0.0, compressible.values[j] + weight * delta[6])
+        age.values[j] = max(0.0, age.values[j] + weight * delta[0] * years)
+        weakness.values[j] = max(0.0, weakness.values[j] + weight * delta[0] * weak)
+    }
+
+    fun clearEvents() {
+        for (field in listOf(remove, compress, dc, db, ds, dsc, deposit, depositContinent))
+            field.values.fill(0.0, 0, grid.size)
+    }
+
     fun distribute(i: Int, cell: CrustCell?, weight: Double) {
-        if (cell == null || weight <= 0 || area[i] <= 1e-12) return
-        val w = weight / cell.projectionWeight
-        val fraction = w * cell.area / area[i]
-        cell.removeArea += remove[i] * fraction
-        cell.compressArea += compress[i] * fraction
-        cell.dc += if (dc[i] >= 0) dc[i] * fraction else dc[i] * w * cell.continent / max(1e-12, continent[i])
-        cell.db += if (db[i] >= 0) db[i] * fraction else db[i] * w * cell.basalt / max(1e-12, basalt[i])
-        cell.ds += if (ds[i] >= 0) ds[i] * fraction else ds[i] * w * cell.sediment / max(1e-12, sediment[i])
-        cell.dsc += if (dsc[i] >= 0) dsc[i] * fraction else dsc[i] * w * cell.sedimentContinent / max(1e-12, sedimentContinent[i])
+        if (cell == null || weight <= 0) return
+        val j = grid.indexes[i]
+        if (j < 0 || area.values[j] <= 0.0) return
+        if (remove.values[j] == 0.0 && compress.values[j] == 0.0 && dc.values[j] == 0.0 && db.values[j] == 0.0 &&
+            ds.values[j] == 0.0 && dsc.values[j] == 0.0 && deposit.values[j] == 0.0 && depositContinent.values[j] == 0.0) return
+        val w = weight
+        val fraction = w * cell.area / area.values[j]
+        cell.removeArea += remove.values[j] * fraction
+        if (compressible.values[j] > 0) cell.compressArea += compress.values[j] * w * cell.compressible / compressible.values[j]
+        cell.dc += if (dc.values[j] >= 0) dc.values[j] * fraction else dc.values[j] * w * cell.continent / (if (continent.values[j] > 0) continent.values[j] else 1.0)
+        cell.db += if (db.values[j] >= 0) db.values[j] * fraction else db.values[j] * w * cell.basalt / (if (basalt.values[j] > 0) basalt.values[j] else 1.0)
+        cell.ds += if (ds.values[j] >= 0) ds.values[j] * fraction else ds.values[j] * w * cell.sediment / (if (sediment.values[j] > 0) sediment.values[j] else 1.0)
+        cell.dsc += if (dsc.values[j] >= 0) dsc.values[j] * fraction else dsc.values[j] * w * cell.sedimentContinent / (if (sedimentContinent.values[j] > 0) sedimentContinent.values[j] else 1.0)
+        cell.ds += deposit.values[j] * fraction
+        cell.dsc += depositContinent.values[j] * fraction
     }
 }
 

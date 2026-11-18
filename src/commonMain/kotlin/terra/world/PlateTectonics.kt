@@ -1,6 +1,7 @@
 package terra.world
 
 import kotlin.math.*
+import kotlin.time.TimeSource
 import kotlin.random.Random
 
 /** Shared initial plates: the generated mountain belts and live geology start from the same crust. */
@@ -32,43 +33,82 @@ internal class PlateTectonics(private val world: World) {
     }.toMutableList()
     private val rasters = plates.map { PlateRaster(count) }.toMutableList()
     private val owner = IntArray(count)
-    private val rawOwner = IntArray(count)
     private val topology = PlateTopology(width, height)
     private val weaknessNoise = DoubleArray(count)
     private val totalArea = DoubleArray(count)
+    internal val pendingOpeningArea get() = contacts.values.sumOf { it.openingCredit }
     private val elevation = DoubleArray(count)
-    private val trench = DoubleArray(count)
     private val sourceX = DoubleArray(count)
     private val sourceY = DoubleArray(count)
     private var boundaries = ByteArray(count)
-    private var deformationEvents = ByteArray(count)
     private data class Contact(var duration: Double = 0.0, var shortening: Double = 0.0, var seen: Boolean = false) {
-        var initialized = false
-        var subducting = -1
-        var spreading = false
         var slabDepth = 200.0 // A seeded trench represents an already established shallow slab, in km.
         var length = 0.0
         var oceanLength = 0.0
-        var convergence = 0.0
-        var reversalTime = 0.0
+        var recentShortening = 0.0
+        var continentalLength = 0.0
+        var openingCredit = 0.0
+        var birthPhase = 0.0
+        var subductionYears = 0.0
+        var subductionObserved = false
     }
     private val contacts = HashMap<Long, Contact>()
-    private var lastBreakup = -8_000_000.0
-    private var lastDeformation = 0.0
-    internal data class LifecycleEvent(val years: Double, val kind: String, val first: Int, val second: Int)
+    private var lastBreakup = -30_000_000.0
+    private var nextIdentity = plates.size
+    internal data class LifecycleEvent(val years: Double, val kind: String, val first: Int, val second: Int, val reason: String)
     internal val lifecycleEvents = ArrayDeque<LifecycleEvent>()
-    private fun event(kind: String, first: Int, second: Int) {
+    private fun event(kind: String, first: Int, second: Int, reason: String) {
         if (lifecycleEvents.size == 256) lifecycleEvents.removeFirst()
-        lifecycleEvents.addLast(LifecycleEvent(geologicalTime, kind, first, second))
+        lifecycleEvents.addLast(LifecycleEvent(geologicalTime, kind, plates[first].identity, plates[second].identity, reason))
     }
     internal var capturedMass = 0.0
         private set
-    internal var relativeSpeed = 0.0
+    internal var captureTransfers = 0L
         private set
-    internal var watchdogBreakups = 0
+    internal var unresolvedRemovalMass = 0.0
+        private set
+    internal var unplacedAdditionMass = 0.0
+        private set
+    internal var requestedConvergenceArea = 0.0
+        private set
+    internal var requestedDivergenceArea = 0.0
+        private set
+    internal val unresolvedConvergenceArea get() = max(0.0, requestedConvergenceArea - shortenedArea - subductedArea)
+    internal val unresolvedDivergenceArea get() = max(0.0, requestedDivergenceArea - oceanCreatedArea - riftArea)
+    internal var unresolvedArea = 0.0
+        private set
+    internal var relativeSpeed = 0.0
         private set
     private var geologicalTime = 0.0
     internal val effectiveYears get() = geologicalTime
+    internal var geologicalSteps = 0L
+        private set
+    internal var geologicalSubsteps = 0L
+        private set
+    internal var lastWorkSeconds = 0.0
+        private set
+    internal var geologicalWorkSeconds = 0.0
+        private set
+    internal var maxSubstepDisplacementKm = 0.0
+        private set
+    // Continental rock, basalt, sediment, and continental-derived sediment volume.
+    internal val mantleAddedComponents = DoubleArray(4)
+    internal val mantleRecycledComponents = DoubleArray(4)
+    internal val convertedComponents = DoubleArray(4)
+    private fun addition(c: Double, b: Double, s: Double = 0.0, sc: Double = 0.0) {
+        mantleAddedComponents[0] += c; mantleAddedComponents[1] += b
+        mantleAddedComponents[2] += s; mantleAddedComponents[3] += sc
+        mantleAddedMass += c * CONTINENT_DENSITY + b * BASALT_DENSITY + s * SEDIMENT_DENSITY
+    }
+    private fun recycle(c: Double, b: Double, s: Double, sc: Double) {
+        mantleRecycledComponents[0] += c; mantleRecycledComponents[1] += b
+        mantleRecycledComponents[2] += s; mantleRecycledComponents[3] += sc
+        mantleRecycledMass += c * CONTINENT_DENSITY + b * BASALT_DENSITY + s * SEDIMENT_DENSITY
+    }
+    private fun conversion(c: Double, b: Double, s: Double, sc: Double) {
+        convertedComponents[0] += c; convertedComponents[1] += b
+        convertedComponents[2] += s; convertedComponents[3] += sc
+    }
     internal var mantleAddedMass = 0.0
         private set
     internal var mantleRecycledMass = 0.0
@@ -85,8 +125,8 @@ internal class PlateTectonics(private val world: World) {
         private set
     internal var splits = 0
         private set
-    internal val rockMass get() = plates.sumOf { p -> p.cells.values.sumOf { it.mass() } }
-    internal val continentalVolume get() = plates.sumOf { p -> p.cells.values.sumOf { it.continent } }
+    internal val rockMass get() = plates.sumOf { p -> p.cells.sumOf { it.mass() } }
+    internal val continentalVolume get() = plates.sumOf { p -> p.cells.sumOf { it.continent } }
     internal val activePlateCount get() = plates.count { it.active }
 
     init {
@@ -111,9 +151,9 @@ internal class PlateTectonics(private val world: World) {
             val b = if (continental) 0.0 else 7.0
             val support = c * (1 - CONTINENT_DENSITY / MANTLE_DENSITY) + b * (1 - BASALT_DENSITY / MANTLE_DENSITY) +
                 if (continental) 0.0 else 1.7 * exp(-40_000_000.0 / 60_000_000)
-            val ix = floor((plate.referenceX + longitudeKm((i % width + 0.5) * dx - plate.x)) / dx).toInt()
-            val iy = floor((plate.referenceY + latitudeKm((i / width + 0.5) * dy - plate.y)) / dy).toInt()
-            plate.cells[materialKey(ix, iy)] = CrustCell(ix, iy, 1.0, c, b, 0.0, 40_000_000.0,
+            val lx = longitudeKm((i % width + 0.5) * dx - plate.x)
+            val ly = latitudeKm((i / width + 0.5) * dy - plate.y)
+            plate.cells += CrustCell(lx, ly, 1.0, c, b, 0.0, 40_000_000.0,
                 airHeight + COMPENSATION_KM - support, weaknessNoise[i])
         }
         rasterize()
@@ -122,32 +162,17 @@ internal class PlateTectonics(private val world: World) {
     }
 
     fun advance(years: Double, rainMmPerYear: DoubleArray, drainage: terra.hydrology.SurfaceWaterSnapshot? = null, speedMultiplier: Double = SPEEDUP) {
-        val dt = years * speedMultiplier
-        geologicalTime += dt
-        deformationEvents = ByteArray(count)
-        trench.fill(0.0)
-        movePlates(dt)
-        rasterize()
-        // Let overlapping crust shorten or subduct before ownership cleanup can capture it.
-        observeContacts(dt)
-        val deformation = shortenedArea + subductedArea + riftArea + oceanCreatedArea
-        collide(dt)
-        applyEvents()
-        spreadRoots()
-        rasterize()
-        fillGaps()
-        rasterize()
-        erode(rainMmPerYear, dt, drainage)
-        applyEvents()
-        if (shortenedArea + subductedArea + riftArea + oceanCreatedArea - deformation > count * 0.00001)
-            lastDeformation = geologicalTime
-        evolvePlates(dt)
-        rasterize()
-        captureFragments()
-        if (activePlateCount < MIN_PLATES) {
-            evolvePlates(0.0)
-            rasterize()
+        val work = TimeSource.Monotonic.markNow()
+        val endTime = geologicalTime + years * speedMultiplier
+        geologicalSteps++
+        for (p in plates) if (p.active) {
+            p.previousX = p.x; p.previousY = p.y; p.previousAngle = p.angle
         }
+        while (geologicalTime < endTime) {
+            val dt = stepDuration(endTime - geologicalTime)
+            geologicalStep(dt, rainMmPerYear, drainage)
+        }
+        geologicalTime = endTime
         classifyBoundaries()
         publishOwners()
         for (i in 0 until count) {
@@ -155,7 +180,7 @@ internal class PlateTectonics(private val world: World) {
             for (p in plates.indices) if (plates[p].active) support += rasters[p].support[i]
             val air = if (totalArea[i] > 1e-10) support / totalArea[i] - COMPENSATION_KM else -3.0
             val h = if (air < 0) air / WATER_LOADING else air
-            elevation[i] = world.seaLevel + (h + if (h < 0) trench[i] else 0.0) / 10
+            elevation[i] = world.seaLevel + h / 10
             val p = owner[i]
             if (p >= 0) {
                 val plate = plates[p]
@@ -169,6 +194,59 @@ internal class PlateTectonics(private val world: World) {
             } else { sourceX[i] = (i % width).toDouble(); sourceY[i] = (i / width).toDouble() }
         }
         world.applyGeography(elevation, sourceX, sourceY)
+        lastWorkSeconds = work.elapsedNow().inWholeNanoseconds / 1e9
+        geologicalWorkSeconds += lastWorkSeconds
+    }
+
+    private fun geologicalStep(dt: Double, rainMmPerYear: DoubleArray, drainage: terra.hydrology.SurfaceWaterSnapshot?) {
+        geologicalSubsteps++
+        geologicalTime += dt
+        movePlates(dt)
+        rasterize()
+        observeContacts(dt)
+        collide(dt)
+        applyEvents()
+        spreadRoots()
+        repairOwners()
+        fillGaps(dt)
+        repairOwners()
+        erode(rainMmPerYear, dt, drainage)
+        applyEvents()
+        spreadRoots()
+        repairOwners()
+        val before = splits
+        evolvePlates(dt)
+        if (splits != before) rasterize()
+    }
+
+    /** Predict the same damped motion used by the step; retries never age rock or contacts. */
+    private fun stepDuration(remaining: Double): Double {
+        val saved = plates.map { doubleArrayOf(it.vx, it.vy, it.spin) }
+        fun restore() {
+            for (p in plates) {
+                p.vx = saved[p.id][0]; p.vy = saved[p.id][1]; p.spin = saved[p.id][2]
+            }
+        }
+        var dt = remaining
+        while (true) {
+            restore()
+            drivePlates(dt)
+            for (p in plates) if (p.active) restrictRotation(p, dt)
+            var speed = 0.0
+            for (edge in boundaryEdges()) for (sign in listOf(-1.0, 1.0)) {
+                val x = edge.x - edge.ny * edge.length * 0.5 * sign
+                val y = edge.y + edge.nx * edge.length * 0.5 * sign
+                val (vx, vy) = relativeVelocity(plates[edge.p], plates[edge.q], x, y)
+                speed = max(speed, hypot(vx, vy))
+            }
+            val limit = if (speed > 0) 0.3 * min(dx, dy) / speed else remaining
+            if (dt <= limit * (1 + 1e-12)) {
+                maxSubstepDisplacementKm = max(maxSubstepDisplacementKm, speed * dt)
+                restore()
+                return dt
+            }
+            dt = min(dt * 0.8, limit * 0.98)
+        }
     }
 
     /** Overdamped boundary-force balance. Forces are velocity equivalents, not calibrated newtons.
@@ -179,7 +257,7 @@ internal class PlateTectonics(private val world: World) {
         val torque = DoubleArray(plates.size)
         val resistanceLoad = DoubleArray(plates.size)
         for (contact in contacts.values) {
-            contact.length = 0.0; contact.oceanLength = 0.0; contact.convergence = 0.0
+            contact.length = 0.0; contact.oceanLength = 0.0
         }
         fun force(p: Int, i: Int, x: Double, y: Double) {
             val plate = plates[p]
@@ -188,66 +266,35 @@ internal class PlateTectonics(private val world: World) {
             val ry = latitudeKm((i / width + 0.5) * dy - plate.y) - plate.centerY
             torque[p] += rx * y - ry * x
         }
-        for (i in 0 until count) {
-            val p = owner[i]
-            if (p < 0 || !plates[p].active) continue
-            val x = i % width; val y = i / width
-            for (axis in 0..1) {
-                val j = if (axis == 0) worldIndex(x + 1, y, width, height) else worldIndex(x, y + 1, width, height)
-                val q = owner[j]
-                if (q < 0 || p == q || !plates[q].active) continue
-                val nx = if (axis == 0) 1.0 else 0.0
-                val ny = if (axis == 1) 1.0 else 0.0
-                val length = if (axis == 0) dy else dx
-                val a = rasters[p]; val b = rasters[q]
-                val continental = a.buoyant(i) && b.buoyant(j)
-                val speed = closing(plates[p], plates[q], i, nx, ny)
-                val contact = contacts.getOrPut(pairKey(p, q)) { Contact() }
-                if (!contact.initialized) {
-                    contact.initialized = true
-                    contact.spreading = speed <= 0.0
-                    if (!continental && !contact.spreading) contact.subducting = subductingPlate(p, q, i, j)
-                }
-                contact.length += length
-                contact.convergence += speed * length
-                if (!continental) contact.oceanLength += length
-                if (contact.subducting >= 0 && !continental) {
-                    val sub = contact.subducting
-                    val tile = if (sub == p) i else j
-                    val r = rasters[sub]
-                    // Cooling makes old oceanic lithosphere denser; slab length carries trench memory.
-                    val age = r.age[tile] / max(1e-12, r.area[tile])
-                    val cooling = 1 - exp(-age / 60_000_000)
-                    val pull = if (r.buoyant(tile)) 0.0 else
-                        0.00024 * (0.35 + 0.65 * cooling) * min(1.0, contact.slabDepth / 600) * length
-                    val sign = if (sub == p) 1.0 else -1.0
-                    force(sub, tile, nx * sign * pull, ny * sign * pull)
-                }
-                if (contact.spreading) {
-                    val push = (if (continental) 0.000035 else 0.00006) * length
-                    force(p, i, -nx * push, -ny * push)
-                    force(q, j, nx * push, ny * push)
-                }
-                if (continental && speed > 0.0) {
-                    // Viscous continental resistance slows convergence without bouncing plates.
-                    val resistance = speed * length * 2.0
-                    resistanceLoad[p] += length * 2; resistanceLoad[q] += length * 2
-                    force(p, i, -nx * resistance, -ny * resistance)
-                    force(q, j, nx * resistance, ny * resistance)
-                }
+        for (edge in boundaryEdges()) {
+            val (p, q, i, j) = edge
+            val nx = edge.nx; val ny = edge.ny; val length = edge.length; val speed = edge.speed
+            val a = rasters[p]; val b = rasters[q]
+            if (a.area[i] <= 1e-8 || b.area[j] <= 1e-8) continue
+            val continental = a.buoyant(i) && b.buoyant(j)
+            val contact = contacts.getOrPut(pairKey(p, q)) { Contact() }
+            contact.length += length
+            if (!continental) contact.oceanLength += length
+            if (speed > 0 && !continental) {
+                val sub = subductingPlate(p, q, i, j)
+                val tile = if (sub == p) i else j
+                val r = rasters[sub]
+                val age = r.age[tile] / max(1e-12, r.area[tile])
+                val cooling = 1 - exp(-age / 60_000_000)
+                val pull = if (r.buoyant(tile)) 0.0 else
+                    0.00024 * (0.35 + 0.65 * cooling) * min(1.0, contact.slabDepth / 600) * length
+                val sign = if (sub == p) 1.0 else -1.0
+                force(sub, tile, nx * sign * pull, ny * sign * pull)
             }
-        }
-        for ((key, contact) in contacts) if (contact.length > 0) {
-            if (contact.oceanLength == 0.0) contact.slabDepth *= exp(-dt / 5_000_000)
-            contact.reversalTime = if (contact.convergence / contact.length > 0.000005)
-                contact.reversalTime + dt else 0.0
-            // A ridge can be overridden by the rest of the force system, but not by one noisy tick.
-            if (contact.spreading && contact.oceanLength > 0 && contact.reversalTime >= 5_000_000) {
-                contact.spreading = false
-                val a = plates[(key ushr 32).toInt()]; val b = plates[key.toInt()]
-                contact.subducting = if (a.cells.values.sumOf { it.continent } / max(1.0, a.area) <
-                    b.cells.values.sumOf { it.continent } / max(1.0, b.area)) a.id else b.id
-                contact.slabDepth = 100.0
+            if (speed < 0) {
+                val push = (if (continental) 0.000035 else 0.00006) * length
+                force(p, i, -nx * push, -ny * push); force(q, j, nx * push, ny * push)
+            }
+            if (continental && speed > 0) {
+                val resistance = speed * length * 2.0
+                resistanceLoad[p] += length * 2; resistanceLoad[q] += length * 2
+                force(p, i, -nx * resistance, -ny * resistance)
+                force(q, j, nx * resistance, ny * resistance)
             }
         }
         val relaxation = 1 - exp(-dt / 2_000_000)
@@ -281,8 +328,8 @@ internal class PlateTectonics(private val world: World) {
     }
 
     private fun movePlates(dt: Double) {
-        for (p in plates) if (p.active) p.prepare(width, height)
         drivePlates(dt)
+        for (p in plates) if (p.active) restrictRotation(p, dt)
         var meanX = 0.0; var meanY = 0.0; var area = 0.0
         for (p in plates) if (p.active) {
             meanX += p.vx * p.area; meanY += p.vy * p.area; area += p.area
@@ -292,197 +339,201 @@ internal class PlateTectonics(private val world: World) {
         for (p in plates) if (p.active) {
             p.vx -= meanX; p.vy -= meanY
             relativeSpeed += p.area * (p.vx * p.vx + p.vy * p.vy)
-            p.previousX = p.x; p.previousY = p.y; p.previousAngle = p.angle
-            val angle = p.angle + p.spin * dt
-            // Translation always continues. Only defer rotation of an oversized periodic body.
-            if (fits(p, angle, 1.0)) p.angle = angle
+            p.angle += p.spin * dt
             p.x = wrapPosition(p.x + p.vx * dt, PLANET_WIDTH_KM)
             p.y = wrapPosition(p.y + p.vy * dt, PLANET_HEIGHT_KM)
             val consolidated = 1 - exp(-dt / 20_000_000)
-            for (cell in p.cells.values) {
+            for (cell in p.cells) {
                 cell.age += dt
                 val c = cell.sedimentContinent * consolidated
                 val b = (cell.sediment - cell.sedimentContinent) * consolidated
                 cell.continent += c * SEDIMENT_DENSITY / CONTINENT_DENSITY
                 cell.basalt += b * SEDIMENT_DENSITY / BASALT_DENSITY
                 cell.sediment -= c + b; cell.sedimentContinent -= c
+                conversion(c * SEDIMENT_DENSITY / CONTINENT_DENSITY, b * SEDIMENT_DENSITY / BASALT_DENSITY, -c - b, -c)
             }
         }
         relativeSpeed = sqrt(relativeSpeed / max(1.0, area))
     }
 
+    private fun restrictRotation(p: MaterialPlate, dt: Double) {
+        if (fits(p, p.angle + p.spin * dt, 1.0)) return
+        // Keep centroid translation when the rigid body's rotation cannot be applied.
+        p.vx -= p.spin * p.centerY; p.vy += p.spin * p.centerX; p.spin = 0.0
+    }
+
     private fun fits(p: MaterialPlate, angle: Double, fraction: Double): Boolean {
-        val x = (p.maxX - p.minX + 2) * dx; val y = (p.maxY - p.minY + 2) * dy
-        return abs(cos(angle)) * x + abs(sin(angle)) * y < PLANET_WIDTH_KM * fraction &&
-            abs(sin(angle)) * x + abs(cos(angle)) * y < PLANET_HEIGHT_KM * fraction
+        val ca = cos(angle); val sa = sin(angle)
+        for (x in listOf(p.minX - dx, p.maxX + dx)) for (y in listOf(p.minY - dy, p.maxY + dy)) {
+            if (abs(ca * x - sa * y) >= PLANET_WIDTH_KM * 0.5 * fraction ||
+                abs(sa * x + ca * y) >= PLANET_HEIGHT_KM * 0.5 * fraction) return false
+        }
+        return true
     }
 
-    private inline fun visit(p: MaterialPlate, action: (Int, CrustCell?, CrustCell?, CrustCell?, CrustCell?, Double, Double, Double, Double) -> Unit) {
-        if (p.cells.isEmpty()) return
-        var left = Double.POSITIVE_INFINITY; var right = Double.NEGATIVE_INFINITY
-        var top = Double.POSITIVE_INFINITY; var bottom = Double.NEGATIVE_INFINITY
-        for (ix in listOf(p.minX - 1, p.maxX + 1)) for (iy in listOf(p.minY - 1, p.maxY + 1)) {
-            val lx = (ix + 0.5) * dx - p.referenceX; val ly = (iy + 0.5) * dy - p.referenceY
-            val x = p.x + p.cosAngle * lx - p.sinAngle * ly
-            val y = p.y + p.sinAngle * lx + p.cosAngle * ly
-            left = min(left, x); right = max(right, x); top = min(top, y); bottom = max(bottom, y)
-        }
-        val startX = floor(left / dx - 0.5).toInt()
-        val endX = ceil(right / dx - 0.5).toInt()
-        for (y in floor(top / dy - 0.5).toInt()..ceil(bottom / dy - 0.5).toInt()) {
-            for (x in startX..endX) {
-                val rx = (x + 0.5) * dx - p.x; val ry = (y + 0.5) * dy - p.y
-                val gx = (p.referenceX + p.cosAngle * rx + p.sinAngle * ry) / dx - 0.5
-                val gy = (p.referenceY - p.sinAngle * rx + p.cosAngle * ry) / dy - 0.5
-                val ix = floor(gx).toInt(); val iy = floor(gy).toInt()
-                val a = p.cells[materialKey(ix, iy)]; val b = p.cells[materialKey(ix + 1, iy)]
-                val c = p.cells[materialKey(ix, iy + 1)]; val d = p.cells[materialKey(ix + 1, iy + 1)]
-                if (a == null && b == null && c == null && d == null) continue
-                val tx = gx - ix; val ty = gy - iy
-                action(worldIndex(x, y, width, height), a, b, c, d,
-                    (1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty)
-            }
-        }
+    private fun worldPosition(p: MaterialPlate, cell: CrustCell): Pair<Double, Double> =
+        (p.x + p.cosAngle * cell.x - p.sinAngle * cell.y) to
+            (p.y + p.sinAngle * cell.x + p.cosAngle * cell.y)
+
+    private fun localPosition(p: MaterialPlate, x: Double, y: Double): Pair<Double, Double> {
+        val rx = longitudeKm(x - p.x); val ry = latitudeKm(y - p.y)
+        return (p.cosAngle * rx + p.sinAngle * ry) to (-p.sinAngle * rx + p.cosAngle * ry)
     }
 
-    /** Normalize each rotated interpolation footprint once per pose, including periodic images.
-     * This makes projected inventories equal stored inventories even when sediment is fully eroded. */
-    private fun prepareProjection(p: MaterialPlate) {
-        if (p.projectionX != p.x || p.projectionY != p.y || p.projectionAngle != p.angle) {
-            p.projectionRevision++
-            p.projectionX = p.x; p.projectionY = p.y; p.projectionAngle = p.angle
-        }
-        val ca = p.cosAngle; val sa = p.sinAngle
-        val radiusX = abs(ca) * dx + abs(sa) * dy
-        val radiusY = abs(sa) * dx + abs(ca) * dy
-        for (cell in p.cells.values) if (cell.projectionRevision != p.projectionRevision) {
-            val lx = (cell.x + 0.5) * dx - p.referenceX; val ly = (cell.y + 0.5) * dy - p.referenceY
-            val cx = p.x + ca * lx - sa * ly; val cy = p.y + sa * lx + ca * ly
-            var sum = 0.0
-            for (y in floor((cy - radiusY) / dy - 0.5).toInt()..ceil((cy + radiusY) / dy - 0.5).toInt()) {
-                for (x in floor((cx - radiusX) / dx - 0.5).toInt()..ceil((cx + radiusX) / dx - 0.5).toInt()) {
-                    val rx = (x + 0.5) * dx - cx; val ry = (y + 0.5) * dy - cy
-                    sum += max(0.0, 1 - abs((ca * rx + sa * ry) / dx)) *
-                        max(0.0, 1 - abs((-sa * rx + ca * ry) / dy))
-                }
-            }
-            cell.projectionWeight = max(1e-12, sum)
-            cell.projectionRevision = p.projectionRevision
+    /** A frame change moves the original parcel, never its inventories or footprint. */
+    private fun changeFrame(p: MaterialPlate, cell: CrustCell, x: Double, y: Double) {
+        val (lx, ly) = localPosition(p, x, y)
+        cell.x = lx; cell.y = ly
+        p.cells += cell
+    }
+
+    /** Disposable cloud-in-cell scatter and its identical gather stencil. */
+    private inline fun project(p: MaterialPlate, cell: CrustCell, action: (Int, Double) -> Unit) {
+        val (x, y) = worldPosition(p, cell)
+        val gx = x / dx - 0.5; val gy = y / dy - 0.5
+        val ix = floor(gx).toInt(); val iy = floor(gy).toInt()
+        val tx = gx - ix; val ty = gy - iy
+        for (oy in 0..1) for (ox in 0..1) {
+            val w = (if (ox == 0) 1 - tx else tx) * (if (oy == 0) 1 - ty else ty)
+            if (w > 0) action(worldIndex(ix + ox, iy + oy, width, height), w)
         }
     }
 
     private fun rasterize() {
-        owner.fill(-1); totalArea.fill(0.0)
         for (p in plates) {
             val r = rasters[p.id]
             r.clear()
             if (!p.active) continue
-            p.prepare(width, height)
-            prepareProjection(p)
-            visit(p) { i, a, b, c, d, wa, wb, wc, wd ->
-                r.add(i, a, wa); r.add(i, b, wb); r.add(i, c, wc); r.add(i, d, wd)
+            p.prepare()
+            for (cell in p.cells) {
+                cell.prepare()
+                project(p, cell) { i, w -> r.add(i, cell, w) }
             }
+        }
+        repairOwners()
+    }
+
+    private fun repairOwners() {
+        owner.fill(-1); totalArea.fill(0.0)
+        for (p in plates) if (p.active) {
+            val r = rasters[p.id]
             r.forEachIndex { i ->
                 totalArea[i] += r.area[i]
                 if (r.area[i] > 1e-12 && (owner[i] < 0 || r.area[i] > rasters[owner[i]].area[i])) owner[i] = p.id
             }
         }
-        owner.copyInto(rawOwner)
         topology.repair(owner, plates.size) { p, i -> rasters[p].area[i] }
     }
 
-    private data class Capture(val source: MaterialPlate, val target: Int, val cell: CrustCell,
-        val x: Double, val y: Double)
+    private fun materialState(cell: CrustCell, state: DoubleArray) {
+        state[0] = cell.area; state[1] = cell.continent; state[2] = cell.basalt
+        state[3] = cell.sediment; state[4] = cell.sedimentContinent
+        state[5] = cell.support; state[6] = cell.compressible
+    }
 
-    /** Detached columns change frames locally, once per batch; rock never enters the mantle. */
-    private fun captureFragments() {
-        val transfers = ArrayList<Capture>()
-        for (p in plates) if (p.active) for (cell in p.cells.values) {
-            val lx = (cell.x + 0.5) * dx - p.referenceX
-            val ly = (cell.y + 0.5) * dy - p.referenceY
-            val x = p.x + p.cosAngle * lx - p.sinAngle * ly
-            val y = p.y + p.sinAngle * lx + p.cosAngle * ly
-            val i = worldIndex(floor(x / dx).toInt(), floor(y / dy).toInt(), width, height)
-            val target = owner[i]
-            if (target >= 0 && target != p.id) {
-                var touchesHome = false
-                topology.neighbors(i) { if (owner[it] == p.id) touchesHome = true }
-                if (rawOwner[i] == p.id || !topology.represented[p.id] || !touchesHome)
-                    transfers += Capture(p, target, cell, x, y)
-            }
-        }
-        if (transfers.isEmpty()) return
-        val territory = owner.copyOf()
-        for (transfer in transfers) transfer.source.cells.remove(materialKey(transfer.cell.x, transfer.cell.y))
-        for ((_, target, cell, x, y) in transfers) {
-            addWorld(plates[target], x, y, cell.area, cell.continent, cell.basalt, cell.sediment,
-                cell.age, cell.relief, cell.sedimentContinent, cell.weakness)
-            capturedMass += cell.mass()
-        }
-        for (p in plates) if (p.active && p.cells.isEmpty()) {
-            p.active = false
-            contacts.keys.removeAll { (it ushr 32).toInt() == p.id || it.toInt() == p.id }
-        }
-        rasterize()
-        // Capture changes material frames, not the territory that authorized the transfer.
-        // Keep those connected cores until the next motion/topology update.
-        var retired = false
-        for (i in owner.indices) {
-            owner[i] = if (plates[territory[i]].active) territory[i] else { retired = true; -1 }
-        }
-        if (retired) topology.repair(owner, plates.size) { p, i -> rasters[p].area[i] }
+    private fun updateRaster(p: MaterialPlate, cell: CrustCell, before: DoubleArray, present: Boolean = true) {
+        if (present) cell.prepare()
+        before[0] = (if (present) cell.area else 0.0) - before[0]
+        before[1] = (if (present) cell.continent else 0.0) - before[1]
+        before[2] = (if (present) cell.basalt else 0.0) - before[2]
+        before[3] = (if (present) cell.sediment else 0.0) - before[3]
+        before[4] = (if (present) cell.sedimentContinent else 0.0) - before[4]
+        before[5] = (if (present) cell.support else 0.0) - before[5]
+        before[6] = (if (present) cell.compressible else 0.0) - before[6]
+        project(p, cell) { i, w -> rasters[p.id].adjust(i, w, before, cell.age, cell.weakness) }
+        p.area += before[0]
     }
 
     private fun applyEvents() {
+        var rejectedCompression = 0.0
+        val before = DoubleArray(7)
         for (p in plates) if (p.active) {
             val r = rasters[p.id]
-            visit(p) { i, a, b, c, d, wa, wb, wc, wd ->
-                r.distribute(i, a, wa); r.distribute(i, b, wb); r.distribute(i, c, wc); r.distribute(i, d, wd)
-            }
-            val iterator = p.cells.values.iterator()
-            while (iterator.hasNext()) {
-                val cell = iterator.next()
-                val removed = min(cell.area * 0.95, cell.removeArea)
+            for (cell in p.cells) project(p, cell) { i, w -> r.distribute(i, cell, w) }
+            var retained = 0
+            for (cell in p.cells) {
+                if (cell.removeArea == 0.0 && cell.compressArea == 0.0 && cell.dc == 0.0 && cell.db == 0.0 &&
+                    cell.ds == 0.0 && cell.dsc == 0.0 && !(cell.area < 1e-7 && cell.continent < 1e-10 && cell.sediment < 1e-10)) {
+                    p.cells[retained++] = cell
+                    continue
+                }
+                materialState(cell, before)
+                val removed = min(cell.area, cell.removeArea)
+                unresolvedArea += cell.removeArea - removed
+                val remaining = max(0.0, cell.area - removed)
                 val fraction = removed / max(1e-12, cell.area)
-                mantleRecycledMass += cell.mass() * fraction
+                recycle(cell.continent * fraction, cell.basalt * fraction, cell.sediment * fraction, cell.sedimentContinent * fraction)
                 cell.continent *= 1 - fraction; cell.basalt *= 1 - fraction; cell.sediment *= 1 - fraction; cell.sedimentContinent *= 1 - fraction
-                cell.area = max(1e-12, cell.area - removed - min(cell.area * 0.5, cell.compressArea))
+                unresolvedRemovalMass += max(0.0, -cell.continent - cell.dc) * CONTINENT_DENSITY +
+                    max(0.0, -cell.basalt - cell.db) * BASALT_DENSITY + max(0.0, -cell.sediment - cell.ds) * SEDIMENT_DENSITY
                 cell.continent = max(0.0, cell.continent + cell.dc)
                 cell.basalt = max(0.0, cell.basalt + cell.db)
                 cell.sediment = max(0.0, cell.sediment + cell.ds)
                 cell.sedimentContinent = (cell.sedimentContinent + cell.dsc).coerceIn(0.0, cell.sediment)
+                // Incoming rock occupies space too: bound shortening by the final inventory.
+                val capacity = max(0.0, remaining - (cell.continent + cell.basalt + cell.sediment) / ROOT_THICKNESS_KM)
+                val compression = min(max(0.0, min(cell.area * 0.5, capacity)), cell.compressArea)
+                rejectedCompression += cell.compressArea - compression
+                unresolvedArea += cell.compressArea - compression
+                subductedArea += removed; shortenedArea += compression
+                cell.area = max(1e-12, remaining - compression)
                 if (cell.area < 1e-7 && cell.continent < 1e-10 && cell.sediment < 1e-10) {
-                    mantleRecycledMass += cell.mass(); iterator.remove()
-                } else cell.prepare()
+                    recycle(cell.continent, cell.basalt, cell.sediment, cell.sedimentContinent)
+                    updateRaster(p, cell, before, false)
+                } else { p.cells[retained++] = cell; updateRaster(p, cell, before) }
             }
+            if (retained < p.cells.size) p.cells.subList(retained, p.cells.size).clear()
             if (p.cells.isEmpty()) p.active = false
+            r.clearEvents()
+        }
+        // A conservative lower bound on each contact's actually applied shortening.
+        if (rejectedCompression > 0) for (contact in contacts.values) {
+            val rejected = min(contact.recentShortening, rejectedCompression)
+            contact.recentShortening -= rejected; contact.shortening -= rejected
         }
     }
 
-    private fun normal(p: Int, q: Int, i: Int): Pair<Double, Double> {
-        val x = i % width; val y = i / width
-        val west = y * width + (x + width - 1) % width; val east = y * width + (x + 1) % width
-        val north = worldIndex(x, y - 1, width, height); val south = worldIndex(x, y + 1, width, height)
-        val a = rasters[p].area; val b = rasters[q].area
-        var nx = (a[west] - a[east] - b[west] + b[east]) / dx
-        var ny = (a[north] - a[south] - b[north] + b[south]) / dy
-        if (hypot(nx, ny) < 1e-10) {
-            nx = longitudeKm(plates[q].x - plates[p].x); ny = latitudeKm(plates[q].y - plates[p].y)
-        }
-        val length = max(1e-12, hypot(nx, ny))
-        return nx / length to ny / length
-    }
+    private data class BoundaryEdge(val p: Int, val q: Int, val i: Int, val j: Int,
+        val x: Double, val y: Double, val nx: Double, val ny: Double, val length: Double,
+        val speed: Double, val type: PlateBoundary)
 
-    private fun closing(p: MaterialPlate, q: MaterialPlate, i: Int, nx: Double, ny: Double): Double {
-        val x = (i % width + 0.5) * dx; val y = (i / width + 0.5) * dy
-        val ux = p.vx - p.spin * latitudeKm(y - p.y) - q.vx + q.spin * latitudeKm(y - q.y)
-        val uy = p.vy + p.spin * longitudeKm(x - p.x) - q.vy - q.spin * longitudeKm(x - q.x)
-        return ux * nx + uy * ny
+    private fun relativeVelocity(p: MaterialPlate, q: MaterialPlate, x: Double, y: Double): Pair<Double, Double> =
+        (p.vx - p.spin * latitudeKm(y - p.y) - q.vx + q.spin * latitudeKm(y - q.y)) to
+            (p.vy + p.spin * longitudeKm(x - p.x) - q.vy - q.spin * longitudeKm(x - q.x))
+
+    /** Each east/south interface is enumerated once, including both periodic seams. */
+    private fun boundaryEdges(): List<BoundaryEdge> {
+        val edges = ArrayList<BoundaryEdge>()
+        for (i in 0 until count) {
+            val p = owner[i]
+            if (p < 0 || !plates[p].active) continue
+            for (axis in 0..1) {
+                val j = worldIndex(i % width + if (axis == 0) 1 else 0,
+                    i / width + if (axis == 1) 1 else 0, width, height)
+                val q = owner[j]
+                if (q < 0 || q == p || !plates[q].active) continue
+                val nx = if (axis == 0) 1.0 else 0.0; val ny = 1 - nx
+                val x = (i % width + 0.5 + nx * 0.5) * dx
+                val y = (i / width + 0.5 + ny * 0.5) * dy
+                val (vx, vy) = relativeVelocity(plates[p], plates[q], x, y)
+                val speed = vx * nx + vy * ny
+                val continental = rasters[p].buoyant(i) && rasters[q].buoyant(j)
+                val type = when {
+                    abs(speed) < 1e-10 -> PlateBoundary.TRANSFORM
+                    speed > 0 && continental -> PlateBoundary.COLLISION
+                    speed > 0 -> PlateBoundary.SUBDUCTION
+                    continental -> PlateBoundary.RIFT
+                    else -> PlateBoundary.SPREADING
+                }
+                edges += BoundaryEdge(p, q, i, j, x, y, nx, ny, if (axis == 0) dy else dx, speed, type)
+            }
+        }
+        return edges
     }
 
     /** Spread an exact amount among supported columns, using physical distances. */
-    private fun patch(p: Int, field: RasterField, i: Int, offsetX: Double, offsetY: Double, amount: Double, radius: Double) {
-        if (amount == 0.0) return
+    private fun patch(p: Int, field: RasterField, i: Int, offsetX: Double, offsetY: Double, amount: Double, radius: Double, continentalFraction: Double = 0.0): Double {
+        if (amount == 0.0) return 0.0
         val cx = (i % width + 0.5) * dx + offsetX; val cy = (i / width + 0.5) * dy + offsetY
         val area = rasters[p].area
         val left = floor((cx - 2 * radius) / dx).toInt(); val right = ceil((cx + 2 * radius) / dx).toInt()
@@ -493,167 +544,209 @@ internal class PlateTectonics(private val world: World) {
             val r2 = (((x + 0.5) * dx - cx).pow(2) + ((y + 0.5) * dy - cy).pow(2)) / (radius * radius)
             sum += area[j] * exp(-0.5 * r2)
         }
-        if (sum < 1e-12) { field[i] += amount; return }
+        if (sum < 1e-12) {
+            val r = rasters[p]
+            unplacedAdditionMass += max(0.0, amount) * when (field) {
+                r.dc -> CONTINENT_DENSITY
+                r.db -> BASALT_DENSITY
+                r.ds -> SEDIMENT_DENSITY
+                else -> 0.0
+            }
+            return 0.0
+        }
+        var applied = 0.0
         for (y in top..bottom) for (x in left..right) {
             val j = worldIndex(x, y, width, height)
             val r2 = (((x + 0.5) * dx - cx).pow(2) + ((y + 0.5) * dy - cy).pow(2)) / (radius * radius)
-            field[j] += amount * area[j] * exp(-0.5 * r2) / sum
+            var delta = amount * area[j] * exp(-0.5 * r2) / sum
+            val r = rasters[p]
+            if (field === r.compress && area[j] > 0) {
+                val capacity = r.compressible[j] * (1 - r.remove[j] / area[j]) - r.compress[j]
+                delta = min(delta, max(0.0, min(capacity, area[j] * 0.5 - r.compress[j] - r.remove[j])))
+            }
+            if (field === r.dc || field === r.db || field === r.ds) {
+                val capacity = ROOT_THICKNESS_KM * area[j] - r.continent[j] - r.basalt[j] - r.sediment[j] -
+                    max(0.0, r.dc[j]) - max(0.0, r.db[j]) - max(0.0, r.ds[j])
+                delta = min(delta, max(0.0, capacity))
+            }
+            field[j] += delta; applied += delta
+            if (field === r.ds) r.dsc[j] += delta * continentalFraction
         }
+        val density = when (field) { rasters[p].dc -> CONTINENT_DENSITY; rasters[p].db -> BASALT_DENSITY; rasters[p].ds -> SEDIMENT_DENSITY; else -> 0.0 }
+        unplacedAdditionMass += max(0.0, amount - applied) * density
+        return applied
     }
 
     private fun collide(dt: Double) {
-        for (i in 0 until count) {
-            if (totalArea[i] <= 1.000001) continue
-            val p = owner[i]
-            if (p < 0) continue
-            var q = -1
-            topology.neighbors(i) { j ->
-                val other = owner[j]
-                if (other >= 0 && other != p && rasters[other].area[i] > if (q < 0) 1e-8 else rasters[q].area[i]) q = other
-            }
-            if (q < 0) continue
-            val (nx, ny) = normal(p, q, i)
-            val speed = closing(plates[p], plates[q], i, nx, ny)
-            if (speed <= 0) { deformationEvents[i] = PlateBoundary.TRANSFORM.ordinal.toByte(); continue }
-            val amount = min(totalArea[i] - 1, min(0.25, 2 * speed * dt / min(dx, dy)))
+        for (edge in boundaryEdges()) {
+            if (edge.speed <= 1e-10) continue
+            val requested = edge.speed * edge.length * dt / (dx * dy)
+            requestedConvergenceArea += requested
+            val (p, q, i, j) = edge
             val a = rasters[p]; val b = rasters[q]
-            // Connected ownership can include a deficit tile with no incoming column yet.
-            if (a.area[i] <= 1e-8) continue
-            if (a.buoyant(i) && b.buoyant(i)) {
-                val share = a.area[i] / (a.area[i] + b.area[i])
-                patch(p, a.compress, i, 0.0, 0.0, amount * share, 300.0)
-                patch(q, b.compress, i, 0.0, 0.0, amount * (1 - share), 300.0)
-                shortenedArea += amount
-                deformationEvents[i] = PlateBoundary.COLLISION.ordinal.toByte()
-                val pair = min(p, q).toLong() shl 32 or max(p, q).toLong()
-                contacts.getOrPut(pair) { Contact() }.shortening += amount
+            if (a.area[i] <= 1e-8 || b.area[j] <= 1e-8) continue
+            val contact = contacts.getOrPut(pairKey(p, q)) { Contact() }
+            if (edge.type == PlateBoundary.COLLISION) {
+                val applied = patch(p, a.compress, i, 0.0, 0.0, requested * 0.5, 300.0) +
+                    patch(q, b.compress, j, 0.0, 0.0, requested * 0.5, 300.0)
+                contact.shortening += applied
+                contact.recentShortening += applied
             } else {
-                val contact = contacts.getOrPut(pairKey(p, q)) { Contact() }
-                contact.initialized = true
-                val sub = if ((contact.subducting == p || contact.subducting == q) &&
-                    !rasters[contact.subducting].buoyant(i)) contact.subducting else subductingPlate(p, q, i, i)
-                contact.subducting = sub
-                contact.spreading = false
+                val sub = subductingPlate(p, q, i, j)
                 val over = if (sub == p) q else p
+                val tile = if (sub == p) i else j; val upperTile = if (sub == p) j else i
                 val r = rasters[sub]; val upper = rasters[over]
-                val removed = min(amount, r.area[i] * 0.5)
-                val fraction = removed / r.area[i]
-                r.remove[i] += removed
-                subductedArea += removed
-                contact.slabDepth = min(700.0, contact.slabDepth + removed * dx * dy / max(max(dx, dy), contact.length))
+                val receivingArea = max(0.0, upper.area[upperTile] - upper.remove[upperTile] - upper.compress[upperTile])
+                val removed = min(requested, min(receivingArea * 0.5, max(0.0, r.area[tile] * 0.5 - r.remove[tile] - r.compress[tile])))
+                if (removed <= 0) continue
+                if (!contact.subductionObserved) { contact.subductionYears += dt; contact.subductionObserved = true }
+                val fraction = removed / r.area[tile]
+                r.remove[tile] += removed
+                contact.slabDepth = min(700.0, contact.slabDepth + removed * dx * dy / max(edge.length, contact.length))
                 val direction = if (sub == p) 1 else -1
-                // Accreted fractions return to the margin; the remainder enters the mantle ledger.
-                patch(over, upper.dc, i, nx * direction * 60, ny * direction * 60, r.continent[i] * fraction * 0.90, 120.0)
-                patch(over, upper.ds, i, nx * direction * 60, ny * direction * 60, r.sediment[i] * fraction * 0.50, 120.0)
-                patch(over, upper.dsc, i, nx * direction * 60, ny * direction * 60, r.sedimentContinent[i] * fraction * 0.50, 120.0)
-                mantleRecycledMass -= fraction * (r.continent[i] * 0.90 * CONTINENT_DENSITY + r.sediment[i] * 0.50 * SEDIMENT_DENSITY)
-                val basaltMass = r.basalt[i] * fraction * BASALT_DENSITY
-                val newContinent = basaltMass * 0.15 / CONTINENT_DENSITY
-                val newBasalt = basaltMass * 0.25 / BASALT_DENSITY
-                patch(over, upper.dc, i, nx * direction * 220, ny * direction * 220, newContinent, 150.0)
-                patch(over, upper.db, i, nx * direction * 220, ny * direction * 220, newBasalt, 150.0)
-                mantleAddedMass += basaltMass * 0.40
-                deformationEvents[i] = PlateBoundary.SUBDUCTION.ordinal.toByte()
-                val tx = (i % width + 0.5) * dx - nx * direction * 100
-                val ty = (i / width + 0.5) * dy - ny * direction * 100
-                val radius = max(80.0, min(dx, dy) * 0.55)
-                for (oy in -2..2) for (ox in -2..2) {
-                    val y = floor(ty / dy).toInt() + oy
-                    val x = floor(tx / dx).toInt() + ox
-                    val distance = hypot((x + 0.5) * dx - tx, (y + 0.5) * dy - ty)
-                    val j = worldIndex(x, y, width, height)
-                    if (!rasters[over].buoyant(j)) trench[j] = min(trench[j], -3 * exp(-0.5 * (distance / radius).pow(2)))
-                }
+                val nx = edge.nx * direction; val ny = edge.ny * direction
+                val accretedC = patch(over, upper.dc, upperTile, nx * 60, ny * 60, r.continent[tile] * fraction * 0.90, 120.0)
+                val provenance = if (r.sediment[tile] > 0) r.sedimentContinent[tile] / r.sediment[tile] else 0.0
+                val accretedS = patch(over, upper.ds, upperTile, nx * 60, ny * 60, r.sediment[tile] * fraction * 0.50, 120.0, provenance)
+                val accretedSc = accretedS * provenance
+                val accretedMass = accretedC * CONTINENT_DENSITY + accretedS * SEDIMENT_DENSITY
+                recycle(-accretedC, 0.0, -accretedS, -accretedSc); capturedMass += accretedMass
+                if (accretedMass > 0) captureTransfers++
+                val maturity = 1 - exp(-contact.subductionYears / 2_000_000)
+                val basaltMass = r.basalt[tile] * fraction * BASALT_DENSITY * maturity
+                val addedC = patch(over, upper.dc, upperTile, nx * 120, ny * 120, basaltMass * 0.15 / CONTINENT_DENSITY, 100.0)
+                val addedB = patch(over, upper.db, upperTile, nx * 120, ny * 120, basaltMass * 0.25 / BASALT_DENSITY, 100.0)
+                addition(addedC, addedB)
             }
         }
     }
 
-    private data class Birth(val plate: Int, val i: Int, val area: Double, val continent: Double, val basalt: Double)
+    private data class Birth(val plate: Int, val x: Double, val y: Double, val area: Double, val continent: Double, val basalt: Double)
 
-    private fun fillGaps() {
-        // A finite planet: new area replaces consumed/shortened area, not interpolation undershoots.
-        val budget = max(0.0, count - plates.filter { it.active }.sumOf { it.area })
-        if (budget < 1e-8) return
-        val opening = DoubleArray(count)
-        val opposite = IntArray(count) { -1 }
-        for (i in 0 until count) {
-            val p = owner[i]
-            if (p < 0) continue
-            topology.neighbors(i) { j ->
-                val q = owner[j]
-                if (q >= 0 && q != p) {
-                    val nx = longitudeKm((j % width - i % width) * dx) / dx
-                    val ny = latitudeKm((j / width - i / width) * dy) / dy
-                    val speed = -closing(plates[p], plates[q], i, nx, ny)
-                    if (speed > opening[i] && rasters[q].area[j] > 0.05) {
-                        opening[i] = speed; opposite[i] = j
-                    }
-                }
-            }
-        }
-        var gapSum = 0.0
-        for (i in 0 until count) if (opposite[i] >= 0) gapSum += max(0.0, 1 - totalArea[i])
-        if (gapSum < 1e-10) return
-        val fraction = min(1.0, budget / gapSum)
+    private fun fillGaps(dt: Double) {
+        var budget = max(0.0, count - plates.filter { it.active }.sumOf { it.area })
         val births = ArrayList<Birth>()
-        for (i in 0 until count) {
-            val j = opposite[i]
-            if (j < 0) continue
-            val area = max(0.0, 1 - totalArea[i]) * fraction
-            if (area < 1e-8) continue
-            val p = owner[i]; val q = owner[j]
-            val r = rasters[p]; val other = rasters[q]
-            var continent = 0.0
-            val thickness = min(r.continent[i] / max(1e-12, r.area[i]), other.continent[j] / max(1e-12, other.area[j]))
-            if (r.buoyant(i) && other.buoyant(j) && thickness > 12) {
-                val availableP = max(0.0, r.continent[i] + min(0.0, r.dc[i])) * 0.2
-                val availableQ = max(0.0, other.continent[j] + min(0.0, other.dc[j])) * 0.2
-                continent = min(area * thickness * 0.8, 2 * min(availableP, availableQ))
-                r.dc[i] -= continent * 0.5; other.dc[j] -= continent * 0.5
-                if (continent > 0) { deformationEvents[i] = PlateBoundary.RIFT.ordinal.toByte(); riftArea += area }
-            }
-            val basalt = if (continent > 0) 0.0 else area * 7
-            if (basalt > 0) {
-                mantleAddedMass += basalt * BASALT_DENSITY; oceanCreatedArea += area
-                deformationEvents[i] = PlateBoundary.SPREADING.ordinal.toByte()
-            }
-            births += Birth(p, i, area, continent, basalt)
+        val openingBatchArea = 1.0 // Two half-tile parcels; initial parcels each have one tile of area.
+        val openings = LinkedHashMap<Long, MutableList<BoundaryEdge>>()
+        for (edge in boundaryEdges()) {
+            if (edge.speed >= -1e-10) continue
+            requestedDivergenceArea += -edge.speed * edge.length * dt / (dx * dy)
+            openings.getOrPut(pairKey(edge.p, edge.q)) { ArrayList() }.add(edge)
         }
-        // Withdraw stretched continental rock before adding its new, thinner columns.
+        for ((key, contact) in contacts) if (key !in openings) contact.openingCredit = 0.0
+        for ((key, edges) in openings) {
+            val contact = contacts.getOrPut(key) { Contact() }
+            var flux = 0.0
+            val cumulative = DoubleArray(edges.size) { index ->
+                flux += -edges[index].speed * edges[index].length
+                flux
+            }
+            contact.openingCredit += flux * dt / (dx * dy)
+            // Batch area requests, never rock. Spatial samples follow current local opening flux.
+            while (min(contact.openingCredit, budget) >= openingBatchArea) {
+                val sample = contact.birthPhase * flux
+                val index = cumulative.binarySearch(sample)
+                val edge = edges[if (index >= 0) index else -index - 1]
+                contact.birthPhase = (contact.birthPhase + 0.6180339887498949) % 1.0
+                val (p, q, i, j) = edge
+                val r = rasters[p]; val other = rasters[q]
+                val area = openingBatchArea
+                var continent = 0.0
+                val supported = r.area[i] > 1e-8 && other.area[j] > 1e-8
+                val thickness = if (supported) min(r.continent[i] / r.area[i], other.continent[j] / other.area[j]) else 0.0
+                if (supported && edge.type == PlateBoundary.RIFT && thickness > 12) {
+                    val availableP = max(0.0, r.continent[i] + min(0.0, r.dc[i])) * 0.2
+                    val availableQ = max(0.0, other.continent[j] + min(0.0, other.dc[j])) * 0.2
+                    continent = min(area * thickness * 0.8, 2 * min(availableP, availableQ))
+                    r.dc[i] -= continent * 0.5; other.dc[j] -= continent * 0.5
+                }
+                val basalt = if (continent > 0) 0.0 else area * 7
+                // The two sides carry equal halves of the new opening strip.
+                val offsetX = edge.nx * area * dx * 0.25
+                val offsetY = edge.ny * area * dy * 0.25
+                births += Birth(p, edge.x - offsetX, edge.y - offsetY, area * 0.5, continent * 0.5, basalt * 0.5)
+                births += Birth(q, edge.x + offsetX, edge.y + offsetY, area * 0.5, continent * 0.5, basalt * 0.5)
+                budget -= area; contact.openingCredit -= area
+            }
+        }
         applyEvents()
-        for (birth in births) addWorld(plates[birth.plate], (birth.i % width + 0.5) * dx,
-            (birth.i / width + 0.5) * dy, birth.area, birth.continent, birth.basalt, 0.0, 0.0, 0.0)
-        // The caller reprojects once after births and resets all accumulators.
+        for (birth in births) {
+            val p = plates[birth.plate]
+            val cell = addWorld(p, birth.x, birth.y, birth.area, birth.continent, birth.basalt, 0.0, 0.0, 0.0)
+            cell.prepare()
+            project(p, cell) { i, w -> rasters[p.id].add(i, cell, w) }
+            p.area += cell.area
+            addition(0.0, birth.basalt)
+            if (birth.basalt > 0) oceanCreatedArea += birth.area else riftArea += birth.area
+        }
     }
 
     private fun addWorld(p: MaterialPlate, x: Double, y: Double, area: Double, c: Double, b: Double, s: Double, age: Double, relief: Double, sedimentContinent: Double = 0.0,
-        weakness: Double = weaknessNoise[worldIndex(floor(x / dx).toInt(), floor(y / dy).toInt(), width, height)]) {
-        val rx = longitudeKm(x - p.x); val ry = latitudeKm(y - p.y)
-        val gx = (p.referenceX + p.cosAngle * rx + p.sinAngle * ry) / dx - 0.5
-        val gy = (p.referenceY - p.sinAngle * rx + p.cosAngle * ry) / dy - 0.5
-        val ix = floor(gx).toInt(); val iy = floor(gy).toInt()
-        val tx = gx - ix; val ty = gy - iy
-        for (oy in 0..1) for (ox in 0..1) {
-            val w = (if (ox == 0) 1 - tx else tx) * (if (oy == 0) 1 - ty else ty)
-            if (w < 1e-12) continue
-            val cell = p.cells.getOrPut(materialKey(ix + ox, iy + oy)) { CrustCell(ix + ox, iy + oy, 0.0, 0.0, 0.0, 0.0, age) }
-            cell.weakness = (cell.weakness * cell.area + weakness * area * w) / max(1e-12, cell.area + area * w)
-            cell.age = (cell.age * cell.area + age * area * w) / max(1e-12, cell.area + area * w)
-            cell.relief = (cell.relief * cell.area + relief * area * w) / max(1e-12, cell.area + area * w)
-            cell.area += area * w; cell.continent += c * w; cell.basalt += b * w; cell.sediment += s * w; cell.sedimentContinent += sedimentContinent * w
-        }
+        weakness: Double = weaknessNoise[worldIndex(floor(x / dx).toInt(), floor(y / dy).toInt(), width, height)]): CrustCell {
+        val (lx, ly) = localPosition(p, x, y)
+        val cell = CrustCell(lx, ly, area, c, b, s, age, relief, weakness)
+        cell.sedimentContinent = sedimentContinent
+        p.cells += cell
+        return cell
     }
 
     private fun spreadRoots() {
-        for (p in plates) if (p.active) for (cell in p.cells.values) {
-            var excess = cell.continent - 70 * cell.area
-            if (excess <= 0) continue
-            // Lateral root flow spreads an orogen instead of clipping height or deleting rock.
-            for (radius in 1..3) for (oy in -radius..radius) for (ox in -radius..radius) {
-                if (excess <= 1e-12 || max(abs(ox), abs(oy)) != radius) continue
-                val next = p.cells[materialKey(cell.x + ox, cell.y + oy)] ?: continue
-                val amount = min(excess, max(0.0, 70 * next.area - next.continent))
-                cell.continent -= amount; next.continent += amount; excess -= amount
+        val before = DoubleArray(7); val nextBefore = DoubleArray(7)
+        // World-space buckets also connect material across a plate-frame cut at either seam.
+        val bucketKm = 400.0
+        val columns = (PLANET_WIDTH_KM / bucketKm).toInt(); val rows = (PLANET_HEIGHT_KM / bucketKm).toInt()
+        val radiusKm = 400.0 + 0.5 * hypot(dx, dy)
+        val span = ceil(radiusKm / bucketKm).toInt()
+        data class Receiver(val plate: MaterialPlate, val cell: CrustCell, val x: Double, val y: Double)
+        var otherBuckets: Map<Int, List<Receiver>>? = null
+        for (p in plates) if (p.active && p.cells.any { it.continent + it.basalt + it.sediment - ROOT_THICKNESS_KM * it.area > 1e-12 }) {
+            val points = p.cells.map { cell ->
+                val (x, y) = worldPosition(p, cell)
+                Triple(cell, wrapPosition(x, PLANET_WIDTH_KM), wrapPosition(y, PLANET_HEIGHT_KM))
+            }
+            val buckets = points.groupBy { worldIndex(floor(it.second / bucketKm).toInt(), floor(it.third / bucketKm).toInt(), columns, rows) }
+            for ((cell, x, y) in points) {
+                var excess = cell.continent + cell.basalt + cell.sediment - ROOT_THICKNESS_KM * cell.area
+                if (excess <= 1e-12) continue
+                fun transfer(nextPlate: MaterialPlate, next: CrustCell) {
+                    val amount = min(excess, max(0.0, ROOT_THICKNESS_KM * next.area - next.continent - next.basalt - next.sediment))
+                    if (amount <= 0) return
+                    materialState(cell, before); materialState(next, nextBefore)
+                    val fraction = amount / (cell.continent + cell.basalt + cell.sediment)
+                    val c = cell.continent * fraction; val b = cell.basalt * fraction
+                    val sediment = cell.sediment * fraction; val provenance = cell.sedimentContinent * fraction
+                    cell.continent -= c; cell.basalt -= b; cell.sediment -= sediment; cell.sedimentContinent -= provenance
+                    next.continent += c; next.basalt += b; next.sediment += sediment; next.sedimentContinent += provenance
+                    updateRaster(p, cell, before); updateRaster(nextPlate, next, nextBefore)
+                    excess -= amount
+                }
+                val bx = floor(x / bucketKm).toInt(); val by = floor(y / bucketKm).toInt()
+                for (oy in -span..span) for (ox in -span..span) {
+                    if (excess <= 1e-12) continue
+                    for ((next, nx, ny) in buckets[worldIndex(bx + ox, by + oy, columns, rows)].orEmpty()) {
+                        if (excess <= 0.0) break
+                        if (hypot(longitudeKm(x - nx), latitudeKm(y - ny)) > radiusKm) continue
+                        transfer(p, next)
+                    }
+                }
+                // A detached fragment can have no receiving material of its own plate nearby.
+                // Physical lateral flow can cross that boundary without changing territory labels.
+                if (excess > 1e-12) {
+                    if (otherBuckets == null) otherBuckets = plates.filter { it.active }.flatMap { plate ->
+                        plate.cells.map { next ->
+                            val (nx, ny) = worldPosition(plate, next)
+                            Receiver(plate, next, wrapPosition(nx, PLANET_WIDTH_KM), wrapPosition(ny, PLANET_HEIGHT_KM))
+                        }
+                    }.groupBy { worldIndex(floor(it.x / bucketKm).toInt(), floor(it.y / bucketKm).toInt(), columns, rows) }
+                    for (oy in -span..span) for (ox in -span..span) {
+                        if (excess <= 1e-12) continue
+                        for (next in otherBuckets[worldIndex(bx + ox, by + oy, columns, rows)].orEmpty()) {
+                            if (excess <= 0.0) break
+                            if (next.plate === p || hypot(longitudeKm(x - next.x), latitudeKm(y - next.y)) > radiusKm) continue
+                            transfer(next.plate, next.cell)
+                        }
+                    }
+                }
             }
         }
     }
@@ -670,20 +763,23 @@ internal class PlateTectonics(private val world: World) {
         val downstream = IntArray(count) { -1 }
         val flux = DoubleArray(count)
         val continentalFlux = DoubleArray(count)
+        // A vanishing CIC tail cannot receive an entire raster catchment's sediment.
+        val surfaceAreaMinimum = 0.01
         for (i in 0 until count) {
             val x = i % width; val y = i / width
             val routed = if (drainage != null && !drainage.isVirtualSpillLink(x, y)) drainage.downstreamTileIndex(x, y) else -1
-            var next = if (routed >= 0 && surface[routed] < surface[i]) routed else i
+            var next = if (routed >= 0 && totalArea[routed] >= surfaceAreaMinimum && surface[routed] < surface[i]) routed else i
             if (next == i) for (oy in -1..1) for (ox in -1..1) {
                 val j = worldIndex(x + ox, y + oy, width, height)
-                if (surface[j] < surface[next]) next = j
+                if (totalArea[j] >= surfaceAreaMinimum && surface[j] < surface[next]) next = j
             }
             if (next != i) downstream[i] = next
-            if (surface[i] <= 0 || next == i || totalArea[i] < 1e-10) continue
+            if (surface[i] <= 0 || next == i || totalArea[i] < surfaceAreaMinimum) continue
             val distance = hypot(longitudeKm((next % width - x) * dx), latitudeKm((next / width - y) * dy))
             val drop = surface[i] - surface[next]
             val slope = drop / max(1.0, distance)
-            val catchment = drainage?.upstreamLandTileCount(x, y)?.toDouble() ?: 1.0
+            val catchment = (drainage?.upstreamLandTileCount(x, y)?.toDouble() ?: 1.0) *
+                dx * dy / ((PLANET_WIDTH_KM / 283) * (PLANET_HEIGHT_KM / 212))
             val rateMeters = 3 * (0.00002 + 0.01 * slope * sqrt(catchment)) *
                 (rain[i] / 1000).coerceIn(0.0, 3.0) * world.settings.erosionStrength
             var volume = min(drop * 0.20, rateMeters * dt / 1000) * totalArea[i]
@@ -705,6 +801,8 @@ internal class PlateTectonics(private val world: World) {
                 if (continent > 0) r.dc[i] -= takeC * r.continent[i] / continent
                 if (basalt > 0) r.db[i] -= takeB * r.basalt[i] / basalt
             }
+            conversion(-takeC, -takeB, (takeC * CONTINENT_DENSITY + takeB * BASALT_DENSITY) / SEDIMENT_DENSITY,
+                takeC * CONTINENT_DENSITY / SEDIMENT_DENSITY)
             continentalFlux[i] += takeC * CONTINENT_DENSITY / SEDIMENT_DENSITY
             flux[i] += loose + (takeC * CONTINENT_DENSITY + takeB * BASALT_DENSITY) / SEDIMENT_DENSITY
         }
@@ -716,13 +814,15 @@ internal class PlateTectonics(private val world: World) {
             if (amount <= 0 || totalArea[i] < 1e-12) continue
             val next = downstream[i]
             val slope = if (next >= 0) (surface[i] - surface[next]) / max(dx, dy) else 0.0
-            val carried = if (next >= 0 && surface[i] > 0) amount * (0.15 + sqrt(max(0.0, slope) * 100)).coerceAtMost(0.90) else 0.0
+            // Export weathered material from active slopes; retaining most as lighter sediment
+            // can raise the source surface through buoyancy despite removing its bedrock.
+            val carried = if (next >= 0 && surface[i] > 0) amount * (0.75 + sqrt(max(0.0, slope) * 100)).coerceAtMost(0.90) else 0.0
             val sc = continentalFlux[i] / amount
             if (next >= 0) { flux[next] += carried; continentalFlux[next] += carried * sc }
             val deposited = amount - carried
             for (p in plates) if (p.active) {
                 val share = deposited * rasters[p.id].area[i] / totalArea[i]
-                rasters[p.id].ds[i] += share; rasters[p.id].dsc[i] += share * sc
+                rasters[p.id].deposit[i] += share; rasters[p.id].depositContinent[i] += share * sc
             }
         }
     }
@@ -730,100 +830,77 @@ internal class PlateTectonics(private val world: World) {
     private fun pairKey(a: Int, b: Int) = (min(a, b).toLong() shl 32) or max(a, b).toLong()
 
     private fun observeContacts(dt: Double) {
+        val memory = exp(-dt / 20_000_000)
+        for (p in plates) if (p.active) {
+            p.extension *= memory; p.stressXX *= memory; p.stressXY *= memory; p.stressYY *= memory
+            p.extensionAdded = 0.0
+        }
         for (contact in contacts.values) contact.seen = false
-        for (i in 0 until count) {
-            val p = owner[i]
-            if (p < 0) continue
-            val x = i % width; val y = i / width
-            for (j in intArrayOf(worldIndex(x + 1, y, width, height), worldIndex(x, y + 1, width, height))) {
-                val q = owner[j]
-                if (q < 0 || p == q) continue
-                contacts.getOrPut(pairKey(p, q)) { Contact() }.seen = true
-                // Boundary opening drives strain even before a visible gap develops.
-                val (nx, ny) = normal(p, q, i)
-                val opening = max(0.0, -closing(plates[p], plates[q], i, nx, ny))
-                val extension = opening * dt / min(dx, dy)
-                for (id in intArrayOf(p, q)) {
-                    val plate = plates[id]
-                    val lx = plate.cosAngle * nx + plate.sinAngle * ny
-                    val ly = -plate.sinAngle * nx + plate.cosAngle * ny
-                    plate.extension += extension * 0.5 / max(1.0, plate.area)
-                    plate.stressXX += lx * lx * extension
-                    plate.stressXY += lx * ly * extension
-                    plate.stressYY += ly * ly * extension
-                }
+        for (contact in contacts.values) {
+            contact.recentShortening = 0.0
+            contact.subductionObserved = false
+            contact.continentalLength = 0.0
+            contact.shortening *= memory
+            contact.length = 0.0; contact.oceanLength = 0.0
+        }
+        for (edge in boundaryEdges()) {
+            val contact = contacts.getOrPut(pairKey(edge.p, edge.q)) { Contact() }
+            contact.seen = true
+            contact.length += edge.length
+            if (!(rasters[edge.p].buoyant(edge.i) && rasters[edge.q].buoyant(edge.j))) contact.oceanLength += edge.length
+            if (edge.type == PlateBoundary.COLLISION && edge.speed > 0.000005) contact.continentalLength += edge.length
+            val extension = max(0.0, -edge.speed) * edge.length * dt / (dx * dy)
+            for (id in intArrayOf(edge.p, edge.q)) {
+                val plate = plates[id]
+                val lx = plate.cosAngle * edge.nx + plate.sinAngle * edge.ny
+                val ly = -plate.sinAngle * edge.nx + plate.cosAngle * edge.ny
+                val strain = extension * 0.5 / max(1.0, plate.area)
+                plate.extension += strain; plate.extensionAdded += strain
+                plate.stressXX += lx * lx * extension
+                plate.stressXY += lx * ly * extension
+                plate.stressYY += ly * ly * extension
             }
         }
+        for (contact in contacts.values) if (contact.oceanLength == 0.0) contact.slabDepth *= exp(-dt / 5_000_000)
+        for (p in plates) if (p.active)
+            p.riftYears = if (p.extensionAdded > dt * 1e-10) p.riftYears + dt else 0.0
     }
 
     private fun evolvePlates(dt: Double) {
+        for (p in plates) if (p.active) p.prepare()
         contacts.entries.removeAll { !it.value.seen || !plates[(it.key ushr 32).toInt()].active || !plates[it.key.toInt()].active }
-        for (contact in contacts.values) contact.duration += dt
-        if (activePlateCount > MIN_PLATES) {
-            val weld = contacts.entries.firstOrNull {
-                val a = plates[(it.key ushr 32).toInt()]; val b = plates[it.key.toInt()]
-                it.value.duration >= 8_000_000 && it.value.shortening >= 0.05 * min(a.area, b.area) && mergeFits(a, b)
-            }
-            if (weld != null) { merge(plates[(weld.key ushr 32).toInt()], plates[weld.key.toInt()]); rasterize() }
+        for ((key, contact) in contacts) {
+            if (!contact.subductionObserved) contact.subductionYears = 0.0
+            val smaller = min(plates[(key ushr 32).toInt()].area, plates[key.toInt()].area)
+            val meaningful = contact.continentalLength >= max(500.0, contact.length * 0.25) && contact.recentShortening > smaller * dt * 1e-11
+            contact.duration = if (meaningful) contact.duration + dt else 0.0
         }
-        val idle = geologicalTime - max(lastDeformation, lastBreakup) >= 12_000_000
-        if (geologicalTime - lastBreakup < 8_000_000 && activePlateCount >= MIN_PLATES) return
+        val weld = contacts.entries.firstOrNull {
+            val a = plates[(it.key ushr 32).toInt()]; val b = plates[it.key.toInt()]
+            it.value.duration >= 30_000_000 && it.value.shortening >= 0.12 * min(a.area, b.area) && mergeFits(a, b)
+        }
+        if (weld != null) { merge(plates[(weld.key ushr 32).toInt()], plates[weld.key.toInt()]); rasterize() }
+        if (geologicalTime - lastBreakup < 30_000_000) return
         val candidates = plates.filter { it.active && it.area >= count * 0.02 &&
-            (idle || activePlateCount < MIN_PLATES || !fits(it, it.angle, 0.8) ||
-                geologicalTime - it.bornAt >= 40_000_000 && it.extension >= 0.12) }
-            .sortedByDescending { (if (!fits(it, it.angle, 0.8)) 1e12 else 0.0) +
-                it.extension * 1e8 + geologicalTime - it.bornAt }
-        for (p in candidates) {
-            if (activePlateCount >= MAX_PLATES) {
-                if (!consolidate(p)) continue
-                rasterize()
-            }
-            if (split(p)) {
-                lastBreakup = geologicalTime
-                if (idle) watchdogBreakups++
-                break
-            }
-        }
+            geologicalTime - it.bornAt >= 80_000_000 && it.riftYears >= 20_000_000 &&
+            it.extension >= 0.20 && it.extensionAdded > 0 }.sortedByDescending { it.extension }
+        for (p in candidates) if (split(p)) { lastBreakup = geologicalTime; break }
     }
 
     private fun mergeFits(a: MaterialPlate, b: MaterialPlate): Boolean {
         var lowX = a.minX; var highX = a.maxX; var lowY = a.minY; var highY = a.maxY
-        for (cell in b.cells.values) {
-            val lx = (cell.x + 0.5) * dx - b.referenceX; val ly = (cell.y + 0.5) * dy - b.referenceY
-            val rx = longitudeKm(b.x + b.cosAngle * lx - b.sinAngle * ly - a.x)
-            val ry = latitudeKm(b.y + b.sinAngle * lx + b.cosAngle * ly - a.y)
-            val x = floor((a.referenceX + a.cosAngle * rx + a.sinAngle * ry) / dx).toInt()
-            val y = floor((a.referenceY - a.sinAngle * rx + a.cosAngle * ry) / dy).toInt()
-            lowX = min(lowX, x - 1); highX = max(highX, x + 1)
-            lowY = min(lowY, y - 1); highY = max(highY, y + 1)
+        for (cell in b.cells) {
+            val (wx, wy) = worldPosition(b, cell)
+            val (x, y) = localPosition(a, wx, wy)
+            lowX = min(lowX, x - dx); highX = max(highX, x + dx)
+            lowY = min(lowY, y - dy); highY = max(highY, y + dy)
         }
-        val x = (highX - lowX + 1) * dx; val y = (highY - lowY + 1) * dy
+        val x = highX - lowX + dx; val y = highY - lowY + dy
         return abs(a.cosAngle) * x + abs(a.sinAngle) * y < PLANET_WIDTH_KM * 0.8 &&
             abs(a.sinAngle) * x + abs(a.cosAngle) * y < PLANET_HEIGHT_KM * 0.8
     }
 
-    private fun consolidate(candidate: MaterialPlate): Boolean {
-        val pairs = contacts.keys.map { plates[(it ushr 32).toInt()] to plates[it.toInt()] }
-        val pair = pairs.minByOrNull { (a, b) ->
-            val oceanA = a.cells.values.sumOf { it.continent } < a.area
-            val oceanB = b.cells.values.sumOf { it.continent } < b.area
-            when {
-                oceanA && oceanB -> min(a.area, b.area)
-                oceanA -> a.area
-                oceanB -> b.area
-                else -> count + a.area + b.area
-            }
-        } ?: return false
-        when {
-            pair.first === candidate -> merge(pair.first, pair.second, true)
-            pair.second === candidate -> merge(pair.second, pair.first, true)
-            pair.first.area >= pair.second.area -> merge(pair.first, pair.second, true)
-            else -> merge(pair.second, pair.first, true)
-        }
-        return true
-    }
-
-    private fun merge(a: MaterialPlate, b: MaterialPlate, consolidation: Boolean = false) {
+    private fun merge(a: MaterialPlate, b: MaterialPlate) {
         val total = max(1e-12, a.area + b.area)
         a.vx = (a.vx * a.area + b.vx * b.area) / total
         a.vy = (a.vy * a.area + b.vy * b.area) / total
@@ -831,31 +908,31 @@ internal class PlateTectonics(private val world: World) {
         a.desiredX = (a.desiredX * a.area + b.desiredX * b.area) / total
         a.desiredY = (a.desiredY * a.area + b.desiredY * b.area) / total
         a.desiredSpin = (a.desiredSpin * a.area + b.desiredSpin * b.area) / total
-        for (cell in b.cells.values) {
-            val lx = (cell.x + 0.5) * dx - b.referenceX; val ly = (cell.y + 0.5) * dy - b.referenceY
-            val x = b.x + b.cosAngle * lx - b.sinAngle * ly; val y = b.y + b.sinAngle * lx + b.cosAngle * ly
-            addWorld(a, x, y, cell.area, cell.continent, cell.basalt, cell.sediment, cell.age, cell.relief, cell.sedimentContinent, cell.weakness)
+        for (cell in b.cells) {
+            val (x, y) = worldPosition(b, cell)
+            changeFrame(a, cell, x, y)
         }
         b.cells.clear(); b.active = false
-        a.extension = 0.0; a.bornAt = geologicalTime
-        a.prepare(width, height)
+        a.extension = 0.0; a.riftYears = 0.0; a.extensionAdded = 0.0; a.bornAt = geologicalTime
+        a.stressXX = 0.0; a.stressXY = 0.0; a.stressYY = 0.0
+        a.separationUntil = 0.0; a.separationX = 0.0; a.separationY = 0.0
+        a.prepare()
         contacts.keys.removeAll { (it ushr 32).toInt() == a.id || it.toInt() == a.id ||
             (it ushr 32).toInt() == b.id || it.toInt() == b.id }
-        event(if (consolidation) "consolidate" else "weld", a.id, b.id)
+        event("weld", a.id, b.id, "sustained continental shortening")
         mergers++
     }
 
     private fun split(p: MaterialPlate): Boolean {
         val theta = if (p.stressXX + p.stressYY > 1e-12) 0.5 * atan2(2 * p.stressXY, p.stressXX - p.stressYY)
-            else if ((p.maxX - p.minX) * dx >= (p.maxY - p.minY) * dy) 0.0 else PI / 2
+            else if (p.maxX - p.minX >= p.maxY - p.minY) 0.0 else PI / 2
         val nx = cos(theta); val ny = sin(theta)
         val ux = p.cosAngle * nx - p.sinAngle * ny; val uy = p.sinAngle * nx + p.cosAngle * ny
-        val cells = p.cells.values.toList()
+        val cells = p.cells.toList()
         val tiles = IntArray(cells.size) { c ->
             val cell = cells[c]
-            val lx = (cell.x + 0.5) * dx - p.referenceX; val ly = (cell.y + 0.5) * dy - p.referenceY
-            worldIndex(floor((p.x + p.cosAngle * lx - p.sinAngle * ly) / dx).toInt(),
-                floor((p.y + p.sinAngle * lx + p.cosAngle * ly) / dy).toInt(), width, height)
+            val (x, y) = worldPosition(p, cell)
+            worldIndex(floor(x / dx).toInt(), floor(y / dy).toInt(), width, height)
         }
         val region = owner.indices.filter { owner[it] == p.id }.sortedBy {
             longitudeKm((it % width + 0.5) * dx - p.x) * ux + latitudeKm((it / width + 0.5) * dy - p.y) * uy
@@ -899,53 +976,35 @@ internal class PlateTectonics(private val world: World) {
         val part = cells.indices.filter { side[tiles[it]] == 1 }.map { cells[it] }
         val vacant = plates.indexOfFirst { !it.active }
         val id = if (vacant >= 0) vacant else plates.size
-        val child = MaterialPlate(id, p.x, p.y, p.vx, p.vy, p.spin, p.referenceX, p.referenceY)
+        val child = MaterialPlate(id, p.x, p.y, p.vx, p.vy, p.spin)
+        child.identity = nextIdentity++
         child.angle = p.angle; child.cosAngle = p.cosAngle; child.sinAngle = p.sinAngle
         child.previousX = p.previousX; child.previousY = p.previousY; child.previousAngle = p.previousAngle
-        for (cell in part) { p.cells.remove(materialKey(cell.x, cell.y)); child.cells[materialKey(cell.x, cell.y)] = cell }
+        p.cells.removeAll(part.toSet()); child.cells.addAll(part)
         for (i in side.indices) if (side[i] == 1) owner[i] = id
         for ((plate, sign) in listOf(p to 1.0, child to -1.0)) {
             plate.desiredX = p.desiredX; plate.desiredY = p.desiredY; plate.desiredSpin = p.desiredSpin
             plate.separationX = sign * 0.00003 * ux; plate.separationY = sign * 0.00003 * uy
             plate.separationUntil = geologicalTime + 20_000_000
             plate.vx += plate.separationX; plate.vy += plate.separationY
-            plate.extension = 0.0; plate.stressXX = 0.0; plate.stressXY = 0.0; plate.stressYY = 0.0
+            plate.extension = 0.0; plate.riftYears = 0.0; plate.extensionAdded = 0.0; plate.stressXX = 0.0; plate.stressXY = 0.0; plate.stressYY = 0.0
             plate.bornAt = geologicalTime
-            plate.prepare(width, height)
+            plate.prepare()
         }
         contacts.keys.removeAll { (it ushr 32).toInt() == p.id || it.toInt() == p.id ||
             (it ushr 32).toInt() == id || it.toInt() == id }
         if (vacant >= 0) plates[vacant] = child else { plates += child; rasters += PlateRaster(count) }
-        event("fracture", p.id, child.id)
+        event("fracture", p.id, child.id, "mature rift under recent extension")
         splits++
         return true
     }
 
     private fun classifyBoundaries() {
         boundaries = ByteArray(count)
-        for (i in 0 until count) {
-            val p = owner[i]
-            if (p < 0) continue
-            val x = i % width; val y = i / width
-            var strongest = -1.0
-            for (j in intArrayOf(worldIndex(x - 1, y, width, height), worldIndex(x, y - 1, width, height))) {
-                val q = owner[j]
-                if (q < 0 || p == q) continue
-                val nx = longitudeKm((j % width - x) * dx) / dx
-                val ny = latitudeKm((j / width - y) * dy) / dy
-                val speed = closing(plates[p], plates[q], i, nx, ny)
-                if (abs(speed) <= strongest) continue
-                strongest = abs(speed)
-                val relative = hypot(plates[p].vx - plates[q].vx, plates[p].vy - plates[q].vy)
-                val type = when {
-                    abs(speed) < max(1e-10, relative * 0.25) -> PlateBoundary.TRANSFORM
-                    speed > 0 && rasters[p].buoyant(i) && rasters[q].buoyant(j) -> PlateBoundary.COLLISION
-                    speed > 0 -> PlateBoundary.SUBDUCTION
-                    rasters[p].buoyant(i) && rasters[q].buoyant(j) -> PlateBoundary.RIFT
-                    else -> PlateBoundary.SPREADING
-                }
-                boundaries[i] = type.ordinal.toByte()
-            }
+        val strongest = DoubleArray(count) { -1.0 }
+        for (edge in boundaryEdges()) if (abs(edge.speed) > strongest[edge.j]) {
+            strongest[edge.j] = abs(edge.speed)
+            boundaries[edge.j] = edge.type.ordinal.toByte()
         }
     }
 
@@ -958,8 +1017,6 @@ internal class PlateTectonics(private val world: World) {
     }
 
     companion object {
-        const val MIN_PLATES = 6
-        const val MAX_PLATES = 10
         const val SPEEDUP = 1000.0
     }
 }
