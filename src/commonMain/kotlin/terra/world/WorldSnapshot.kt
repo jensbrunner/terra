@@ -22,3 +22,7 @@ class WorldSnapshot internal constructor(
     fun changedTerrainIndex(index: Int): Int = terrainChanges[index]
     fun landBiomeSummary(): String = summary
 }
+
+enum class PlateBoundary(val label: String) {
+    NONE("Interior"), COLLISION("Collision"), SUBDUCTION("Subduction"), SPREADING("Spreading"), RIFT("Rift"), TRANSFORM("Transform")
+}

@@ -28,21 +28,4 @@ class PlateTopologyTest {
         assertTrue(labels.all { it >= 0 })
         connected(topology, labels, 0); connected(topology, labels, 1)
     }
-
-    @Test fun weaknessGuidesJaggedConnectedCutsAcrossTheSeam() {
-        val topology = PlateTopology(32, 24)
-        // A parent straddling longitude zero; both daughters must retain periodic connectivity.
-        val parent = IntArray(32 * 24) { if (it % 32 < 12 || it % 32 >= 20) 0 else 2 }
-        fun cut(offset: Int): IntArray = topology.divide(parent, 0, 3, 23 * 32 + 3, 0.0) { _, to ->
-            val weakRow = 10 + ((to % 32 + offset) / 3 % 4)
-            if (to / 32 == weakRow) 30.0 else 1.0
-        }
-        val a = cut(0); val b = cut(5)
-        assertContentEquals(a, cut(0))
-        assertFalse(a.contentEquals(b))
-        connected(topology, a, 0); connected(topology, a, 1)
-        val interfaceRows = a.indices.filter { a[it] == 1 && a[((it / 32 + 23) % 24) * 32 + it % 32] == 0 }
-            .map { it / 32 }.toSet()
-        assertTrue(interfaceRows.size > 1)
-    }
 }

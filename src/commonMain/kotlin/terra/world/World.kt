@@ -69,13 +69,14 @@ class World(
         biomeRevision++
     }
 
-    internal fun applyGeography(elevation: DoubleArray, sourceX: DoubleArray, sourceY: DoubleArray) {
+    internal fun applyGeography(elevation: DoubleArray, vegetationSource: IntArray) {
         val oldTrees = trees.copyOf()
         val oldGrass = grasses.copyOf()
         for (i in cells.indices) {
             val land = elevation[i] >= seaLevel
-            trees[i] = if (land) sampleField(oldTrees, sourceX[i], sourceY[i], width, height) else 0.0
-            grasses[i] = if (land) sampleField(oldGrass, sourceX[i], sourceY[i], width, height) else 0.0
+            val source = vegetationSource[i]
+            trees[i] = if (land && source >= 0) oldTrees[source] else 0.0
+            grasses[i] = if (land && source >= 0) oldGrass[source] else 0.0
             val terrain = when {
                 !land -> Terrain.OCEAN
                 elevation[i] > settings.mountainThreshold -> Terrain.MOUNTAINS
